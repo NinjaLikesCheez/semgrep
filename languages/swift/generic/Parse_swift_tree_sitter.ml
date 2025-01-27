@@ -155,7 +155,7 @@ let map_assignment_and_operator (env : env) (x : CST.assignment_and_operator) =
   | `STAREQ tok -> (Some G.Mult, (* "*=" *) str env tok)
   | `SLASHEQ tok -> (Some G.Div, (* "/=" *) str env tok)
   | `PERCEQ tok -> (Some G.Mod, (* "%=" *) str env tok)
-  | `EQ tok -> (None, (* "=" *) str env tok)
+  | `Equal_sign tok -> (None, (* "=" *) str env tok)
 
 let map_ownership_modifier (env : env) (x : CST.ownership_modifier) =
   (* These have to do with garbage collection and probably do not matter. *)
@@ -249,9 +249,15 @@ let map_member_modifier (env : env) (x : CST.member_modifier) =
 
 let map_try_operator (env : env) (x : CST.try_operator) =
   match x with
-  | `Try tok -> (* "try" *) token env tok
-  | `TryB tok -> (* "try!" *) token env tok
-  | `TryQ tok -> (* "try?" *) token env tok
+  | (tok1, `Fake_try_bang tok) -> (* "try!" *) token env tok
+  | (wild, `Opt_try_op_type opt) ->
+      match opt with
+      | Some try_op_type ->
+          (* Handle try_op_type case *)
+          token env wild (* Use wildcard token as fallback *)
+      | None ->
+          (* Handle no operator case *)
+          token env wild
 
 let map_special_literal (env : env) (x : CST.special_literal) =
   (match x with
@@ -295,6 +301,9 @@ let map_property_modifier (env : env) (x : CST.property_modifier) =
   | `Class tok ->
       (* "class" *)
       G.unhandled_keywordattr (str env tok)
+  | `Dist tok ->
+      (* "distributed" *)
+      G.unhandled_keywordattr (str env tok)
 
 let map_parameter_modifier (env : env) (x : CST.parameter_modifier) =
   (* TODO? I don't think any of these will actually matter.
@@ -311,6 +320,14 @@ let map_parameter_modifier (env : env) (x : CST.parameter_modifier) =
   | `ATau tok ->
       (* "@autoclosure" *)
       G.unhandled_keywordattr (str env tok)
+  | `Param_owne_modi tok ->
+      match tok with
+      | `Borr tok ->
+          (* "borrowing" *)
+          G.unhandled_keywordattr (str env tok)
+      | `Cons tok ->
+          (* "consuming" *)
+          G.unhandled_keywordattr (str env tok)
 
 let map_throws (env : env) (x : CST.throws) : G.attribute =
   match x with
@@ -325,7 +342,11 @@ let map_postfix_unary_operator (env : env) (x : CST.postfix_unary_operator)
   | `DASHDASH tok ->
       G.special (G.IncrDecr (G.Decr, G.Postfix), (* "--" *) token env tok) [ e ]
   | `Bang tok ->
-      G.special (G.Op G.NotNullPostfix, (* bang *) token env tok) [ e ]
+    match tok with
+      | `Bang_custom tok ->
+          G.special (G.Op G.NotNullPostfix, (* bang *) token env tok) [ e ]
+      | `BANG tok ->
+          G.special (G.Op G.NotNullPostfix, (* "!" *) token env tok) [ e ]
 
 let map_locally_permitted_modifier (env : env)
     (x : CST.locally_permitted_modifier) =
@@ -351,13 +372,15 @@ let map_modify_specifier (env : env) ((v1, v2) : CST.modify_specifier) =
   let v2 = (* "_modify" *) str env v2 in
   v2
 
-let map_constructor_function_decl (env : env)
-    ((v1, v2) : CST.constructor_function_decl) =
+let map_init_declaration (env : env)
+    ((modifiers, init_tok_opt, init_tok, bang_quest_opt, type_params_opt,
+      func_params, arrow_opt, throws_opt, type_constraints_opt, body_opt)
+      : CST.init_declaration) =
   (* TODO special-case the constructor somehow? *)
-  let v1 = (* "init" *) str env v1 in
+  let v1 = (* "init" *) str env init_tok in
   (* Bangs won't change the type, so we don't care about them. Question marks will, though. *)
   let is_quest =
-    match v2 with
+    match bang_quest_opt with
     | Some x -> (
         match x with
         | `Quest _tok -> (* "?" *) true
@@ -392,7 +415,9 @@ let map_non_local_scope_modifier (env : env) (x : CST.non_local_scope_modifier)
           | `Priv tok -> (* "private" *) (G.Private, token env tok)
           | `Inte tok -> (* "internal" *) (G.Protected, token env tok)
           | `File tok -> (* "fileprivate" *) (G.Public, token env tok)
-          | `Open tok -> (* "open" *) (G.Public, token env tok))
+          | `Open tok -> (* "open" *) (G.Public, token env tok)
+          | `Pack tok -> (* "package" *) (G.PackageAccess, token env tok)
+          )
       in
       match v2 with
       | Some (_v1TODO, v2, _v3TODO) ->
@@ -410,6 +435,21 @@ let map_parameter_modifiers (env : env) (xs : CST.parameter_modifiers) :
 let map_parameter_modifiers_opt env v : G.attribute list =
   Option.map (map_parameter_modifiers env) v |> List_.optlist_to_list
 
+let map_parameter_ownership_modifier (env : env) (x : CST.parameter_ownership_modifier) =
+  match x with
+  | `Borr tok -> (* "borrowing" *) str env tok
+  | `Cons tok -> (* "consuming" *) str env tok
+
+let map_contextual_simple_identifier (env : env) (x : CST.contextual_simple_identifier) =
+  match x with
+  | `Actor tok -> (* "actor" *) str env tok
+  | `Async tok -> (* "async" *) str env tok
+  | `Each tok -> (* "each" *) str env tok
+  | `Lazy tok -> (* "lazy" *) str env tok
+  | `Repeat tok -> (* "repeat" *) str env tok
+  | `Pack tok -> (* "package" *) str env tok
+  | `Param_owne_modi tok -> map_parameter_ownership_modifier env tok
+
 let map_simple_identifier (env : env) (x : CST.simple_identifier) : G.ident =
   match x with
   | `Pat_88eeeaa tok ->
@@ -417,8 +457,7 @@ let map_simple_identifier (env : env) (x : CST.simple_identifier) : G.ident =
   | `Pat_97d645c tok -> (* pattern `[^\r\n` ]*` *) str env tok
   | `Pat_c332828 tok -> (* pattern \$[0-9]+ *) str env tok
   | `Tok_dollar_pat_88eeeaa tok -> (* tok_dollar_pat_9d0cc04 *) str env tok
-  | `Actor tok -> (* "actor" *) str env tok
-  | `Lazy tok -> (* "lazy" *) str env tok
+  | `Cont_simple_id x -> map_contextual_simple_identifier env x
 
 let map_bound_identifier (env : env) (x : CST.bound_identifier) =
   map_simple_identifier env x
@@ -458,9 +497,15 @@ let map_prefix_unary_operator (env : env) (x : CST.prefix_unary_operator)
   | `PLUS tok ->
       let op = (G.Plus, (* "+" *) token env tok) in
       G.opcall op [ e ]
-  | `Bang tok ->
-      let op = (G.Not, (* bang *) token env tok) in
-      G.opcall op [ e ]
+  | `Bang bang -> (
+      match bang with
+      | `Bang_custom tok ->
+          let op = (G.Not, (* bang *) token env tok) in
+          G.opcall op [ e ]
+      | `BANG tok ->
+          let op = (G.Not, (* "!" *) token env tok) in
+          G.opcall op [ e ]
+    )
   | `AMP tok -> G.Ref ((* "&" *) token env tok, e) |> G.e
   | `TILDE tok ->
       let op = (G.BitNot, (* "~" *) token env tok) in
@@ -528,10 +573,15 @@ let map_referenceable_operator (env : env) (x : CST.referenceable_operator) =
       (* "--" *)
       let s, tok = str env tok in
       ((s, tok), G.Special (G.IncrDecr (G.Decr, G.Postfix), tok))
-  | `Bang tok ->
-      (* bang *)
-      let s, tok = str env tok in
-      ((s, tok), G.Special (G.Op G.Not, tok))
+  | `Bang bang -> (
+      match bang with
+      | `Bang_custom tok ->
+          let s, tok = str env tok in
+          ((s, tok), G.Special (G.Op G.Not, tok))
+      | `BANG tok ->
+          let s, tok = str env tok in
+          ((s, tok), G.Special (G.Op G.Not, tok))
+    )
   | `TILDE tok ->
       (* "~" *)
       let s, tok = str env tok in
@@ -552,6 +602,10 @@ let map_referenceable_operator (env : env) (x : CST.referenceable_operator) =
       (* ">>" *)
       let s, tok = str env tok in
       ((s, tok), G.Special (G.Op G.ASR, tok))
+  | `AMP tok ->
+      (* "&" *)
+      let s, tok = str env tok in
+      ((s, tok), G.Special (G.Op G.BitAnd, tok))
 
 let map_operator_declaration (env : env)
     ((v1, v2, v3, v4, v5) : CST.operator_declaration) : G.stmt =
@@ -1426,10 +1480,16 @@ and map_expression (env : env) (x : CST.expression) : G.expr =
            * it's an optional chain is just discarded when analyzing JS, so this
            * should be fine for now. *)
           v1
+          (* TODO: NinjaLikesCheez - pretty sure async isn't allowed in expressions - maybe in closures?
       | `Async tok ->
           (* In this context, async is just a normal identifier *)
           let id = str env tok in
-          G.N (H2.name_of_id id) |> G.e)
+          G.N (H2.name_of_id id) |> G.e *)
+      |  `Value_param_pack x -> map_value_parameter_pack env x
+      | `Value_pack_expa x -> map_value_pack_expansion env x
+      | `If_stmt x -> G.stmt_to_expr (map_if_statement env x)
+      | `Switch_stmt x -> G.stmt_to_expr (map_switch_statement env x)
+      )
   | `Semg_exp_ellips tok ->
       let tok = (* three_dot_operator_custom *) token env tok in
       G.Ellipsis tok |> G.e
@@ -1448,6 +1508,18 @@ and map_expression (env : env) (x : CST.expression) : G.expr =
        * *)
       if str = "...>" then G.DeepEllipsis (l, e, r) |> G.e
       else raise (Parsing_error.Syntax_error r)
+
+and map_value_pack_expansion (env : env)
+    ((v1, v2) : CST.value_pack_expansion) : G.expr =
+  let v1 = (* "repeat" *) token env v1 in
+  let v2 = map_expression env v2 in
+  G.OtherExpr (("Repeat", v1), [ G.E v2 ]) |> G.e
+
+and map_value_parameter_pack (env : env)
+    ((v1, v2) : CST.value_parameter_pack) : G.expr =
+  let v1 = (* "each" *) token env v1 in
+  let v2 = map_expression env v2 in
+  G.OtherExpr (("Each", v1), [ G.E v2 ]) |> G.e
 
 and map_for_statement (env : env)
     ((v1, v2, v3, v4, v5, v6, v7, v8, v9) : CST.for_statement) =
@@ -1480,11 +1552,19 @@ and map_for_statement (env : env)
   in
   let header =
     let in_tok = (* "in" *) token env v6 in
-    let exp = map_expression env v7 in
+    let exp = map_for_statement_collection env v7 in
     G.ForEach (pat, in_tok, exp)
   in
   let body = map_function_body env v9 in
   G.For (for_tok, header, body) |> G.s
+
+and map_for_statement_collection (env : env) (x : CST.for_statement_collection): G.expr =
+  match x with
+  | `Exp x -> map_expression env x
+  | `For_stmt_await (v1, v2) ->
+      let await_tok = (* "await" *) token env v1 in
+      let exp = map_expression env v2 in
+      G.Await (await_tok, exp) |> G.e
 
 and map_function_body (env : env) (x : CST.function_body) : G.stmt =
   map_block env x
@@ -1614,7 +1694,10 @@ and map_if_condition_sequence_item (env : env)
       G.LetPattern (v1, v2) |> G.e
   | `Exp x -> map_expression env x
   | `Avai_cond (v1, v2, v3, v4, v5) ->
-      let _v1TODO = (* "#available" *) token env v1 in
+      let v1 = match v1 with
+        | `HASH_8da4fa1 tok -> (* "#available" *) token env tok
+        | `HASH_459dd9a tok -> (* "#unavailable" *) token env tok
+      in
       let _lp = (* "(" *) token env v2 in
       let v3 = map_availability_argument env v3 in
       let v4 =
@@ -1752,7 +1835,11 @@ and map_key_path_component (env : env) (x : CST.key_path_component) =
 and map_key_path_postfixes (env : env) (x : CST.key_path_postfixes) =
   match x with
   | `QMARK tok -> (* "?" *) token env tok
-  | `Bang tok -> (* bang *) token env tok
+  | `Bang bang -> (
+      match bang with
+        | `BANG tok -> (* "!" *) token env tok
+        | `Bang_custom tok -> (* bang_custom *) token env tok
+      )
   | `Self tok -> (* "self" *) token env tok
   | `LBRACK_opt_value_arg_rep_COMMA_value_arg_RBRACK (v1, v2, v3) ->
       let lb = (* "[" *) token env v1 in
@@ -2102,11 +2189,14 @@ and map_modifierless_function_declaration_no_body (env : env) ~in_class
     ?(attrs = [])
     ((v1, v2, v3, v4, v5, v6, v7) :
       CST.modifierless_function_declaration_no_body) (body : G.function_body) =
-  let is_quest, v1 =
+  let v1 = map_non_constructor_function_decl env v1 in
+  (* TODO: NinjaLikesCheez.... this smells and I don't understand it - look at it tomorrow
     match v1 with
-    | `Cons_func_decl x -> map_constructor_function_decl env x
-    | `Non_cons_func_decl x -> (false, map_non_constructor_function_decl env x)
-  in
+    | (tok1, `Refe_op op) -> map_referenceable_operator env op
+    | (tok1, `Simple_id id) ->
+        let (name, tok) = map_simple_identifier env id in
+        ((name, tok), G.IdSpecial (G.Op op, tok))
+  in*)
   let v2 = Option.map (map_type_parameters env) v2 in
   let fparams = map_function_value_parameters env v3 in
   let rettype_attrs =
@@ -2126,7 +2216,7 @@ and map_modifierless_function_declaration_no_body (env : env) ~in_class
         let res =
           map_type_with_modifiers env ty (type_constraints @ rettype_attrs)
         in
-        Some (if is_quest then G.TyQuestion (res, G.fake "?") |> G.t else res)
+        Some res
     | None -> None
   in
 

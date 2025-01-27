@@ -1636,6 +1636,7 @@ and keyword_attribute =
   (* Swift *)
   | Throws
   | Rethrows
+  | PackageAccess (* SE-0386 *)
 
 (* By name application in Scala, via => T, in parameter *)
 

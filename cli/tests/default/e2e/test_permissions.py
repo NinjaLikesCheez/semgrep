@@ -1,7 +1,20 @@
+#
+# Copyright (c) 2024-2025 Semgrep Inc.
+#
+# This library is free software; you can redistribute it and/or
+# modify it under the terms of the GNU Lesser General Public License
+# version 2.1 as published by the Free Software Foundation.
+#
+# This library is distributed in the hope that it will be useful, but
+# WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the file
+# LICENSE for more details.
+#
 import os
 import sys
 
 import pytest
+from tests.conftest import skip_on_windows
 from tests.fixtures import RunSemgrep
 
 from semgrep.constants import OutputFormat
@@ -69,6 +82,7 @@ def teardown_workspace() -> None:
 # are checked again by semgrep-core which then excludes it correctly
 @pytest.mark.pysemfail
 @pytest.mark.kinda_slow
+@skip_on_windows  # os.getuid not available on Windows
 def test_permissions_ls(run_semgrep_on_copied_files: RunSemgrep, snapshot):
     # Giving up on running this as root
     skip_test_if_root()
@@ -96,6 +110,7 @@ def test_permissions_ls(run_semgrep_on_copied_files: RunSemgrep, snapshot):
 # project and we expect all skipped targets to be reported with osemgrep
 # and pysemgrep.
 #
+@skip_on_windows  # os.getuid not available on Windows
 def run_test_permissions_scan_full(
     run_semgrep_on_copied_files: RunSemgrep, snapshot, verbose: bool
 ):
@@ -129,6 +144,7 @@ def test_permissions_scan_full_strict(
 # Less strict: don't care about whether skipped files or folders are reported.
 #
 @pytest.mark.kinda_slow
+@skip_on_windows  # os.getuid not available on Windows
 def test_permissions_scan_full_lax(run_semgrep_on_copied_files: RunSemgrep, snapshot):
     run_test_permissions_scan_full(run_semgrep_on_copied_files, snapshot, verbose=False)
 

@@ -11,6 +11,7 @@
 
     foo.py
    ❯❯❱ eqeq-bad
+          ❰❰ Blocking ❱❱
           useless comparison
 
             4┆ a == a
@@ -22,11 +23,13 @@
            11┆ y == y
 
    ❯❯❱ eqeq-four
+          ❰❰ Blocking ❱❱
           useless comparison to 4
 
            19┆ baz == 4
 
     ❯❱ taint-test
+          ❰❰ Blocking ❱❱
           unsafe use of danger
 
            27┆ sink(d2)
@@ -60,11 +63,14 @@
 
   SCAN ENVIRONMENT
   versions    - semgrep <MASKED> on python <MASKED>
-  environment - running in environment gitlab-ci, triggering event is pull_request
+  environment - running in environment gitlab-ci, triggering event is
+                pull_request
 
   CONNECTION
   Initializing scan (deployment=org_name, scan_id=12345)
   Enabled products: Code, Supply Chain
+  Using git merge base detected from environment for diff scans: <MASKED>
+
 
 ┌─────────────┐
 │ Scan Status │
@@ -76,7 +82,17 @@
   Scanning 1 file with 4 python rules.
 
   SUPPLY CHAIN RULES
-  Scanning 1 file.
+
+  Dependency Sources   Resolution Method   Ecosystem   Dependencies   Rules
+ ───────────────────────────────────────────────────────────────────────────
+  poetry.lock          Lockfile            Pypi        3                  1
+  yarn.lock            Skipped             Unknown     -                  -
+
+
+  Analysis   Rules
+ ──────────────────
+  Basic          1
+
   Current version has 15 findings.
 
 Creating git worktree from '<MASKED>' to scan baseline.
@@ -95,18 +111,30 @@ Creating git worktree from '<MASKED>' to scan baseline.
   Scanning 1 file with 4 python rules.
 
   SUPPLY CHAIN RULES
-  Scanning 1 file.
+
+  Dependency Sources   Resolution Method   Ecosystem   Dependencies   Rules
+ ───────────────────────────────────────────────────────────────────────────
+  poetry.lock          Lockfile            Pypi        3                  1
+
+
+  Analysis   Rules
+ ──────────────────
+  Basic          1
+
   Uploading scan results
   Finalizing scan
 
 ┌──────────────┐
 │ Scan Summary │
 └──────────────┘
-Some files were skipped or only partially analyzed.
-  Scan was limited to files changed since baseline commit.
-
+✅ CI scan completed successfully.
+ • Findings: 7 (6 blocking)
+ • Rules run: 7
+ • Targets scanned: 2
+ • Parsed lines: ~100.0%
+ • Scan was limited to files changed since baseline commit.
+ • For a detailed list of skipped files and lines, run semgrep with the --verbose flag
 CI scan completed successfully.
-  Found 7 findings (6 blocking) from 7 rules.
   View results in Semgrep Cloud Platform:
     https://semgrep.dev/orgs/org_name/findings?repo=project_name/project_name&ref=some/branch-name
     https://semgrep.dev/orgs/org_name/supply-chain/vulnerabilities?repo=project_name/project_name&ref=some/branch-name

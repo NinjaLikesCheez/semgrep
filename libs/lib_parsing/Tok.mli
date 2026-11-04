@@ -1,3 +1,15 @@
+(*
+   Copyright (c) 2023-2025 Semgrep Inc.
+
+   This library is free software; you can redistribute it and/or
+   modify it under the terms of the GNU Lesser General Public License
+   version 2.1 as published by the Free Software Foundation.
+
+   This library is distributed in the hope that it will be useful, but
+   WITHOUT ANY WARRANTY; without even the implied warranty of
+   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the file
+   LICENSE for more details.
+*)
 (* Type to represent a token (e.g., an identifier, a keyword).
  * Tok.t is used in many ASTs (including in AST_generic.ml) and CSTs
  * across Semgrep.
@@ -25,11 +37,7 @@
 (* Types *)
 (*****************************************************************************)
 
-type location = {
-  str : string; (* the content of the token starting at pos (e.g., "if") *)
-  pos : Pos.t;
-}
-[@@deriving show, eq, ord, sexp]
+type location = Loc.t [@@deriving show { with_path = false }, eq, ord, sexp]
 
 type t =
   (* Token found in the original file *)
@@ -90,11 +98,12 @@ val tok_of_loc : location -> t
 (* deprecated: TODO used only in Lexer_php.mll *)
 val make : str:string -> file:Fpath.t -> bytepos:int -> t
 
+val of_lexing_position : Lexing.position -> string -> t
+(** Create a tok from a standard lexing position as provided by
+    a lexbuf managed by ocamllex. *)
+
 (* the token will be empty, but its pos will be the beginning of the file *)
 val first_tok_of_file : Fpath.t -> t
-
-(* similar, the location will be empty *)
-val first_loc_of_file : Fpath.t -> location
 
 (* used mainly by tree-sitter based parsers in semgrep.
  * [combine_toks t1 ts] will return a token where t1::ts
@@ -208,15 +217,6 @@ val col_of_tok : t -> int
 val bytepos_of_tok : t -> int
 val file_of_tok : t -> Fpath.t
 
-(* Token positions in loc.pos denote the beginning of a token.
-   Suppose we are interested in having instead the line, column, and charpos
-   of the end of a token.
-   This is something we can do at relatively low cost by going through and
-   inspecting the content of the location, plus the start information.
-   alt: return a Pos.t instead
-*)
-val end_pos_of_loc : location -> int * int * int (* line x col x charpos *)
-
 (*****************************************************************************)
 (* Adjust string *)
 (*****************************************************************************)
@@ -231,19 +231,13 @@ val tok_add_s : string -> t -> t
 val fix_location : (location -> location) -> t -> t
 (** adjust the location in a token *)
 
-val fix_pos : (Pos.t -> Pos.t) -> location -> location
-(** adjust the position in a location *)
-
 val adjust_tok_wrt_base : location -> t -> t
 (** [adjust_tok_wrt_base base_loc tok], where [tok] represents a location
-  * relative to [base_loc], returns the same [tok] but with an absolute
-  * {! location}. This is useful for fixing tokens after
-  * {! Common2.with_tmp_file}. E.g. if [base_loc] points to line 3, and
-  * [tok] points to line 2 (interpreted line 2 starting in line 3), then
-  * the adjusted token will point to line 4. *)
-
-val adjust_loc_wrt_base : location -> location -> location
-(** See [adjust_tok_wrt_base]. *)
+    relative to [base_loc], returns the same [tok] but with an absolute
+    {! location}. This is useful for fixing tokens after
+    {! Common2.with_tmp_file}. E.g. if [base_loc] points to line 3, and
+    [tok] points to line 2 (interpreted line 2 starting in line 3), then
+    the adjusted token will point to line 4. *)
 
 (*****************************************************************************)
 (* Adjust line x col in a location *)

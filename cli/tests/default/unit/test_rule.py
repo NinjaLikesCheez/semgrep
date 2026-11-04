@@ -1,3 +1,15 @@
+#
+# Copyright (c) 2022-2024 Semgrep Inc.
+#
+# This library is free software; you can redistribute it and/or
+# modify it under the terms of the GNU Lesser General Public License
+# version 2.1 as published by the Free Software Foundation.
+#
+# This library is distributed in the hope that it will be useful, but
+# WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the file
+# LICENSE for more details.
+#
 from textwrap import dedent
 
 import pytest
@@ -12,8 +24,7 @@ def create_validator_rule(
     error_action: str = "monitor",
     action: str = "monitor",
 ) -> Rule:
-    # TODO: do something with the config errors?
-    config, config_errors = parse_config_string(
+    result = parse_config_string(
         "testfile",
         dedent(
             f"""
@@ -56,12 +67,12 @@ def create_validator_rule(
         ),
         None,
     )
-    return Rule.from_yamltree(config["testfile"].value["rules"].value[0])
+    return result.rules[0]
 
 
 @pytest.mark.quick
 def test_rule_full_hash_equivalency():
-    config, config_errors = parse_config_string(
+    result = parse_config_string(
         "testfile",
         dedent(
             """
@@ -87,9 +98,7 @@ def test_rule_full_hash_equivalency():
         ),
         None,
     )
-    rule1, rule2, rule3 = (
-        Rule.from_yamltree(tree) for tree in config["testfile"].value["rules"].value
-    )
+    rule1, rule2, rule3 = result.rules
     assert rule1.full_hash == rule2.full_hash
     assert rule1.full_hash != rule3.full_hash
     assert rule2.full_hash != rule3.full_hash

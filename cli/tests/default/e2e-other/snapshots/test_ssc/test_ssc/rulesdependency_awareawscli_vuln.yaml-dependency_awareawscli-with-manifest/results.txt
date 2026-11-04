@@ -4,6 +4,7 @@
 
 === stdout - plain
 {
+  "engine_requested": "OSS",
   "errors": [],
   "paths": {
     "scanned": [
@@ -11,13 +12,14 @@
       "targets/dependency_aware/awscli-with-manifest/awscli_vuln.py"
     ]
   },
+  "profiling_results": [],
   "results": [
     {
       "check_id": "rules.dependency_aware.unconditional-depends-on-only",
       "end": {
         "col": 1,
         "line": 20,
-        "offset": 1
+        "offset": 0
       },
       "extra": {
         "engine_kind": "OSS",
@@ -59,7 +61,7 @@
       "start": {
         "col": 1,
         "line": 20,
-        "offset": 1
+        "offset": 0
       }
     },
     {
@@ -67,7 +69,7 @@
       "end": {
         "col": 1,
         "line": 20,
-        "offset": 1
+        "offset": 0
       },
       "extra": {
         "engine_kind": "OSS",
@@ -109,7 +111,7 @@
       "start": {
         "col": 1,
         "line": 20,
-        "offset": 1
+        "offset": 0
       }
     },
     {
@@ -420,6 +422,7 @@
     }
   ],
   "skipped_rules": [],
+  "time": "<masked in tests>",
   "version": "0.42"
 }
 === end of stdout - plain
@@ -430,17 +433,17 @@
 ┌─────────────┐
 │ Scan Status │
 └─────────────┘
-  Scanning 3 files tracked by git with 0 Code rules, 6 Supply Chain rules:
+  Scanning 3 files tracked by git with 6 Supply Chain rules:
 
 
   CODE RULES
-  Nothing to scan.
+  No code rules to run.
 
   SUPPLY CHAIN RULES
 
-  Ecosystem   Rules   Files   Lockfiles
- ────────────────────────────────────────────────────────────────────────────────────────
-  Pypi            6       1   targets/dependency_aware/awscli-with-manifest/Pipfile.lock
+  Dependency Sources                                           Resolution Method   Ecosystem   Dependencies   Rules
+ ───────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  targets/dependency_aware/awscli-with-manifest/Pipfile.lock   Lockfile            Pypi        11                 6
 
 
   Analysis   Rules
@@ -452,7 +455,12 @@
 ┌──────────────┐
 │ Scan Summary │
 └──────────────┘
-
+✅ Scan completed successfully.
+ • Findings: 8 (6 blocking)
+ • Rules run: 6
+ • Targets scanned: 2
+ • Parsed lines: ~100.0%
+ • No ignore information available
 Ran 6 rules on 2 files: 8 findings.
 
 === end of stderr - plain

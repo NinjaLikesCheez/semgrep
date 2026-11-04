@@ -1,3 +1,15 @@
+(*
+   Copyright (c) 2021-2025 Semgrep Inc.
+
+   This library is free software; you can redistribute it and/or
+   modify it under the terms of the GNU Lesser General Public License
+   version 2.1 as published by the Free Software Foundation.
+
+   This library is distributed in the hope that it will be useful, but
+   WITHOUT ANY WARRANTY; without even the implied warranty of
+   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the file
+   LICENSE for more details.
+*)
 val constant_propagation_and_evaluate_literal :
   ?lang:Lang.t -> AST_generic.expr -> AST_generic.svalue option
 (** Partially evaluate a Generic expression. *)
@@ -26,7 +38,7 @@ val propagate_basic : Lang.t -> AST_generic.program -> unit
  * in which functions are analyzed. Generally will perform better
  * if propagate_basic is called first *)
 val propagate_dataflow_one_function :
-  Lang.t -> IL.fun_cfg (* function CFG *) -> unit
+  Lang.t -> Fun_CFG.t (* function CFG *) -> unit
 
 val propagate_dataflow : Lang.t -> AST_generic.program -> unit
 

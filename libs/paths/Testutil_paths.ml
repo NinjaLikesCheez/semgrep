@@ -1,4 +1,15 @@
-open Printf
+(*
+   Copyright (c) 2024-2025 Semgrep Inc.
+
+   This library is free software; you can redistribute it and/or
+   modify it under the terms of the GNU Lesser General Public License
+   version 2.1 as published by the Free Software Foundation.
+
+   This library is distributed in the hope that it will be useful, but
+   WITHOUT ANY WARRANTY; without even the implied warranty of
+   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the file
+   LICENSE for more details.
+*)
 open Fpath_.Operators
 
 (*****************************************************************************)
@@ -56,12 +67,7 @@ let rec delete_files parent (x : file_tree) =
    Files are deleted automatically.
 *)
 let with_file_trees trees func =
-  let workspace =
-    UTmp.get_temp_dir_name ()
-    (* This is meant only to be used in test code. *)
-    (* nosemgrep: forbid-random *)
-    / sprintf "test-list_files-%i" (Random.bits ())
-  in
+  let workspace = UTmp.get_unique_temp_name ~prefix:"test-list_files" () in
   Unix.mkdir !!workspace 0o777;
   Common.protect
     ~finally:(fun () ->

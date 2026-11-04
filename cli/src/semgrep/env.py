@@ -1,3 +1,15 @@
+#
+# Copyright (c) 2022-2025 Semgrep Inc.
+#
+# This library is free software; you can redistribute it and/or
+# modify it under the terms of the GNU Lesser General Public License
+# version 2.1 as published by the Free Software Foundation.
+#
+# This library is distributed in the hope that it will be useful, but
+# WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the file
+# LICENSE for more details.
+#
 import os
 from pathlib import Path
 from typing import Iterable
@@ -70,6 +82,12 @@ class Env:
 
     # Unique identifier for the managed_scan in semgrep-app
     sms_scan_id: Optional[str] = field(default=EnvFactory("SEMGREP_MANAGED_SCAN_ID"))
+    # Preserve supplied empty values so the backend can distinguish invalid context from absence.
+    job_context: Optional[str] = field()
+
+    @job_context.default
+    def job_context_default(self) -> Optional[str]:
+        return os.getenv("SEMGREP_JOB_CONTEXT")
 
     version_check_url: str = field(
         default=EnvFactory(
@@ -95,6 +113,13 @@ class Env:
 
     upload_findings_timeout: int = field()
 
+    v2_poll_timeout_seconds: int = field()
+    v2_post_max_attempts: int = field()
+    v2_overall_timeout_minutes: int = field()
+
+    claude_project_dir: Optional[str] = field(default=EnvFactory("CLAUDE_PROJECT_DIR"))
+    cursor_project_dir: Optional[str] = field(default=EnvFactory("CURSOR_PROJECT_DIR"))
+
     @version_check_timeout.default
     def version_check_timeout_default(self) -> int:
         value = os.getenv("SEMGREP_VERSION_CHECK_TIMEOUT", "2")
@@ -105,7 +130,12 @@ class Env:
         value = os.getenv("SEMGREP_VERSION_CACHE_PATH")
         if value:
             return Path(value)
-        return Path.home() / ".cache" / "semgrep_version"
+        cache_home = os.getenv("XDG_CACHE_HOME")
+        if cache_home and Path(cache_home).is_dir():
+            parent_dir = Path(cache_home)
+        else:
+            parent_dir = Path.home() / ".cache"
+        return parent_dir / "semgrep_version"
 
     @git_command_timeout.default
     def git_command_timeout_default(self) -> int:
@@ -168,4 +198,19 @@ class Env:
     @upload_findings_timeout.default
     def upload_findings_timeout_default(self) -> int:
         value = os.getenv("SEMGREP_UPLOAD_FINDINGS_TIMEOUT", "300")
+        return int(value)
+
+    @v2_poll_timeout_seconds.default
+    def v2_poll_timeout_seconds_default(self) -> int:
+        value = os.getenv("SEMGREP_V2_POLL_TIMEOUT_SECONDS", "180")
+        return int(value)
+
+    @v2_post_max_attempts.default
+    def v2_post_max_attempts_default(self) -> int:
+        value = os.getenv("SEMGREP_V2_POST_MAX_ATTEMPTS", "3")
+        return int(value)
+
+    @v2_overall_timeout_minutes.default
+    def v2_overall_timeout_minutes_default(self) -> int:
+        value = os.getenv("SEMGREP_V2_OVERALL_TIMEOUT_MINUTES", "9")
         return int(value)

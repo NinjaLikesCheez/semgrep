@@ -1,10 +1,12 @@
 {
+  "engine_requested": "OSS",
   "errors": [],
   "paths": {
     "scanned": [
       "targets/autofix/redundant.py"
     ]
   },
+  "profiling_results": [],
   "results": [
     {
       "check_id": "rules.autofix.replace-ac",
@@ -56,5 +58,6 @@
     }
   ],
   "skipped_rules": [],
+  "time": "<masked in tests>",
   "version": "0.42"
 }

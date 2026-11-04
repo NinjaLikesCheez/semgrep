@@ -1,3 +1,15 @@
+(*
+   Copyright (c) 2021-2025 Semgrep Inc.
+
+   This library is free software; you can redistribute it and/or
+   modify it under the terms of the GNU Lesser General Public License
+   version 2.1 as published by the Free Software Foundation.
+
+   This library is distributed in the hope that it will be useful, but
+   WITHOUT ANY WARRANTY; without even the implied warranty of
+   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the file
+   LICENSE for more details.
+*)
 val is_minified :
   Fpath.t -> (Fpath.t, Semgrep_output_v1_t.skipped_target) result
 (** [is_minified path] returns [Ok path] if the file is not minified, and
@@ -12,14 +24,16 @@ val is_big :
     equal to [max_target_bytes] or [max_target_bytes = -1], and [Error
     skipped_target] if it is larger. *)
 
+val is_binary : Fpath.t -> (Fpath.t, Semgrep_output_v1_t.skipped_target) result
+(** [is_binary path] returns [Ok path] if the file is not binary, and [Error
+    skipped_target] if it is. Source-like files (per [File_type]) are never
+    considered binary; other files are classified by matching magic numbers at
+    the start of the file. *)
+
 val exclude_big_files :
   int -> Fpath.t list -> Fpath.t list * Semgrep_output_v1_t.skipped_target list
 (** [exclude_big_files max_target_bytes paths] will exclude files larger that
     [max_target_bytes]. No files are excluded if [max_target_bytes = -1]*)
-
-(* Detecting and filtering minified files (for Javascript) *)
-val exclude_minified_files :
-  Fpath.t list -> Fpath.t list * Semgrep_output_v1_t.skipped_target list
 
 (*************************************************************************)
 (* Access permission filtering *)

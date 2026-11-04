@@ -1,4 +1,5 @@
 {
+  "engine_requested": "OSS",
   "errors": [
     {
       "code": 0,
@@ -156,6 +157,7 @@
       "targets/version-constraints/x.py"
     ]
   },
+  "profiling_results": [],
   "results": [
     {
       "check_id": "rules.any-version",
@@ -205,5 +207,6 @@
     }
   ],
   "skipped_rules": [],
+  "time": "<masked in tests>",
   "version": "0.42"
 }

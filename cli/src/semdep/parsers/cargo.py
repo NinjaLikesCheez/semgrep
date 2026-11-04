@@ -1,16 +1,27 @@
+#
+# Copyright (c) 2024-2025 Semgrep Inc.
+#
+# This library is free software; you can redistribute it and/or
+# modify it under the terms of the GNU Lesser General Public License
+# version 2.1 as published by the Free Software Foundation.
+#
+# This library is distributed in the hope that it will be useful, but
+# WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the file
+# LICENSE for more details.
+#
 from pathlib import Path
 from typing import Generator
 from typing import List
 from typing import Optional
 
-from semgrep.semgrep_interfaces.semgrep_output_v1 import Cargo
-from semgrep.semgrep_interfaces.semgrep_output_v1 import Ecosystem
+import semgrep.semgrep_interfaces.semgrep_output_v1 as out
+from semgrep import telemetry
 from semgrep.semgrep_interfaces.semgrep_output_v1 import FoundDependency
 from semgrep.semgrep_interfaces.semgrep_output_v1 import Fpath
-from semgrep.semgrep_interfaces.semgrep_output_v1 import Transitivity
-from semgrep.semgrep_interfaces.semgrep_output_v1 import Unknown
 
 
+@telemetry.trace(telemetry.TraceOwner.SSC)
 def parse_cargo(
     lockfile_path: Path, lockfile_text: str, manifest_text: Optional[str]
 ) -> Generator[FoundDependency, None, None]:
@@ -25,10 +36,10 @@ def parse_cargo(
         return FoundDependency(
             package=dep,
             version=version,
-            ecosystem=Ecosystem(Cargo()),
+            ecosystem=out.Ecosystem(out.Cargo()),
             resolved_url=None,
             allowed_hashes=hash,
-            transitivity=Transitivity(Unknown()),
+            transitivity=out.DependencyKind(out.Unknown()),
             manifest_path=None,
             lockfile_path=Fpath(str(lockfile_path)),
             line_number=raw_lines.index(lines[0]) + 1,

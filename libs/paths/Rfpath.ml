@@ -1,3 +1,17 @@
+(* Martin Jambon, Yoann Padioleau
+ *
+ * Copyright (C) 2024-2025 Semgrep Inc.
+ *
+ * This library is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU Lesser General Public License
+ * version 2.1 as published by the Free Software Foundation.
+ *
+ * This library is distributed in the hope that it will be useful, but
+ * WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the file
+ * LICENSE for more details.
+ *)
+
 (*
    Realpath + original user-friendly path
 *)
@@ -29,16 +43,16 @@ let of_string s = s |> Fpath.v |> of_fpath
 let of_strings paths =
   paths
   |> List.partition_map (fun path ->
-         match of_string path with
-         | Ok rpath -> Left rpath
-         | Error msg -> Right (path, msg))
+      match of_string path with
+      | Ok rpath -> Left rpath
+      | Error msg -> Right (path, msg))
 
 let of_fpaths paths =
   paths
   |> List.partition_map (fun fpath ->
-         match of_fpath fpath with
-         | Ok rpath -> Left rpath
-         | Error msg -> Right (fpath, msg))
+      match of_fpath fpath with
+      | Ok rpath -> Left rpath
+      | Error msg -> Right (fpath, msg))
 
 let log_missing_path path msg =
   Log.warn (fun m -> m "Cannot obtain realpath for %S: %s" path msg)
@@ -52,7 +66,7 @@ let of_fpaths_with_warnings fpaths =
   let res, missing = of_fpaths fpaths in
   missing
   |> List.iter (fun (fpath, msg) ->
-         log_missing_path (Fpath.to_string fpath) msg);
+      log_missing_path (Fpath.to_string fpath) msg);
   res
 
 let to_fpath x = x.fpath

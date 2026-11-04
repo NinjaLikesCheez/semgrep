@@ -1,18 +1,15 @@
-(* no exit, no argv
- * TODO: Cap.files_argv, Cap.domain, Cap.thread, Cap.alarm
- *)
-type caps =
-  < Cap.stdout
-  ; Cap.network
-  ; Cap.exec
-  ; Cap.random
-  ; Cap.signal
-  ; Cap.tmp
-  ; Cap.chdir
-  ; Cap.fork
-  ; Cap.time_limit
-  ; Cap.memory_limit >
+(*
+   Copyright (c) 2022-2025 Semgrep Inc.
 
+   This library is free software; you can redistribute it and/or
+   modify it under the terms of the GNU Lesser General Public License
+   version 2.1 as published by the Free Software Foundation.
+
+   This library is distributed in the hope that it will be useful, but
+   WITHOUT ANY WARRANTY; without even the implied warranty of
+   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the file
+   LICENSE for more details.
+*)
 (*
    Parse the semgrep command line, run the requested subcommand, and return
    an exit status.
@@ -24,7 +21,6 @@ type caps =
    Exceptions are caught and turned into an appropriate exit code
    (unless you used --debug).
 *)
-val main : caps -> string array -> Exit_code.t
-
-(* set in semgrep-pro *)
-val hook_semgrep_interactive : (string array -> Exit_code.t) Hook.t
+val main : string array -> Exit_code.t
+val hook_semgrep_publish : (string array -> Exit_code.t) Hook.t
+val hook_semgrep_show : (string array -> Exit_code.t) Hook.t

@@ -1,3 +1,15 @@
+#
+# Copyright (c) 2022-2024 Semgrep Inc.
+#
+# This library is free software; you can redistribute it and/or
+# modify it under the terms of the GNU Lesser General Public License
+# version 2.1 as published by the Free Software Foundation.
+#
+# This library is distributed in the hope that it will be useful, but
+# WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the file
+# LICENSE for more details.
+#
 from typing import Any
 from typing import Iterable
 from typing import Mapping
@@ -22,6 +34,9 @@ class GitlabSastFormatter(base.BaseFormatter):
         ctx: out.FormatContext,
     ) -> str:
         output = base.to_CliOutput(
-            rule_matches, semgrep_structured_errors, cli_output_extra
+            rule_matches,
+            semgrep_structured_errors,
+            cli_output_extra,
+            max_match_context_size=extra.get("max_match_context_size", 0),
         )
         return semgrep.rpc_call.format(out.OutputFormat(out.GitlabSast()), ctx, output)

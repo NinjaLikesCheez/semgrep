@@ -15,6 +15,7 @@
  *)
 open Common
 open Fpath_.Operators
+module Log = Log_commons.Log
 
 (*****************************************************************************)
 (* Prelude *)
@@ -80,11 +81,12 @@ and pl_type =
   | IDL of idl_type
   | MiscPL of string
   | Elixir
+  | Dart
 [@@deriving yojson]
 
 and config_type =
   | Makefile
-  | Dockerfile
+  | Dockerfile (* Dockerfile, Containerfile *)
   (* note: XML is in webpl_type below *)
   | Json
   | Jsonnet
@@ -129,7 +131,7 @@ and media_type = Sound of string | Picture of string | Video of string
  * filenames, so it has to be fast!
  *)
 let file_type_of_file file =
-  let _d, b, e = Filename_.dbe_of_filename_noext_ok !!file in
+  let _d, b, e = Filename_.dbe_of_filename !!file in
   (* extensions are not case sensitive, at least on windows! *)
   let e = String.lowercase_ascii e in
   match e with
@@ -190,6 +192,7 @@ let file_type_of_file file =
   | "mm" ->
       PL (ObjectiveC e)
   | "swift" -> PL Swift
+  | "dart" -> PL Dart
   | "java" -> PL Java
   | "kt" -> PL Kotlin
   | "cs" -> PL Csharp
@@ -271,10 +274,14 @@ let file_type_of_file file =
   | "yml"
   | "yaml" ->
       Config Yaml
-  | "tf" -> Config Terraform
+  | "tf"
+  | "tofu" ->
+      Config Terraform
   | "toml" -> Config Toml
   (* sometimes people use foo.Dockerfile *)
-  | "Dockerfile" -> Config Dockerfile
+  | "Dockerfile"
+  | "Containerfile" ->
+      Config Dockerfile
   | "sql" -> PL (Web Sql)
   | "sqlite" -> PL (Web Sql)
   (* apple stuff ? *)
@@ -402,7 +409,7 @@ let file_type_of_file file =
   | "ex" -> PL Elixir
   | _ when UFile.is_executable file -> Binary e
   | _ when b = "Makefile" || b = "mkfile" || b = "Imakefile" -> Config Makefile
-  | _ when b = "Dockerfile" -> Config Dockerfile
+  | _ when b = "Dockerfile" || b = "Containerfile" -> Config Dockerfile
   | _ when b = "dune" -> Config Sexp
   | _ when b = "README" -> Text "txt"
   | _ when b = "CODEOWNERS" -> Text "txt"
@@ -416,8 +423,17 @@ let file_type_of_file file =
   | _ when String.starts_with "." b && String.ends_with "ignore" b ->
       Config (Ignore b)
   | _ when String.starts_with "." b && String.ends_with "rc" b -> Config (RC b)
-  | _ when UFile.filesize file > 300_000 -> Obj e
-  | _ -> Other e
+  | _ -> (
+      match UFile.filesize file with
+      | Ok n when n > 300_000 -> Obj e
+      | Ok _ -> Other e
+      | Error (code, _func, info) ->
+          Log.warn (fun m ->
+              m
+                "file_type_of_file: unexpected error when reading %s: %s (code \
+                 %s)"
+                !!file info (Unix.error_message code));
+          Other e)
 
 (*****************************************************************************)
 (* Misc *)

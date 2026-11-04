@@ -1,3 +1,15 @@
+(*
+   Copyright (c) 2023-2025 Semgrep Inc.
+
+   This library is free software; you can redistribute it and/or
+   modify it under the terms of the GNU Lesser General Public License
+   version 2.1 as published by the Free Software Foundation.
+
+   This library is distributed in the hope that it will be useful, but
+   WITHOUT ANY WARRANTY; without even the implied warranty of
+   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the file
+   LICENSE for more details.
+*)
 open Common
 module J = JSON
 module E = Core_error
@@ -23,19 +35,19 @@ let json_of_v (v : OCaml.v) =
     | OCaml.VChar v1 -> J.String (spf "'%c'" v1)
     | OCaml.VString v1 -> J.String v1
     | OCaml.VInt i -> J.Int (Int64.to_int i)
-    | OCaml.VTuple xs -> J.Array (List_.map aux xs)
-    | OCaml.VDict xs -> J.Object (List_.map (fun (k, v) -> (k, aux v)) xs)
+    | OCaml.VTuple xs -> J.Array (List.map aux xs)
+    | OCaml.VDict xs -> J.Object (List.map (fun (k, v) -> (k, aux v)) xs)
     | OCaml.VSum (s, xs) -> (
         match xs with
         | [] -> J.String (spf "%s" s)
         | [ one_element ] -> J.Object [ (s, aux one_element) ]
-        | _ :: _ :: _ -> J.Object [ (s, J.Array (List_.map aux xs)) ])
+        | _ :: _ :: _ -> J.Object [ (s, J.Array (List.map aux xs)) ])
     | OCaml.VVar (s, i64) -> J.String (spf "%s_%Ld" s i64)
     | OCaml.VArrow _ -> failwith "Arrow TODO"
     | OCaml.VNone -> J.Null
     | OCaml.VSome v -> J.Object [ ("some", aux v) ]
     | OCaml.VRef v -> J.Object [ ("ref@", aux v) ]
-    | OCaml.VList xs -> J.Array (List_.map aux xs)
+    | OCaml.VList xs -> J.Array (List.map aux xs)
     | OCaml.VTODO _ -> J.String "VTODO"
   in
   aux v
@@ -57,18 +69,9 @@ let try_with_log_exn_and_reraise (file : Fpath.t) f =
 (* Dumpers *)
 (*****************************************************************************)
 
-(* mostly a copy paste of Test_analyze_generic.ml *)
-let dump_il_all (caps : < Cap.stdout >) file =
-  let ast = Parse_target.parse_program file in
-  let lang = Lang.lang_of_filename_exn file in
-  Naming_AST.resolve lang ast;
-  let xs = AST_to_IL.stmt lang (AST_generic.stmt1 ast) in
-  xs |> List.iter (fun stmt -> CapConsole.print caps#stdout (IL.show_stmt stmt))
-[@@action]
-
-let dump_il (caps : < Cap.stdout >) file =
+let dump_il file =
   let module G = AST_generic in
-  let print s = CapConsole.print caps#stdout s in
+  let print s = UConsole.print s in
   let ast = Parse_target.parse_program file in
   let lang = Lang.lang_of_filename_exn file in
   Naming_AST.resolve lang ast;
@@ -87,10 +90,7 @@ let dump_il (caps : < Cap.stdout >) file =
     print s;
     print "==>";
 
-    (* Creating a CFG and throwing it away here so the implicit return
-     * analysis pass may be run in order to mark implicit return nodes.
-     *)
-    let _ = CFG_build.cfg_of_gfdef lang fdef in
+    Implicit_return.mark_implicit_return lang ast;
 
     (* This round, the IL stmts will show return nodes when
      * they were implicit before.
@@ -102,23 +102,28 @@ let dump_il (caps : < Cap.stdout >) file =
   Visit_function_defs.visit report_func_def_with_name ast
 [@@action]
 
-let dump_ext_of_lang (caps : < Cap.stdout >) () =
-  let lang_to_exts =
-    Lang.keys
-    |> List_.map (fun lang_str ->
-           match Lang.of_string_opt lang_str with
-           | Some lang ->
-               lang_str ^ "->" ^ String.concat ", " (Lang.ext_of_lang lang)
-           | None -> "")
-  in
-  CapConsole.print caps#stdout
-    (spf "Language to supported file extension mappings:\n %s"
-       (String.concat "\n" lang_to_exts))
+let pp_il file =
+  let ast = Parse_target.parse_program file in
+  let lang = Lang.lang_of_filename_exn file in
+  Naming_AST.resolve lang ast;
+  Implicit_return.mark_implicit_return lang ast;
+  let xs = AST_to_IL.program lang ast in
+  let output = Pretty_IL.program xs in
+  UConsole.print output
 [@@action]
 
-let dump_equivalences (caps : < Cap.stdout >) file =
-  let xs = Parse_equivalences.parse file in
-  CapConsole.print caps#stdout (Dumper.dump xs)
+let dump_exts_of_lang () =
+  let lang_to_exts =
+    Lang.keys
+    |> List.map (fun lang_str ->
+        match Lang.of_string_opt lang_str with
+        | Some lang ->
+            lang_str ^ "->" ^ String.concat ", " (Lang.exts_of_lang lang)
+        | None -> "")
+  in
+  UConsole.print
+    (spf "Language to supported file extension mappings:\n %s"
+       (String.concat "\n" lang_to_exts))
 [@@action]
 
 let dump_rule (file : Fpath.t) : unit =
@@ -131,24 +136,23 @@ let dump_rule (file : Fpath.t) : unit =
 (* Other non-dumpers actions *)
 (*****************************************************************************)
 
-let prefilter_of_rules file =
-  let cache = Some (Hashtbl.create 101) in
+let prefilter_of_rules ~interfile file =
   match Parse_rule.parse file with
   | Ok rules ->
       let xs =
         rules
-        |> List_.map (fun r ->
-               let pre_opt = Analyze_rule.regexp_prefilter_of_rule ~cache r in
-               let pre_atd_opt =
-                 Option.map Analyze_rule.prefilter_formula_of_prefilter pre_opt
-               in
-               let id = r.Rule.id |> fst in
-               {
-                 Semgrep_prefilter_t.rule_id = Rule_ID.to_string id;
-                 filter = pre_atd_opt;
-               })
+        |> List.map (fun r ->
+            let pre_opt = Prefiltering.File.of_rule ~interfile r in
+            let pre_atd_opt =
+              Option.map Prefiltering.File.to_semgrep_formula pre_opt
+            in
+            let id = r.Rule.id |> fst in
+            {
+              Prefiltering.Semgrep_prefilter_t.rule_id = Rule_ID.to_string id;
+              filter = pre_atd_opt;
+            })
       in
-      let s = Semgrep_prefilter_j.string_of_prefilters xs in
+      let s = Prefiltering.Semgrep_prefilter_j.string_of_prefilters xs in
       UCommon.pr s
   (* TODO: handle parse errors gracefully instead of silently ignoring *)
   | Error _ -> ()
@@ -166,55 +170,55 @@ let sarif_sort (file : Fpath.t) =
       x with
       runs =
         x.runs
-        |> List_.map (fun (r : S.run) ->
-               {
-                 r with
-                 invocations =
-                   r.invocations
-                   |> Option.map
-                        (List_.map (fun (i : S.invocation) ->
-                             {
-                               i with
-                               tool_execution_notifications =
-                                 i.tool_execution_notifications
-                                 |> Option.map
-                                      (List.sort
-                                         (fun
-                                           (a : S.notification)
-                                           (b : S.notification)
-                                         ->
-                                           match
-                                             (a.message.text, b.message.text)
-                                           with
-                                           | Some a1, Some b1 -> compare a1 b1
-                                           | _else_ -> failwith "wrong format"));
-                             }));
-                 results =
-                   r.results
-                   |> Option.map
-                        (List.sort (fun (a : S.result) (b : S.result) ->
-                             match (a.fingerprints, b.fingerprints) with
-                             | ( Some [ ("matchBasedId/v1", a1) ],
-                                 Some [ ("matchBasedId/v1", b1) ] ) ->
-                                 compare a1 b1
-                             | _else_ -> failwith "wrong format"));
-                 tool =
-                   {
-                     r.tool with
-                     driver =
-                       {
-                         r.tool.driver with
-                         rules =
-                           r.tool.driver.rules
-                           |> Option.map
-                                (List.sort
-                                   (fun
-                                     (a : S.reporting_descriptor)
-                                     (b : S.reporting_descriptor)
-                                   -> compare a.id b.id));
-                       };
-                   };
-               });
+        |> List.map (fun (r : S.run) ->
+            {
+              r with
+              invocations =
+                r.invocations
+                |> Option.map
+                     (List.map (fun (i : S.invocation) ->
+                          {
+                            i with
+                            tool_execution_notifications =
+                              i.tool_execution_notifications
+                              |> Option.map
+                                   (List.sort
+                                      (fun
+                                        (a : S.notification)
+                                        (b : S.notification)
+                                      ->
+                                        match
+                                          (a.message.text, b.message.text)
+                                        with
+                                        | Some a1, Some b1 -> compare a1 b1
+                                        | _else_ -> failwith "wrong format"));
+                          }));
+              results =
+                r.results
+                |> Option.map
+                     (List.sort (fun (a : S.result) (b : S.result) ->
+                          match (a.fingerprints, b.fingerprints) with
+                          | ( Some [ ("matchBasedId/v1", a1) ],
+                              Some [ ("matchBasedId/v1", b1) ] ) ->
+                              compare a1 b1
+                          | _else_ -> failwith "wrong format"));
+              tool =
+                {
+                  r.tool with
+                  driver =
+                    {
+                      r.tool.driver with
+                      rules =
+                        r.tool.driver.rules
+                        |> Option.map
+                             (List.sort
+                                (fun
+                                  (a : S.reporting_descriptor)
+                                  (b : S.reporting_descriptor)
+                                -> compare a.id b.id));
+                    };
+                };
+            });
     }
   in
   let str = Sarif.Sarif_v_2_1_0_j.string_of_sarif_json_schema x in

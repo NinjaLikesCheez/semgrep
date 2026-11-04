@@ -81,54 +81,47 @@
  *)
 
 (*****************************************************************************)
-(* Helpers *)
-(*****************************************************************************)
-let eprint_experimental_windows (cap : Cap.Console.stderr) : unit =
-  let epr = CapConsole.eprint cap in
-  epr "!!!This is an experimental version of semgrep for Windows.!!!";
-  epr "!!!Not all features may work. In case of problems, report here:!!!";
-  epr "!!!https://github.com/semgrep/semgrep/issues/1330!!!";
-  ()
-
-(*****************************************************************************)
 (* Entry point *)
 (*****************************************************************************)
 
-(* We currently use the same binary for semgrep-core and osemgrep (and now
- * also for semgrep for windows). See 'make core' and './dune' install section.
- * We use the argv[0] trick below to decide whether the user wants the
- * semgrep-core or osemgrep (or semgrep) behavior.
+(* Setup obackward for nice segfaults. This must run as early as possible so
+ * that even crashes during the rest of the initialization get a backtrace.
+ * Note that obackward must stay out of library code (e.g., commons) so that
+ * other binaries linking those libraries do not pull in its C++ stubs,
+ * which previously caused linking errors.
  *)
 let () =
-  Cap.main (fun (caps : Cap.all_caps) ->
-      let argv = CapSys.argv caps#argv in
-      let argv0 =
-        (* remove the possible ".exe" extension for Windows and ".bc" *)
-        Fpath.v argv.(0) |> Fpath.base |> Fpath.rem_ext |> Fpath.to_string
-      in
-      match argv0 with
-      (* osemgrep!! *)
-      | "osemgrep"
-      (* in the long term (and in the short term on windows) we want to ship
-       * osemgrep as the default "semgrep" binary, without any
-       * wrapper script such as cli/bin/semgrep around it.
-       *)
-      | "semgrep" ->
-          let exit_code =
-            match argv0 with
-            | "semgrep" ->
-                eprint_experimental_windows caps#stderr;
-                (* adding --experimemtal so we don't default back to pysemgrep *)
-                CLI.main
-                  (caps :> CLI.caps)
-                  (Array.append argv [| "--experimental" |])
-            | _else_ -> CLI.main (caps :> CLI.caps) argv
-          in
-          if not (Exit_code.Equal.ok exit_code) then
-            Logs.info (fun m ->
-                m "Error: %s\nExiting with error status %i: %s\n%!"
-                  exit_code.description exit_code.code
-                  (String.concat " " (Array.to_list argv)));
-          CapStdlib.exit caps#exit exit_code.code
-      (* legacy semgrep-core *)
-      | _else_ -> Core_CLI.main caps argv)
+  match Backward.register () with
+  | Error e ->
+      prerr_string e;
+      prerr_newline ();
+      flush stderr
+  | Ok () -> ()
+
+(* We currently use the same binary for semgrep-core and osemgrep. See 'make
+ * core' and './dune' install section. We use the argv[0] trick below to decide
+ * whether the user wants the semgrep-core or osemgrep behavior. *)
+let () =
+  Pyro_caml_instruments.maybe_with_memprof_sampler @@ fun () ->
+  let argv = Sys.argv in
+  let argv0 =
+    (* remove the possible ".exe" extension for Windows and ".bc" *)
+    Fpath.v argv.(0) |> Fpath.base |> Fpath.rem_ext |> Fpath.to_string
+  in
+  match argv0 with
+  (* osemgrep!! *)
+  | "osemgrep" ->
+      let exit_code = CLI.main argv in
+      if not (Exit_code.Equal.ok exit_code) then
+        Logs.info (fun m ->
+            m "Error: %s\nExiting with error status %i: %s\n%!"
+              exit_code.description exit_code.code
+              (String.concat " " (Array.to_list argv)));
+      Stdlib.exit exit_code.code
+  (* legacy semgrep-core *)
+  | _else_ ->
+      (* Added as part of the upgrade to OCaml 5. Under our typical workloads, this
+       * appears to yield similar performance to the default value of space_overhead
+       * under OCaml 4. *)
+      Gc.set { (Gc.get ()) with space_overhead = 40 };
+      Core_CLI.main argv

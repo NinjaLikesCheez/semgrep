@@ -1,9 +1,23 @@
+(*
+   Copyright (c) 2024-2025 Semgrep Inc.
+
+   This library is free software; you can redistribute it and/or
+   modify it under the terms of the GNU Lesser General Public License
+   version 2.1 as published by the Free Software Foundation.
+
+   This library is distributed in the hope that it will be useful, but
+   WITHOUT ANY WARRANTY; without even the implied warranty of
+   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the file
+   LICENSE for more details.
+*)
 (* internal only *)
 type conf = {
   merge_partial_results_dir : Fpath.t option;
   merge_partial_results_output : Fpath.t option;
   validate_partial_results_expected : Fpath.t option;
   validate_partial_results_actual : Fpath.t option;
+  upload_partial_results : Fpath.t option;
+  upload_partial_results_scan_id : int option;
 }
 [@@deriving show]
 
@@ -13,6 +27,11 @@ let hook_pro_read_and_merge_partial_scan_results :
 
 let hook_pro_read_and_validate_partial_scan_results :
     (expected:Fpath.t -> actual:Fpath.t -> bool) option Hook.t =
+  Hook.create None
+
+let hook_pro_read_and_upload_partial_scan_results :
+    (Auth.token -> scan_id:int -> partial_results:Fpath.t -> bool) option Hook.t
+    =
   Hook.create None
 
 let maybe_merge_partial_scan_results_then_exit (conf : conf) =
@@ -63,4 +82,30 @@ let maybe_validate_partial_scan_results_then_exit (conf : conf) =
           (* Abusing exit_code_exn for short circuiting, even for the non-error case. *)
           if read_and_validate_partial_scan_results expected actual then
             Error.exit_code_exn (Exit_code.ok ~__LOC__)
+          else Error.exit_code_exn (Exit_code.fatal ~__LOC__))
+
+let maybe_upload_partial_scan_results_then_exit (token : Auth.token)
+    (conf : conf) =
+  match (conf.upload_partial_results, conf.upload_partial_results_scan_id) with
+  | Some _, None
+  | None, Some _ ->
+      Logs.err (fun m ->
+          m
+            "Both or none of --x-upload_partial_scan_results and \
+             --x-upload_partial_scan_results_scan_id must be present.");
+      Error.exit_code_exn (Exit_code.fatal ~__LOC__)
+  | None, None -> ()
+  | Some partial_results, Some scan_id -> (
+      match Hook.get hook_pro_read_and_upload_partial_scan_results with
+      | None ->
+          Logs.err (fun m ->
+              m
+                "You have requested a setting that requires the pro engine, \
+                 but do not have the pro engine installed.");
+          Error.exit_code_exn (Exit_code.fatal ~__LOC__)
+      | Some read_and_upload_partial_scan_results ->
+          (* Abusing exit_code_exn for short circuiting, even for the non-error case. *)
+          if
+            read_and_upload_partial_scan_results token ~scan_id ~partial_results
+          then Error.exit_code_exn (Exit_code.ok ~__LOC__)
           else Error.exit_code_exn (Exit_code.fatal ~__LOC__))

@@ -122,7 +122,6 @@
         "pattern_hash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
       },
       "sca_info": {
-        "reachable": false,
         "reachability_rule": false,
         "sca_finding_schema": 20220913,
         "dependency_match": {
@@ -142,7 +141,8 @@
             "children": []
           },
           "lockfile": "poetry.lock"
-        }
+        },
+        "reachable": false
       },
       "engine_kind": "OSS"
     },
@@ -526,9 +526,6 @@
         "code_hash": "d2c95171288a258009c5187392c5e2122e2640e0431af8b1cad77d5b403ed850",
         "pattern_hash": "d2c95171288a258009c5187392c5e2122e2640e0431af8b1cad77d5b403ed850"
       },
-      "fixed_lines": [
-        "    (y == 2)  # nosemgrep"
-      ],
       "validation_state": "NO_VALIDATOR",
       "engine_kind": "OSS"
     },
@@ -627,6 +624,7 @@
     "supply-chain1",
     "supply-chain2"
   ],
+  "skipped_paths": [],
   "contributions": [
     {
       "commit_hash": "sanitized",

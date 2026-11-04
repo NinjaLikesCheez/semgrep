@@ -34,8 +34,6 @@ module Log = Log_commons.Log
 (* Globals and constants *)
 (*****************************************************************************)
 
-let follow_symlinks = ref false
-
 let vcs_re =
   "(^((\\.hg)|(CVS)|(\\.git)|(_darcs)|(\\.svn))$)|(.*\\.git_annot$)|(.*\\.marshall$)"
   |> Re.Posix.re |> Re.compile
@@ -47,7 +45,7 @@ let vcs_re =
 module Legacy = struct
   let cat file =
     let acc = ref [] in
-    let chan = UStdlib.open_in_bin file in
+    let chan = Stdlib.open_in_bin file in
     try
       while true do
         acc := Common.input_text_line chan :: !acc
@@ -77,30 +75,35 @@ module Legacy = struct
    unclear.
 *)
   let read_file ?(max_len = max_int) path =
-    if !jsoo then (
-      let ic = UStdlib.open_in_bin path in
-      let s = really_input_string ic (in_channel_length ic) in
-      close_in ic;
-      s)
-    else
-      let buf_len = 4096 in
-      let extbuf = Buffer.create 4096 in
-      let buf = Bytes.create buf_len in
-      let rec loop fd =
-        match Unix.read fd buf 0 buf_len with
-        | 0 -> Buffer.contents extbuf
-        | num_bytes ->
-            assert (num_bytes > 0);
-            assert (num_bytes <= buf_len);
-            Buffer.add_subbytes extbuf buf 0 num_bytes;
-            if Buffer.length extbuf >= max_len then Buffer.sub extbuf 0 max_len
-            else loop fd
-      in
-      let fd = UUnix.openfile path [ Unix.O_RDONLY ] 0 in
-      Common.protect ~finally:(fun () -> Unix.close fd) (fun () -> loop fd)
+    let buf_len = 4096 in
+    let extbuf = Buffer.create 4096 in
+    let buf = Bytes.create buf_len in
+    let rec loop fd =
+      match Unix.read fd buf 0 buf_len with
+      | 0 -> Buffer.contents extbuf
+      | num_bytes ->
+          assert (num_bytes > 0);
+          assert (num_bytes <= buf_len);
+          Buffer.add_subbytes extbuf buf 0 num_bytes;
+          if Buffer.length extbuf >= max_len then Buffer.sub extbuf 0 max_len
+          else loop fd
+      | exception Unix.Unix_error (Unix.EINTR, _, _) -> loop fd
+    in
+    let rec open_with_retry path =
+      (* Temporary files created using Python's [tempfile.NamedTemporaryFiles]
+         on Windows enables the [FILE_SHARE_DELETE] sharing mode. Files that
+         have open handles with the [FILE_SHARE_DELETE] sharing mode can only
+         be re-opened in that mode. To make sure we won't run into problems
+         opening the file, we add the [O_SHARE_DELETE] flag when opening all
+         files. *)
+      try Unix.openfile path [ Unix.O_RDONLY; Unix.O_SHARE_DELETE ] 0 with
+      | Unix.Unix_error (Unix.EINTR, _, _) -> open_with_retry path
+    in
+    let fd = open_with_retry path in
+    Common.protect ~finally:(fun () -> Unix.close fd) (fun () -> loop fd)
 
   let write_file ~file s =
-    let chan = UStdlib.open_out_bin file in
+    let chan = Stdlib.open_out_bin file in
     output_string chan s;
     close_out chan
 
@@ -108,7 +111,7 @@ module Legacy = struct
   let (with_open_outfile :
         string (* filename *) -> ((string -> unit) * out_channel -> 'a) -> 'a) =
    fun file f ->
-    let chan = UStdlib.open_out_bin file in
+    let chan = Stdlib.open_out_bin file in
     let xpr s = output_string chan s in
     unwind_protect
       (fun () ->
@@ -117,9 +120,18 @@ module Legacy = struct
         res)
       (fun _e -> close_out chan)
 
+  (* Temporary files created using Python's [tempfile.NamedTemporaryFiles] on
+     Windows enables the [FILE_SHARE_DELETE] sharing mode. Files that have open
+     handles with the [FILE_SHARE_DELETE] sharing mode can only be re-opened in
+     that mode. To make sure we won't run into problems opening the file, we
+     add the [O_SHARE_DELETE] flag when opening all files. *)
+  let win_safe_open_in_bin file : in_channel =
+    Unix.openfile file [ O_RDONLY; O_SHARE_DELETE ] 0o666
+    |> Unix.in_channel_of_descr
+
   let (with_open_infile : string (* filename *) -> (in_channel -> 'a) -> 'a) =
    fun file f ->
-    let chan = UStdlib.open_in_bin file in
+    let chan = win_safe_open_in_bin file in
     unwind_protect
       (fun () ->
         let res = f chan in
@@ -132,31 +144,35 @@ module Legacy = struct
   (* Directories *)
 
   (** [dir_contents] returns the paths of all regular files that are
- * contained in [dir]. Each file is a path starting with [dir].
+   contained in [dir]. Each file is a path starting with [dir].
   *)
-  let dir_contents dir =
+  let dir_contents ?(strict = false) dir =
     let rec loop result = function
       | f :: fs -> (
-          match f with
-          | f when not (USys.file_exists f) ->
-              Log.warn (fun m -> m "%s does not exist anymore" f);
-              loop result fs
-          | f when USys.is_directory f ->
-              USys.readdir f |> Array.to_list
-              |> List_.map (Filename.concat f)
-              |> List.append fs |> loop result
-          | f -> loop (f :: result) fs)
+          if not (Sys_.file_exists f) then loop result fs
+          else
+            match Sys_.is_directory f with
+            | true ->
+                CapFS.read_dir_entries (Fpath.v f)
+                |> List.map (fun x -> Filename.concat f !!x)
+                |> List.append fs |> loop result
+            | false -> loop (f :: result) fs)
       | [] -> result
     in
+    (* only check the existence of the root, and only in strict mode *)
+    if strict then
+      if not (Sys_.file_exists dir) then
+        invalid_arg
+          (spf "files_of_dirs_or_files_no_vcs_nofilter: %s does not exist" dir);
     loop [] [ dir ]
 
-  let files_of_dirs_or_files_no_vcs_nofilter xs =
+  let files_of_dirs_or_files_no_vcs_nofilter ?strict xs =
     xs
-    |> List_.map (fun x ->
-           if USys.is_directory x then
-             let files = dir_contents x in
-             List.filter (fun x -> not (Re.execp vcs_re x)) files
-           else [ x ])
+    |> List.map (fun x ->
+        if Sys_.is_directory x then
+          let files = dir_contents ?strict x in
+          List.filter (fun x -> not (Re.execp vcs_re x)) files
+        else [ x ])
     |> List_.flatten
 end
 
@@ -192,102 +208,136 @@ let file_kind_of_yojson (yojson : Yojson.Safe.t) =
            "Could not convert to Unix.file_kind expected `String, received %s"
            Yojson.Safe.(to_string json))
 
-let files_of_dirs_or_files_no_vcs_nofilter xs =
-  xs |> Fpath_.to_strings |> Legacy.files_of_dirs_or_files_no_vcs_nofilter
+let files_of_dirs_or_files_no_vcs_nofilter ?strict xs =
+  xs |> Fpath_.to_strings
+  |> Legacy.files_of_dirs_or_files_no_vcs_nofilter ?strict
   |> Fpath_.of_strings
 
 let cat path = Legacy.cat !!path
 let cat_array file = "" :: cat file |> Array.of_list
 let write_file ~file data = Legacy.write_file ~file:!!file data
 let read_file ?max_len path = Legacy.read_file ?max_len !!path
-let with_open_out path func = Legacy.with_open_outfile !!path func
 let with_open_in path func = Legacy.with_open_infile !!path func
 
 let filesize file =
-  if not !Common.jsoo (* this does not work well with jsoo *) then
-    (UUnix.stat !!file).st_size
-    (* src: https://rosettacode.org/wiki/File_size#OCaml *)
-  else
-    let ic = UStdlib.open_in_bin !!file in
-    let i = in_channel_length ic in
-    close_in ic;
-    i
+  match UUnix.stat file with
+  | Ok { st_size; _ } -> Ok st_size
+  | Error e -> Error e
+(* src: https://rosettacode.org/wiki/File_size#OCaml *)
+
+let filesize_exn file =
+  match filesize file with
+  | Ok n -> n
+  | Error (code, _func, info) -> raise (Unix.Unix_error (code, _func, info))
 
 let filemtime file =
-  if !Common.jsoo then failwith "JSOO:filemtime"
-  else (UUnix.stat !!file).st_mtime
+  match UUnix.stat file with
+  | Ok { st_mtime; _ } -> Ok st_mtime
+  | Error (code, _func, info) ->
+      Log.warn (fun m ->
+          m "filemtime: unix error %s (code %s) on %s" (Unix.error_message code)
+            info !!file);
+      Error (code, _func, info)
 
 let is_dir ~follow_symlinks path =
   let stat = if follow_symlinks then UUnix.stat else UUnix.lstat in
-  match (stat !!path).st_kind with
-  | S_DIR -> true
-  | _ -> false
-  | exception UUnix.Unix_error _ -> false
+  match stat path with
+  | Ok { st_kind = S_DIR; _ } -> true
+  | Ok _ -> false
+  | Error (code, _func, info) ->
+      Log.warn (fun m ->
+          m "is_dir: unix error %s (code %s) on %s" (Unix.error_message code)
+            info !!path);
+      false
 
 let is_reg ~follow_symlinks path =
   let stat = if follow_symlinks then UUnix.stat else UUnix.lstat in
-  match (stat !!path).st_kind with
-  | S_REG -> true
-  | _ -> false
-  | exception UUnix.Unix_error _ -> false
+  match stat path with
+  | Ok { st_kind = S_REG; _ } -> true
+  | Ok _ -> false
+  | Error (code, _func, info) ->
+      Log.warn (fun m ->
+          m "is_reg: unix error %s (code %s) on %s" (Unix.error_message code)
+            info !!path);
+      false
 
 let is_dir_or_reg ~follow_symlinks path =
   let stat = if follow_symlinks then UUnix.stat else UUnix.lstat in
-  match (stat !!path).st_kind with
-  | S_DIR
-  | S_REG ->
-      true
-  | _ -> false
-  | exception UUnix.Unix_error _ -> false
+  match stat path with
+  | Ok { st_kind = S_DIR | S_REG; _ } -> true
+  | Ok _ -> false
+  | Error (code, _func, info) ->
+      Log.warn (fun m ->
+          m "is_dir_or_reg: unix error %s (code %s) on %s"
+            (Unix.error_message code) info !!path);
+      false
 
 let is_lnk path =
-  match (UUnix.lstat !!path).st_kind with
-  | S_LNK -> true
-  | _ -> false
-  | exception UUnix.Unix_error _ -> false
+  match UUnix.lstat path with
+  | Ok { st_kind = S_LNK; _ } -> true
+  | Ok _ -> false
+  | Error (code, _func, info) ->
+      Log.warn (fun m ->
+          m "is_lnk: unix error %s (code %s) on %s" (Unix.error_message code)
+            info !!path);
+      false
 
 let is_lnk_or_reg path =
-  match (UUnix.lstat !!path).st_kind with
-  | S_LNK
-  | S_REG ->
-      true
-  | _ -> false
-  | exception UUnix.Unix_error _ -> false
+  match UUnix.lstat path with
+  | Ok { st_kind = S_LNK | S_REG; _ } -> true
+  | Ok _ -> false
+  | Error (code, _func, info) ->
+      Log.warn (fun m ->
+          m "is_lnk_or_reg: unix error %s (code %s) on %s"
+            (Unix.error_message code) info !!path);
+      false
 
 (* This function isn't very useful but we offer it for completeness. *)
 let is_dir_or_lnk path =
-  match (UUnix.lstat !!path).st_kind with
-  | S_LNK
-  | S_DIR ->
-      true
-  | _ -> false
-  | exception UUnix.Unix_error _ -> false
+  match UUnix.lstat path with
+  | Ok { st_kind = S_LNK | S_DIR; _ } -> true
+  | Ok _ -> false
+  | Error (code, _func, info) ->
+      Log.warn (fun m ->
+          m "is_dir_or_lnk: unix error %s (code %s) on %s"
+            (Unix.error_message code) info !!path);
+      false
 
 let is_dir_or_lnk_or_reg path =
-  match (UUnix.lstat !!path).st_kind with
-  | S_DIR
-  | S_LNK
-  | S_REG ->
-      true
-  | _ -> false
-  | exception UUnix.Unix_error _ -> false
+  match UUnix.lstat path with
+  | Ok { st_kind = S_DIR | S_LNK | S_REG; _ } -> true
+  | Ok _ -> false
+  | Error (code, _func, info) ->
+      Log.warn (fun m ->
+          m "is_dir_or_lnk_or_reg: unix error %s (code %s) on %s"
+            (Unix.error_message code) info !!path);
+      false
 
 let is_executable file =
-  let stat = UUnix.stat !!file in
-  let perms = stat.st_perm in
-  stat.st_kind =*= Unix.S_REG && perms land 0o011 <> 0
+  match UUnix.stat file with
+  | Ok { st_kind = Unix.S_REG; st_perm; _ } -> st_perm land 0o011 <> 0
+  | Ok _ -> false
+  | Error (code, _func, info) ->
+      Log.warn (fun m ->
+          m "is_executable: unix error %s (code %s) on %s"
+            (Unix.error_message code) info !!file);
+      false
 
 let rec make_directories dir =
-  try UUnix.mkdir !!dir 0o755 with
+  try Unix.mkdir !!dir 0o755 with
   (* The directory already exists *)
-  | UUnix.Unix_error ((EEXIST | EISDIR), _, _)
+  | Unix.Unix_error ((EEXIST | EISDIR), _, _)
     when is_dir ~follow_symlinks:false dir ->
       ()
   (* parent doesn't exist *)
-  | UUnix.Unix_error (ENOENT, _, _) ->
+  | Unix.Unix_error (ENOENT, _, _) ->
       let parent = Fpath.parent dir in
       make_directories parent;
       make_directories dir
+
+let with_open_out ?(make_ancestors = false) path func =
+  if make_ancestors then make_directories (Fpath.parent path);
+  Legacy.with_open_outfile !!path func
 
 let find_first_match_with_whole_line path ?split:(chr = '\n') =
   Bos.OS.File.with_ic path @@ fun ic term ->
@@ -295,7 +345,7 @@ let find_first_match_with_whole_line path ?split:(chr = '\n') =
   let res = Bytes.create len in
   really_input ic res 0 len;
   let lines = Bytes.split_on_char chr res in
-  let lines = List_.map Bytes.unsafe_to_string lines in
+  let lines = List.map Bytes.unsafe_to_string lines in
   lines |> List.find_opt (fun str -> String_.contains ~term str)
 
 let find_first_match_with_whole_line path ?split term =
@@ -324,10 +374,10 @@ let lines_of_file (start_line, end_line) (file : Fpath.t) :
         try
           Ok
             (line_idx
-            |> List_.map (fun i ->
-                   try arr.(i) with
-                   | Invalid_argument s ->
-                       raise (Invalid_argument (spf "%s on index %d" s i))))
+            |> List.map (fun i ->
+                try arr.(i) with
+                | Invalid_argument s ->
+                    raise (Invalid_argument (spf "%s on index %d" s i))))
         with
         | Invalid_argument s -> Error (spf "lines_of_file: %s" s))
 

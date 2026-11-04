@@ -1,3 +1,15 @@
+#
+# Copyright (c) 2020-2025 Semgrep Inc.
+#
+# This library is free software; you can redistribute it and/or
+# modify it under the terms of the GNU Lesser General Public License
+# version 2.1 as published by the Free Software Foundation.
+#
+# This library is distributed in the hope that it will be useful, but
+# WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the file
+# LICENSE for more details.
+#
 import dataclasses
 import os
 import pathlib
@@ -18,6 +30,7 @@ from typing import Sequence
 from typing import Set
 from typing import Tuple
 from typing import Type
+from typing import Union
 
 import requests
 from boltons.iterutils import partition
@@ -31,6 +44,7 @@ from semgrep.constants import Colors
 from semgrep.constants import OutputFormat
 from semgrep.engine import EngineType
 from semgrep.error import FINDINGS_EXIT_CODE
+from semgrep.error import mark_semgrep_error_as_reported
 from semgrep.error import SemgrepCoreError
 from semgrep.error import SemgrepError
 from semgrep.formatter.emacs import EmacsFormatter
@@ -48,9 +62,15 @@ from semgrep.rule_match import RuleMatch
 from semgrep.rule_match import RuleMatchMap
 from semgrep.state import DesignTreatment
 from semgrep.state import get_state
+from semgrep.subproject import subproject_to_cli_output_info
+from semgrep.target_manager import FileErrorLog
 from semgrep.target_manager import FileTargetingLog
 from semgrep.target_manager import TargetManager
+from semgrep.types import TargetInfo
+from semgrep.types import TargetInfoAccumulator
 from semgrep.util import is_url
+from semgrep.util import line_count_of_path
+from semgrep.util import pretty_print_percentage
 from semgrep.util import terminal_wrap
 from semgrep.util import unit_str
 from semgrep.util import with_color
@@ -94,8 +114,6 @@ def get_path_str(target: Path) -> str:
 
 
 def _build_time_json(
-    rules: List[Rule],
-    targets: Set[Path],
     profile: out.Profile,
     profiler: Optional[ProfileManager],
 ) -> out.Profile:
@@ -105,21 +123,15 @@ def _build_time_json(
     # Can things differ between the targets/rules in pysemgrep and the
     # one actually used in semgrep-core and returned in profile?
 
-    return out.Profile(
+    return dataclasses.replace(
+        profile,
         # this is an addon to profiling_data.profile
         profiling_times=profiler.dump_stats() if profiler else {},
-        # TODO: maybe just start from profiling_data.profile and just adjust its
-        # profiling_times field
-        rules=profile.rules,
-        targets=profile.targets,
-        total_bytes=profile.total_bytes,
-        rules_parse_time=profile.rules_parse_time,
-        max_memory_bytes=profile.max_memory_bytes,
     )
 
 
 # This class is the internal representation of OutputSettings below.
-# Since it is internal it can change as much as necesarry to make
+# Since it is internal it can change as much as necessary to make
 # typechecking more accurate and enforce invariants.
 class NormalizedOutputSettings(NamedTuple):
     # Immutable List of OutputDestination x OutputFormat
@@ -134,6 +146,7 @@ class NormalizedOutputSettings(NamedTuple):
     dataflow_traces: bool
     # alt: put that in terminal.py, which can then be accessed globally
     max_log_list_entries: int
+    max_match_context_size: int
 
     def get_outputs(self) -> Iterator[Tuple[Optional[str], OutputFormat]]:
         return self.outputs.items().__iter__()
@@ -158,6 +171,7 @@ class OutputSettings(NamedTuple):
     timeout_threshold: int = 0
     dataflow_traces: bool = False
     max_log_list_entries: int = 0
+    max_match_context_size: int = 0
 
     def normalize(self) -> NormalizedOutputSettings:
         normalized_outputs: Dict[Optional[str], OutputFormat] = {}
@@ -185,6 +199,7 @@ class OutputSettings(NamedTuple):
             timeout_threshold=self.timeout_threshold,
             dataflow_traces=self.dataflow_traces,
             max_log_list_entries=self.max_log_list_entries,
+            max_match_context_size=self.max_match_context_size,
         )
 
 
@@ -207,11 +222,13 @@ class OutputHandler:
     def __init__(
         self,
         output_settings: OutputSettings,
+        disable_nosem: bool = False,
     ):
         self.settings: NormalizedOutputSettings = output_settings.normalize()
+        self.disable_nosem = disable_nosem
 
         self.rule_matches: List[RuleMatch] = []
-        self.all_targets: Set[Path] = set()
+        self.all_targets: Set[TargetInfo] = set()
         self.profiler: Optional[ProfileManager] = None
         self.rules: FrozenSet[Rule] = frozenset()
         self.semgrep_structured_errors: List[SemgrepError] = []
@@ -223,6 +240,9 @@ class OutputHandler:
         self.severities: Collection[out.MatchSeverity] = DEFAULT_SHOWN_SEVERITIES
         self.explanations: Optional[List[out.MatchingExplanation]] = None
         self.engine_type: EngineType = EngineType.OSS
+        self.all_subprojects: Optional[
+            List[Union[out.UnresolvedSubproject, out.ResolvedSubproject]]
+        ] = None
 
         self.final_error: Optional[Exception] = None
 
@@ -239,6 +259,15 @@ class OutputHandler:
 
             self._formatters[output_destination] = formatter
 
+    # TODO: move this function outside of this class so that we can call
+    #  it on any SemgrepError. Generally, we should avoid handling an exception
+    #  and re-raising it, otherwise, it will be reported again.
+    #  The pattern should be:
+    #  1. Accummulate errors.
+    #  2. Report errors and determine exit code.
+    #  3. Exit with the proper exit code.
+    #  If the error comes in the form of an exception, don't re-raise the exception
+    #  or at least use a different exception.
     def handle_semgrep_errors(self, errors: Sequence[SemgrepError]) -> None:
         timeout_errors = defaultdict(list)
         missing_plugin_errors = []
@@ -329,6 +358,8 @@ class OutputHandler:
         if ex is None:
             return
         if isinstance(ex, SemgrepError):
+            # Prevent double reporting
+            mark_semgrep_error_as_reported(ex)
             if isinstance(ex.level.value, out.Error_) and not (
                 isinstance(ex, SemgrepCoreError)
                 and ex.is_special_interfile_analysis_error
@@ -343,26 +374,19 @@ class OutputHandler:
     @staticmethod
     def _make_failed_to_analyze(
         semgrep_core_errors: Sequence[SemgrepCoreError],
-    ) -> Mapping[Path, Tuple[Optional[int], List[out.RuleId]]]:
+    ) -> Mapping[Path, FileErrorLog]:
         def update_failed_to_analyze(
-            memo: Mapping[Path, Tuple[Optional[int], List[out.RuleId]]],
+            memo: Mapping[Path, FileErrorLog],
             err: SemgrepCoreError,
-        ) -> Mapping[Path, Tuple[Optional[int], List[out.RuleId]]]:
+        ) -> Mapping[Path, FileErrorLog]:
+            # no associated path
             if not err.core.location:
                 return memo
             path = Path(err.core.location.path.value)
-            so_far = memo.get(path, (0, []))
-            if err.spans is None or so_far[0] is None:
-                num_lines = None
-            else:
-                num_lines = so_far[0] + sum(
-                    s.end.line - s.start.line + 1 for s in err.spans
-                )
-            rule_ids = so_far[1]
-            if err.core.rule_id is not None:
-                rule_ids.append(err.core.rule_id)
 
-            return {**memo, path: (num_lines, rule_ids)}
+            file_error_log = memo.get(path, FileErrorLog())
+            file_error_log.add_error(err)
+            return {**memo, path: file_error_log}
 
         return reduce(update_failed_to_analyze, semgrep_core_errors, {})
 
@@ -375,13 +399,23 @@ class OutputHandler:
             )
         )
 
+    def _matches_for_display(self) -> List[RuleMatch]:
+        # nosemgrep-suppressed matches are kept in self.rule_matches so that
+        # formatters that opt in (e.g. SARIF) can still see them. Strip them
+        # here for any consumer that just wants the user-visible matches.
+        # --disable-nosem bypasses the filter: the user explicitly opted out
+        # of nosemgrep, so suppression should not apply anywhere.
+        if self.disable_nosem:
+            return self.rule_matches
+        return [m for m in self.rule_matches if not m.match.extra.is_ignored]
+
     # TODO: why run_scan.scan() calls output() to set the fields why
     # run_scan.run_scan_and_return_json() modify directly the fields instead?
     def output(
         self,
         rule_matches_by_rule: RuleMatchMap,
         *,
-        all_targets: Set[Path],
+        all_targets_acc: TargetInfoAccumulator,
         engine_type: EngineType = EngineType.OSS,
         filtered_rules: List[Rule],
         ignore_log: Optional[FileTargetingLog] = None,
@@ -393,7 +427,14 @@ class OutputHandler:
         is_ci_invocation: bool = False,
         executed_rule_count: int = 0,
         missed_rule_count: int = 0,
+        all_subprojects: Optional[
+            List[Union[out.UnresolvedSubproject, out.ResolvedSubproject]]
+        ] = None,
+        # If set, the scan summary reports a failure with this reason instead of
+        # claiming the scan completed successfully.
+        scan_failure_reason: Optional[str] = None,
     ) -> None:
+        all_targets = all_targets_acc.targets
         state = get_state()
         self.has_output = True
         self.rules = self.rules.union(rule_matches_by_rule.keys())
@@ -413,7 +454,9 @@ class OutputHandler:
         else:
             # ignore log was not created, so the run failed before it even started
             # create a fake log to track the errors
-            self.ignore_log = FileTargetingLog(TargetManager(frozenset([Path(".")])))
+            self.ignore_log = FileTargetingLog(
+                TargetManager(scanning_root_strings=frozenset([Path(".")]))
+            )
 
         if extra:
             self.extra = extra
@@ -421,11 +464,16 @@ class OutputHandler:
             self.explanations = explanations
         if severities:
             self.severities = severities
+        if all_subprojects:
+            self.all_subprojects = all_subprojects
 
         self.is_ci_invocation = is_ci_invocation
 
         final_error = None
-        any_findings_not_ignored = any(not rm.is_ignored for rm in self.rule_matches)
+        any_findings_not_ignored = any(
+            self.disable_nosem or not rm.match.extra.is_ignored
+            for rm in self.rule_matches
+        )
 
         if self.final_error:
             final_error = self.final_error
@@ -466,7 +514,7 @@ class OutputHandler:
 
         if self.filtered_rules:
             fingerprint_matches, regular_matches = partition(
-                self.rule_matches,
+                self._matches_for_display(),
                 lambda m: m.severity
                 in [
                     out.MatchSeverity(out.Inventory()),
@@ -474,11 +522,46 @@ class OutputHandler:
                 ],
             )
             num_findings = len(regular_matches)
-            num_targets = len(self.all_targets)
-            num_rules = executed_rule_count or len(self.filtered_rules)
+            blocking_findings = []
+            nonblocking_findings = []
 
-            ignores_line = str(ignore_log or "No ignore information available")
+            for match in regular_matches:
+                if match.is_blocking:
+                    blocking_findings.append(match)
+                else:
+                    nonblocking_findings.append(match)
+
+            num_blocking_findings = len(blocking_findings)
+            num_nonblocking_findings = len(nonblocking_findings)
+
+            num_findings = num_blocking_findings + num_nonblocking_findings
+            num_targets = len(all_targets)
+            num_rules = executed_rule_count or len(self.filtered_rules)
+            count_line = (
+                f"\n • Findings: {num_findings} ({num_blocking_findings} blocking)"
+            )
+            rule_line = f"\n • Rules run: {num_rules}"
+            target_line = f"\n • Targets scanned: {num_targets}"
+            ignore_log_str = str(ignore_log) or ""
+            ignores_line = ignore_log_str or "\n • No ignore information available"
             suggestion_line = ""
+            more_detail_line = ""
+
+            total_lines = sum([line_count_of_path(t.fpath) for t in all_targets])
+            total_lines_skipped = 0
+            if self.ignore_log.core_failure_lines_by_file:
+                ignore_log = self.ignore_log
+                file_error_logs = ignore_log.core_failure_lines_by_file.values()
+                total_lines_skipped = sum(
+                    [log.num_lines_skipped() or 0 for log in file_error_logs]
+                )
+
+            parsed_line = f"\n • Parsed lines: {pretty_print_percentage((total_lines - total_lines_skipped), total_lines)}"
+
+            if not self.settings.verbose_errors and (
+                ignore_log_str or total_lines_skipped
+            ):
+                more_detail_line = "\n • For a detailed list of skipped files and lines, run semgrep with the --verbose flag"
             if (
                 num_findings == 0
                 and num_targets > 0
@@ -504,7 +587,23 @@ class OutputHandler:
                 too_many_entries = self.settings.max_log_list_entries
                 logger.verbose(ignore_log.verbose_output(too_many_entries))
 
-            output_text = ignores_line + suggestion_line + stats_line
+            scan_name = "CI scan" if self.is_ci_invocation else "Scan"
+            success_line = (
+                f"❌ {scan_name} failed: {scan_failure_reason}"
+                if scan_failure_reason
+                else f"✅ {scan_name} completed successfully."
+            )
+            output_text = (
+                success_line
+                + count_line
+                + rule_line
+                + target_line
+                + parsed_line
+                + ignores_line
+                + more_detail_line
+                + stats_line
+                + suggestion_line
+            )
             console.print(Title("Scan Summary"))
             logger.info(output_text)
 
@@ -545,17 +644,18 @@ class OutputHandler:
             # This is incorrect when some rules are skipped by semgrep-core
             # e.g. proprietary rules.
             # TODO: Use what semgrep-core returns for 'scanned' and 'skipped'.
-            scanned=[out.Fpath(str(path)) for path in sorted(self.all_targets)],
+            scanned=[
+                out.Fpath(str(target.fpath))
+                for target in sorted(self.all_targets, key=lambda x: x.fpath)
+            ],
             skipped=None,
         )
         cli_timing: Optional[out.Profile] = None
 
         explanations: Optional[List[out.MatchingExplanation]] = self.explanations
 
-        if self.settings.output_time and self.extra and self.extra.core.time:
+        if self.extra and self.extra.core.time:
             cli_timing = _build_time_json(
-                self.filtered_rules,
-                self.all_targets,
                 self.extra.core.time,
                 self.profiler,
             )
@@ -594,6 +694,7 @@ class OutputHandler:
                 "per_line_max_chars_limit"
             ] = self.settings.output_per_line_max_chars_limit
             extra["dataflow_traces"] = self.settings.dataflow_traces
+        extra["max_match_context_size"] = self.settings.max_match_context_size
         if output_format == OutputFormat.SARIF:
             extra["dataflow_traces"] = self.settings.dataflow_traces
 
@@ -607,6 +708,14 @@ class OutputHandler:
         # to output things. This is why I have those ugly 'if self.extra' below
         # that possibly return None.
 
+        # Convert subprojects to public stats format for CLI output
+        subproject_stats: Optional[List[out.CliOutputSubprojectInfo]] = None
+        if self.all_subprojects:
+            subproject_stats = [
+                subproject_to_cli_output_info(subproject)
+                for subproject in self.all_subprojects
+            ]
+
         cli_output_extra = out.CliOutputExtra(
             # TODO: almost like self.extra.core.paths, but not there yet
             paths=cli_paths,
@@ -617,18 +726,29 @@ class OutputHandler:
             rules_by_engine=self.extra.core.rules_by_engine if self.extra else None,
             # this flattens the information into just distinguishing "pro" and "not-pro"
             engine_requested=self.engine_type.to_engine_kind(),
-            interfile_languages_used=self.extra.core.interfile_languages_used
-            if self.extra
-            else None,
+            interfile_languages_used=(
+                self.extra.core.interfile_languages_used if self.extra else None
+            ),
             # TODO, should just be self.extra.core.skipped_rules
             skipped_rules=[],
+            # SCA subproject resolution results
+            subprojects=subproject_stats,
         )
 
         state = get_state()
         formatter = self._formatters[output_destination]
+        # If this formatter doesn't want suppressed matches, strip them. The
+        # global filter_ignored in run_scan.py keeps them whenever any
+        # registered formatter requests them (e.g. SARIF), so without this
+        # they would leak into formatters that don't (e.g. text on stdout).
+        matches_for_formatter = (
+            self.rule_matches
+            if formatter.keep_ignores()
+            else self._matches_for_display()
+        )
         output = formatter.output(  # the rules are used only by the SARIF formatter
             self.rules,
-            self.rule_matches,
+            matches_for_formatter,
             self.semgrep_structured_errors,
             cli_output_extra,
             extra,

@@ -1,3 +1,15 @@
+(*
+   Copyright (c) 2024-2025 Semgrep Inc.
+
+   This library is free software; you can redistribute it and/or
+   modify it under the terms of the GNU Lesser General Public License
+   version 2.1 as published by the Free Software Foundation.
+
+   This library is distributed in the hope that it will be useful, but
+   WITHOUT ANY WARRANTY; without even the implied warranty of
+   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the file
+   LICENSE for more details.
+*)
 open Common
 module Out = Semgrep_output_v1_t
 module Sarif = Sarif.Sarif_v_2_1_0_v
@@ -73,14 +85,14 @@ let tags_of_metadata metadata =
   (* Also add the "security" tag when the rule has CWE tags. *)
   let cwe =
     match JSON.member "cwe" metadata with
-    | Some (JSON.Array cwe) -> List_.map best_effort_string cwe @ [ "security" ]
+    | Some (JSON.Array cwe) -> List.map best_effort_string cwe @ [ "security" ]
     | Some single_cwe -> [ best_effort_string single_cwe; "security" ]
     | None -> []
   in
   let owasp =
     match JSON.member "owasp" metadata with
     | Some (JSON.Array owasp) ->
-        List_.map (fun o -> "OWASP-" ^ best_effort_string o) owasp
+        List.map (fun o -> "OWASP-" ^ best_effort_string o) owasp
     | Some o -> [ "OWASP-" ^ best_effort_string o ]
     | None -> []
   in
@@ -101,7 +113,7 @@ let tags_of_metadata metadata =
   in
   let tags =
     match JSON.member "tags" metadata with
-    | Some (JSON.Array tags) -> List_.map best_effort_string tags
+    | Some (JSON.Array tags) -> List.map best_effort_string tags
     | Some _
     | None ->
         []
@@ -138,12 +150,25 @@ let rule ~(hide_nudge : bool) (ctx : Out.format_context) (rule : Rule.t) :
     | Some _ -> raise Impossible
     | None -> spf "Semgrep Finding: %s" rule_id_str
   in
+  (*
+  In a Semgrep rule's metadata section, two fields may provide URLs:
+  - source: populated dynamically by the Semgrep registry serving the rule, it's a URL that
+    offers information about the rule.
+  - source-rule-url: optional string, a URL for the source of inspiration for the rule.
+
+  The SARIF format supports only one URL under the field 'helpUri'. Semgrep populates it with
+  metadata.source if available, metadata.source-rule-url otherwise as a fallback.
+  *)
   let source =
     match JSON.member "source" metadata with
     | Some (JSON.String source) -> Some source
     | Some _
-    | None ->
-        None
+    | None -> (
+        match JSON.member "source-rule-url" metadata with
+        | Some (JSON.String source) -> Some source
+        | Some _
+        | None ->
+            None)
   in
   let rule_help_text =
     match JSON.member "help" metadata with
@@ -163,7 +188,7 @@ let rule ~(hide_nudge : bool) (ctx : Out.format_context) (rule : Rule.t) :
     let tags = tags_of_metadata metadata in
     [
       ("precision", `String "very-high");
-      ("tags", `List (List_.map (fun s -> `String s) tags));
+      ("tags", `List (List.map (fun s -> `String s) tags));
     ]
     @ security_severity
   in
@@ -183,7 +208,7 @@ let rule ~(hide_nudge : bool) (ctx : Out.format_context) (rule : Rule.t) :
     match JSON.member "references" metadata with
     | Some (JSON.String s) -> [ spf "[%s](%s)" s s ]
     | Some (JSON.Array xs) ->
-        List_.map
+        List.map
           (function
             | JSON.String s -> spf "[%s](%s)" s s
             | non_string -> JSON.string_of_json non_string)
@@ -193,7 +218,7 @@ let rule ~(hide_nudge : bool) (ctx : Out.format_context) (rule : Rule.t) :
         []
   in
   let references_joined =
-    List_.map (fun s -> spf " - %s\n" s) (references @ other_references)
+    List.map (fun s -> spf " - %s\n" s) (references @ other_references)
   in
   let references_markdown =
     match references_joined with
@@ -239,9 +264,9 @@ let sarif_fixes (cli_match : Out.cli_match) : Sarif.fix list option =
   in
   Some [ fix ]
 
-let thread_flow_location (cli_match : Out.cli_match) message
-    (location : Out.location) content nesting_level =
-  let location =
+let thread_flow_location message (location : Out.location) content nesting_level
+    =
+  let loc =
     Sarif.create_location ~message
       ~physical_location:
         (Sarif.create_physical_location
@@ -249,31 +274,60 @@ let thread_flow_location (cli_match : Out.cli_match) message
              (region ~message ~snippet:content location.start location.end_)
            ~artifact_location:
              (Sarif.create_artifact_location
-                ~uri:(Fpath.to_string cli_match.path)
+                ~uri:(Fpath.to_string location.path)
                 ())
            ())
       ()
   in
   Sarif.create_thread_flow_location
     ~nesting_level:(Int64.of_int nesting_level)
-    ~location ()
+    ~location:loc ()
 
-let intermediate_var_locations cli_match intermediate_vars =
+let intermediate_var_locations nesting_level intermediate_vars =
   intermediate_vars
-  |> List_.map (fun ({ location; content } : Out.match_intermediate_var) ->
-         let propagation_message_text =
-           spf "Propagator : '%s' @ '%s:%d'" content
-             (Fpath.to_string location.path)
-             location.start.line
-           |> message
-         in
-         thread_flow_location cli_match propagation_message_text location
-           content 0)
+  |> List.map (fun ({ location; content } : Out.match_intermediate_var) ->
+      let propagation_message_text =
+        spf "Propagator : '%s' @ '%s:%d'" content
+          (Fpath.to_string location.path)
+          location.start.line
+        |> message
+      in
+      thread_flow_location propagation_message_text location content
+        nesting_level)
+
+(* Recursively flatten a [match_call_trace] into a list of thread flow
+ * locations. Used to emit the taint sink call trace in SARIF. *)
+let rec call_trace_to_locations nesting_level call_trace =
+  match call_trace with
+  | Out.CliLoc (location, content) ->
+      let msg =
+        spf "Taint reaches: '%s' @ '%s:%d'" content
+          (Fpath.to_string location.path)
+          location.start.line
+        |> message
+      in
+      [ thread_flow_location msg location content nesting_level ]
+  | Out.CliCall ((location, content), intermediate_vars, sub_trace) ->
+      let call_msg =
+        spf "Call: '%s' @ '%s:%d'" content
+          (Fpath.to_string location.path)
+          location.start.line
+        |> message
+      in
+      let call_location =
+        thread_flow_location call_msg location content nesting_level
+      in
+      let inter_locations =
+        intermediate_var_locations (nesting_level + 1) intermediate_vars
+      in
+      let sub_locations =
+        call_trace_to_locations (nesting_level + 1) sub_trace
+      in
+      (call_location :: inter_locations) @ sub_locations
 
 let thread_flows (cli_match : Out.cli_match)
     (dataflow_trace : Out.match_dataflow_trace) (location : Out.location)
     content =
-  (* TODO from sarif.py: deal with taint sink *)
   let intermediate_vars = dataflow_trace.intermediate_vars in
   let source_flow_location =
     let source_message_text =
@@ -282,53 +336,57 @@ let thread_flows (cli_match : Out.cli_match)
         location.start.line
       |> message
     in
-    thread_flow_location cli_match source_message_text location content 0
+    thread_flow_location source_message_text location content 0
   in
   let intermediate_var_locations =
     match intermediate_vars with
     | None -> []
-    | Some intermediate_vars ->
-        intermediate_var_locations cli_match intermediate_vars
+    | Some intermediate_vars -> intermediate_var_locations 0 intermediate_vars
   in
-  let sink_flow_location =
-    let sink_message_text =
-      spf "Sink: '%s' @ '%s:%d'"
-        (String.trim cli_match.extra.lines) (* rule_match.get_lines() ?! *)
-        (Fpath.to_string cli_match.path)
-        cli_match.start.line
-      |> message
-    in
-    thread_flow_location cli_match sink_message_text
-      {
-        Out.start = cli_match.start;
-        end_ = cli_match.end_;
-        path = cli_match.path;
-      }
-      cli_match.extra.lines 1
+  (* When a taint_sink call trace is present, emit its locations (call site,
+   * intermediate vars within the callee, and final sink). Otherwise fall back
+   * to emitting just the cli_match location as the sink. *)
+  let sink_locations =
+    match dataflow_trace.taint_sink with
+    | Some taint_sink -> call_trace_to_locations 1 taint_sink
+    | None ->
+        let sink_message_text =
+          spf "Sink: '%s' @ '%s:%d'"
+            (String.trim cli_match.extra.lines)
+            (Fpath.to_string cli_match.path)
+            cli_match.start.line
+          |> message
+        in
+        [
+          thread_flow_location sink_message_text
+            {
+              Out.start = cli_match.start;
+              end_ = cli_match.end_;
+              path = cli_match.path;
+            }
+            cli_match.extra.lines 1;
+        ]
   in
   [
     Sarif.create_thread_flow
       ~locations:
-        ((source_flow_location :: intermediate_var_locations)
-        @ [ sink_flow_location ])
+        ((source_flow_location :: intermediate_var_locations) @ sink_locations)
       ();
   ]
+
+(* Return the first (outermost) location from a call trace, used for the
+ * code flow summary message. *)
+let first_loc_of_call_trace = function
+  | Out.CliLoc (loc, content) -> (loc, content)
+  | Out.CliCall ((loc, content), _, _) -> (loc, content)
 
 let sarif_codeflow (cli_match : Out.cli_match) : Sarif.code_flow list option =
   match cli_match.extra.dataflow_trace with
   | None
   | Some { Out.taint_source = None; _ } ->
       None
-  | Some { Out.taint_source = Some (CliCall _); _ } ->
-      Logs.err (fun m ->
-          m
-            "Emitting SARIF output for unsupported dataflow trace (source is a \
-             call)");
-      None
-  | Some
-      ({ taint_source = Some (CliLoc (location, content)); _ } as dataflow_trace)
-    ->
-      (* TODO from sarif.py: handle taint_sink *)
+  | Some ({ taint_source = Some taint_source; _ } as dataflow_trace) ->
+      let location, content = first_loc_of_call_trace taint_source in
       let code_flow_message =
         spf "Untrusted dataflow from %s:%d to %s:%d"
           (Fpath.to_string location.path)
@@ -373,10 +431,38 @@ let result (ctx : Out.format_context) show_dataflow_traces
     if show_dataflow_traces then sarif_codeflow cli_match else None
   in
   let properties =
-    match Exposure.of_cli_match_opt cli_match with
-    | None -> []
-    | Some exposure -> [ ("exposure", `String (Exposure.string_of exposure)) ]
+    let exposure_props =
+      match Exposure.of_cli_match_opt cli_match with
+      | None -> []
+      | Some exposure -> [ ("exposure", `String (Exposure.string_of exposure)) ]
+    in
+    (* SARIF has no native concept of transitive dependency chains, so we
+     * surface the dependency paths (how a transitive dep was introduced) in
+     * the free-form properties bag, alongside "exposure". Each path is ordered
+     * from the direct introducer (node 0) to the matched dependency (last). *)
+    let dependency_path_props =
+      match cli_match.extra.sca_info with
+      | Some
+          {
+            dependency_match = { dependency_paths = Some (_ :: _ as paths); _ };
+            _;
+          } ->
+          let json_of_node (n : Out.dependency_child) =
+            `Assoc
+              [ ("package", `String n.package); ("version", `String n.version) ]
+          in
+          let json_of_path (p : Out.dependency_path) =
+            `List (List.map json_of_node p.nodes)
+          in
+          (* SARIF property bag keys are camelCase by convention *)
+          [ ("dependencyPaths", `List (List.map json_of_path paths)) ]
+      | _ -> []
+    in
+    exposure_props @ dependency_path_props
   in
+  (* coupling: if you modify which fields are gated by ctx.is_logged_in update
+   * also https://semgrep.dev/docs/semgrep-appsec-platform/json-and-sarif#sarif
+   *)
   let fingerprints =
     if ctx.is_logged_in then
       [ ("matchBasedId/v1", cli_match.extra.fingerprint) ]
@@ -413,10 +499,10 @@ let sarif_output (hrules : Rule.hrules) (ctx : Out.format_context)
   let show_dataflow_traces = ctx.is_logged_in && show_dataflow_traces in
   let run =
     let rules =
-      hrules |> Hashtbl.to_seq |> List.of_seq
+      hrules |> Base.Hashtbl.to_alist
       (* sorting for snapshot stability *)
       |> List.sort (fun (aid, _) (bid, _) -> Rule_ID.compare aid bid)
-      |> List_.map (fun (_ruleid, r) -> rule ~hide_nudge ctx r)
+      |> List.map (fun (_ruleid, r) -> rule ~hide_nudge ctx r)
     in
     let tool =
       let driver =
@@ -428,18 +514,18 @@ let sarif_output (hrules : Rule.hrules) (ctx : Out.format_context)
     in
     let results =
       cli_output.results |> Semgrep_output_utils.sort_cli_matches
-      |> List_.map (result ctx show_dataflow_traces)
+      |> List.map (result ctx show_dataflow_traces)
     in
     let invocation =
       (* TODO no test case(s) for executionNotifications being non-empty *)
       let tool_execution_notifications =
         cli_output.errors
         |> List.sort (fun (a : Out.cli_error) (b : Out.cli_error) ->
-               match (a.path, b.path) with
-               (* less: could sort more *)
-               | Some a1, Some b1 -> Fpath.compare a1 b1
-               | _else_ -> Stdlib.compare a b)
-        |> List_.map error_to_sarif_notification
+            match (a.path, b.path) with
+            (* less: could sort more *)
+            | Some a1, Some b1 -> Fpath.compare a1 b1
+            | _else_ -> Stdlib.compare a b)
+        |> List.map error_to_sarif_notification
       in
       Sarif.create_invocation ~execution_successful:true
         ~tool_execution_notifications ()

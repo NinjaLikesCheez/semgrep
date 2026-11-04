@@ -1,4 +1,16 @@
 (*
+   Copyright (c) 2022-2024 Semgrep Inc.
+
+   This library is free software; you can redistribute it and/or
+   modify it under the terms of the GNU Lesser General Public License
+   version 2.1 as published by the Free Software Foundation.
+
+   This library is distributed in the hope that it will be useful, but
+   WITHOUT ANY WARRANTY; without even the implied warranty of
+   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the file
+   LICENSE for more details.
+*)
+(*
    Typed access to Semgrep environment variables (e.g., SEMGREP_IN_DOCKER).
  *)
 
@@ -53,12 +65,14 @@ type t = {
   min_fetch_depth : int;
   (* $MOCK_USING_REGISTRY *)
   mock_using_registry : bool;
+  (* $SEMGREP_DISABLE_CONFIG_DOWNLOAD_V2 *)
+  disable_config_download_v2 : bool;
 }
 
 val v : t ref
 (** [v] is a reference to environment variables and user settings gathered
-  * during initialization. This is a reference to allow these settings to
-  * be modified by tests.
+    during initialization. This is a reference to allow these settings to
+    be modified by tests.
   *)
 
 (* useful to work in cunjonction with with_envvars in testing context *)
@@ -66,11 +80,11 @@ val of_current_sys_env : unit -> t
 
 val with_envvars : t -> (unit -> 'a) -> 'a
 (** [with_envvars env f] temporarily modifies [v] above with a new [env]
- * and run [f] in this new context. This is useful in tests.
+   and run [f] in this new context. This is useful in tests.
  *)
 
 val with_envvar : string -> string -> (unit -> 'a) -> 'a
 (** [with_envvar envvar value f] temporarily modifies [v] above
- * with a new envvar and run [f] in this new context. This is useful
- * in tests.
+   with a new envvar and run [f] in this new context. This is useful
+   in tests.
  *)

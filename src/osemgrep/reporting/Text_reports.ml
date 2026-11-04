@@ -112,15 +112,15 @@ let rules_source (rule_source : Rules_source.t) : string =
   match rule_source with
   | Configs xs ->
       let parsed_configs =
-        xs |> List_.map (Rules_config.parse_config_string ~in_docker:false)
+        xs |> List.map (Rules_config.parse_config_string ~in_docker:false)
       in
       if
         parsed_configs
         |> List.exists (function
-             | Rules_config.R _
-             | Rules_config.A _ ->
-                 true
-             | _ -> false)
+          | Rules_config.R _
+          | Rules_config.A _ ->
+              true
+          | _ -> false)
       then Console.bold "  Loading rules from registry..."
       else Console.bold "  Loading rules from local config..."
   | Pattern _ -> "  Using custom pattern."
@@ -170,9 +170,9 @@ let product_selection ~(includes_token : bool) (rules_src : Rules_source.t)
           (* Print our set of features and whether each is enabled *)
           features
           |> List.iter (fun (feature_name, desc, enabled) ->
-                 prf "%s %s\n" (feature_status ~enabled)
-                   (Console.bold feature_name);
-                 prf "  %s %s\n\n" (feature_status ~enabled) desc))
+              prf "%s %s\n" (feature_status ~enabled)
+                (Console.bold feature_name);
+              prf "  %s %s\n\n" (feature_status ~enabled) desc))
 
 (*****************************************************************************)
 (* Targets debug *)
@@ -180,8 +180,8 @@ let product_selection ~(includes_token : bool) (rules_src : Rules_source.t)
 
 (* not in pysemgrep and currently enabled only via SEMGREP_LOG_SRCS=targeting*)
 let targets (roots : Scanning_root.t list)
-    (skipped : Semgrep_output_v1_t.skipped_target list) (targets : Fpath.t list)
-    : string =
+    (skipped : Semgrep_output_v1_t.skipped_target list)
+    (targets : Fppath.t list) : string =
   Buffer_.with_buffer_to_string (fun buf ->
       let prf fmt = Printf.bprintf buf fmt in
       prf "target roots: [\n";
@@ -191,17 +191,18 @@ let targets (roots : Scanning_root.t list)
       prf "skipped targets: [\n";
       skipped
       |> List.iter (fun x ->
-             prf "  %s" (Semgrep_output_v1_t.show_skipped_target x));
+          prf "  %s" (Semgrep_output_v1_t.show_skipped_target x));
       prf "]\n";
       prf "selected targets: [\n";
-      targets |> List.iter (fun file -> prf "target = %s\n" !!file);
+      targets
+      |> List.iter (fun (file : Fppath.t) -> prf "target = %s\n" !!(file.fpath));
       prf "]\n";
       (* more info about skipped targets *)
       skipped
       |> List.iter (fun (x : Semgrep_output_v1_t.skipped_target) ->
-             prf "Ignoring %s due to %s (%s)" !!(x.path)
-               (Semgrep_output_v1_t.show_skip_reason x.reason)
-               (x.details ||| "")))
+          prf "Ignoring %s due to %s (%s)" !!(x.path)
+            (Semgrep_output_v1_t.show_skip_reason x.reason)
+            (x.details ||| "")))
 
 (*****************************************************************************)
 (* Rules info *)
@@ -218,7 +219,7 @@ let rules ~too_many_entries (src : Rules_source.t) (rules : Rule.t list) :
         | Configs xs -> spf "%d configs" (List.length xs));
 
       (* TODO should output whether .semgrepignore is found and used
-         (as done in semgrep_main.py get_file_ignore()) *)
+         (as done in semgrep_main.py get_semgrepignore()) *)
       prf "Rules:\n";
       let experimental, normal =
         rules
@@ -229,12 +230,12 @@ let rules ~too_many_entries (src : Rules_source.t) (rules : Rule.t list) :
       else
         normal |> List.sort compare_rule
         |> List.iter (fun rule ->
-               prf "- %s\n" (Rule_ID.to_string (rule_id rule)));
+            prf "- %s\n" (Rule_ID.to_string (rule_id rule)));
       if not (List_.null experimental) then begin
         prf "Experimental rules:\n";
         experimental |> List.sort compare_rule
         |> List.iter (fun rule ->
-               prf "- %s\n" (Rule_ID.to_string (rule_id rule)))
+            prf "- %s\n" (Rule_ID.to_string (rule_id rule)))
       end)
 
 (*****************************************************************************)
@@ -246,17 +247,17 @@ let rules ~too_many_entries (src : Rules_source.t) (rules : Rule.t list) :
 *)
 let origin rule =
   (match rule.Rule.metadata with
-  | Some (Object _ as meta) -> (
-      match Yojson.Basic.Util.member "semgrep.dev" (JSON.to_yojson meta) with
-      | `Assoc _ as things -> (
-          match Yojson.Basic.Util.member "rule" things with
-          | `Assoc _ as things -> (
-              match Yojson.Basic.Util.member "origin" things with
-              | `String s -> Some s
-              | _else -> None)
-          | _else -> None)
-      | _else -> None)
-  | _else -> None)
+    | Some (Object _ as meta) -> (
+        match Yojson.Basic.Util.member "semgrep.dev" (JSON.to_yojson meta) with
+        | `Assoc _ as things -> (
+            match Yojson.Basic.Util.member "rule" things with
+            | `Assoc _ as things -> (
+                match Yojson.Basic.Util.member "origin" things with
+                | `String s -> Some s
+                | _else -> None)
+            | _else -> None)
+        | _else -> None)
+    | _else -> None)
   ||| "custom"
 
 let scan_status ~num_rules ~num_targets ~respect_gitignore
@@ -290,36 +291,36 @@ let scan_status ~num_rules ~num_targets ~respect_gitignore
           let rule_origins : (string * int list) list =
             lang_jobs
             |> List.fold_left
-                 (fun acc Lang_job.{ rules; _ } -> List_.map origin rules @ acc)
+                 (fun acc Lang_job.{ rules; _ } -> List.map origin rules @ acc)
                  []
             |> Assoc.group_by Fun.id
-            |> List_.map (fun (src, xs) ->
-                   (String.capitalize_ascii src, [ List.length xs ]))
+            |> List.map (fun (src, xs) ->
+                (String.capitalize_ascii src, [ List.length xs ]))
           in
           prf "\n";
           let lang_stats : (string * int * int) list =
             lang_jobs
             (* Unpack each job, transforming analyzer into its mapped language key *)
-            |> List_.map (fun Lang_job.{ analyzer; targets; rules } ->
-                   (analyzer_label analyzer, rules, targets))
+            |> List.map (fun Lang_job.{ analyzer; targets; rules } ->
+                (analyzer_label analyzer, rules, targets))
             (* Merge jobs by mapped language key *)
             |> Assoc.group_by (fun (analyzer, _, _) -> analyzer)
-            |> List_.map (fun (analyzer, xxs) ->
-                   let targets =
-                     xxs
-                     |> List.concat_map (fun (_, _, targets) -> targets)
-                     |> Assoc.group_by Fun.id
-                     |> List_.map (fun (target, _) -> target)
-                     |> List.length
-                   in
-                   let rules =
-                     xxs
-                     |> List.concat_map (fun (_, rules, _) -> rules)
-                     |> Assoc.group_by Fun.id
-                     |> List_.map (fun (rules, _) -> rules)
-                     |> List.length
-                   in
-                   (analyzer, rules, targets))
+            |> List.map (fun (analyzer, xxs) ->
+                let targets =
+                  xxs
+                  |> List.concat_map (fun (_, _, targets) -> targets)
+                  |> Assoc.group_by Fun.id
+                  |> List.map (fun (target, _) -> target)
+                  |> List.length
+                in
+                let rules =
+                  xxs
+                  |> List.concat_map (fun (_, rules, _) -> rules)
+                  |> Assoc.group_by Fun.id
+                  |> List.map (fun (rules, _) -> rules)
+                  |> List.length
+                in
+                (analyzer, rules, targets))
           in
           prf "%s"
             (Console.tables
@@ -359,7 +360,7 @@ let skipped ~too_many_entries ~respect_git_ignore ~max_target_bytes
             xs
             |> List.sort compare_skipped_target
             |> List.iter (fun ({ path; _ } : Out.skipped_target) ->
-                   prf "   • %s\n" (cyan !!path))
+                prf "   • %s\n" (cyan !!path))
       in
 
       (* TODO: Why pysemgrep does not use the classic heading for skipped?? *)
@@ -425,7 +426,7 @@ let skipped ~too_many_entries ~respect_git_ignore ~max_target_bytes
 (*****************************************************************************)
 let scan_summary ~respect_gitignore ~max_target_bytes ~num_valid_rules
     (maturity : Maturity.t) (cli_output : Out.cli_output)
-    (groups : Skipped_groups.t) : string =
+    (groups : Skipped_groups.t) (logging_level : Logs.level option) : string =
   Buffer_.with_buffer_to_string (fun buf ->
       let prf fmt = Printf.bprintf buf fmt in
       prf "%s" (Console.heading "Scan Summary");
@@ -468,7 +469,7 @@ let scan_summary ~respect_gitignore ~max_target_bytes ~num_valid_rules
           | Experimental ->
               None);
         ]
-        |> List_.filter_map Fun.id
+        |> List.filter_map Fun.id
       in
       let out_partial =
         opt_msg
@@ -484,11 +485,20 @@ let scan_summary ~respect_gitignore ~max_target_bytes ~num_valid_rules
           parts |> Option.iter (fun txt -> prf "  Partially scanned: %s\n" txt);
           match xs with
           | [] -> ()
-          | xs ->
+          | xs -> (
               prf "  Scan skipped: %s.\n" (String.concat ", " xs);
-              prf
-                "  For a full list of skipped files, run semgrep with the \
-                 --verbose flag.\n"));
+              match logging_level with
+              | None
+              | Some Logs.App
+              | Some Logs.Error
+              | Some Logs.Warning ->
+                  (* --verbose and --debug set level to Logs.Info and
+                     Logs.Debug, respectively. *)
+                  prf
+                    "  For a full list of skipped files, run semgrep with the \
+                     --verbose flag.\n"
+              | _ -> ())));
+
       prf "\n";
       prf "Ran %s on %s: %s."
         (String_.unit_str num_valid_rules "rule")

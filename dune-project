@@ -1,4 +1,4 @@
-(lang dune 3.7)
+(lang dune 3.20)
 
 ;; This file is used both to configure 'dune' as usual, and
 ;; to autogenerate the semgrep.opam for 'opam'.
@@ -20,16 +20,186 @@
 ;; TODO: add it as a pre-commit hook?
 (generate_opam_files)
 
-;; set here so the semgrep package below can use it and we can easily bump it
-(version 1.104.0)
-
 ;; Default attributes of opam packages
 (source (github semgrep/semgrep))
 (homepage "https://semgrep.dev")
 (maintainers "Semgrep authors")
 (authors "Semgrep authors")
 
-;; Opam packages (sorted alphabetically)
+;; Semgrep package
+;; coupling: if you modify this package, type 'make semgrep.opam'
+(package (name semgrep)
+  (synopsis "Like grep but for code: fast and syntax-aware semantic code pattern for many languages")
+  (description "\
+Semgrep is like grep but for searching patterns at the AST level while
+leveraging semantic information (e.g., types, control flow) for powerful
+matching.
+
+For more information see https://semgrep.dev
+"
+  )
+  (maintainers "Yoann Padioleau <pad@semgrep.com>")
+  (authors "Yoann Padioleau <pad@semgrep.com>")
+  (license "LGPL-2.1-only")
+
+; note: these are build dependencies. Development-only deps are in 'dev/*.opam'.
+
+; note: vendored libs are listed here so we pull in their opam dependencies
+; (e.g., ocaml-tree-sitter-core -> tsort). They are pinned in
+; semgrep.opam.template to the vendored path under
+; libs/ocaml-tree-sitter-semgrep/core, so we don't have to worry about
+; publishing to opam. If you want to add another, add it below and pin it there
+;
+; coupling: because of the way we need to statically link on macOS, if you add a
+; library here, you'll probably need to update src/main/flags.sh if this library
+; has some C stubs.
+;
+; coupling: if you add a dependency here and the nix workflow fails, you may
+; need to manually trigger the "nix-weekly-update-flake" workflow
+  (depends
+    ; core deps
+    (ocaml (= 5.4.0))
+    ; needed for opam to understand that we are using a variant of the ocaml
+    ; compiler (namily semgrep/ocaml).
+    ocaml-variants
+    ocaml-option-flambda
+    ; parser generators
+    (menhir (= 20230608))
+    ; vendored in libs/ocaml-tree-sitter-semgrep
+    tree-sitter
+    ; vendored in libs/semgrep-interfaces
+    semgrep-interfaces
+    ; standard libraries
+    ;
+    ; Used directly (e.g. Hashtbl_.Base in libs/collections). The min version
+    ; below also guards 2 issues in past versions:
+    ; https://github.com/janestreet/base/issues/146
+    ; https://github.com/janestreet/base/issues/178
+    (base (>= v0.17.3))
+    (fpath (>= 0.7.3))
+    (bos (>= 0.2.1))
+    (fileutils (>= 0.6.6))
+    ; > 0.9 fails to compile w/tsan on linux
+    ;
+    ; Dune doesn't pass the -fsanitize=thread flag to compile C stubs when
+    ; building for native, so we have a simple wrapper that forces the flag.
+    ; See:
+    ; https://github.com/ocaml/dune/issues/11923
+    ;
+    ; I suspect this is part of the issue with uring > 0.9 so let's wait until
+    ; that is resolved until filing an issue on this
+    ; alt: only choose an old uring if the tsan option is enabled?
+    (uring (and (= :os linux) (= 0.9)))
+    ; unit testing
+    (testo (= 0.5.0))
+    (testo-lwt (= 0.5.0))
+    (alcotest (>= 1.9.1))
+    (alcotest-lwt (>= 1.9.1))
+    (calendar (>= 3.0.0))
+    ; text and terminal formating
+    (fmt (>= 0.11.0))
+    (ocolor (>= 1.3.1))
+    (ANSITerminal (>= 0.8.5))
+    (terminal_size (>= 0.2.0))
+    ; Unicode - used via python-str-repr
+    (uucp (>= 17.0.0))
+    (uutf (>= 1.0.4))
+    ; logging
+    (logs (>= 0.9.0))
+    ; JSON/YAML/XML
+    ; atdgen's runtime library must be compatible with the generated code in
+    ; semgrep-interfaces:
+    (atdgen-runtime (>= 3.0.0))  ; requires yojson 3
+    (atdgen (>= 3.0.0))  ; no longer requires -j-std
+    (yojson (>= 2.2.2))
+    (yaml (>= 3.2.0))
+    (xmlm (>= 1.4.0))
+    (sarif (>= 0.3.1 ))
+    ; CLI
+    (cmdliner (>= 2.0.0))
+    ; PPX
+    (ppxlib (= 0.38.0))
+    (ppx_blob (>= 0.9.0))
+    (ppx_deriving (>= 6.0.3 ))
+    (ppx_deriving_yojson (>= 3.9.1))
+    ; https://github.com/janestreet/ppx_hash/issues/5
+    (ppx_hash (>= v0.17.0))
+    ; https://github.com/janestreet/ppx_inline_test/issues/52
+    (ppx_inline_test (>= v0.17.0))
+    (ppx_sexp_conv (>= v0.17.1))
+    (visitors (= 20260520))
+    ; regexps
+    (re ( >= 1.14.0))
+    ; we're currently pinning pcre2 to semgrep/pcre2.git
+    pcre2
+    ; commons uses the `hex` library; declare explicitly so the opam solver
+    ; doesn't drop it in favor of the unrelated `ohex` package
+    hex
+    ; obackward, pinned to semgrep/obackward.git
+    obackward
+    ; misc
+    (ocamlgraph (>= 2.2.0))
+    (parmap (>= 1.2.5))
+    (semver (>= 0.2.1))
+    (timedesc (>= 3.1.0)) ; used via git-wrapper
+    ; 1.24.0 and above is incompatible with the ocaml VScode extention.
+    (lsp (and (>= 1.22.0) (< 1.24.0)))
+    (git (>= 3.18.0))
+    ; tracing
+    ; pinned to janestreet/memtrace.git
+    memtrace
+    ; profiling
+    pyro-caml-instruments
+    pyro-caml-ppx
+    ; libs used in ./libs/telemetry
+    (opentelemetry (= 0.91.1))
+    (opentelemetry-client (= 0.91.1))
+    (opentelemetry-client-ocurl (= 0.91.1))
+    (opentelemetry-client-cohttp-eio (= 0.91.1))
+    (opentelemetry-logs (= 0.91.1))
+    ; opentelemetry 0.91.1 conflicts with trace < 0.12
+    (trace (>= 0.12))
+    ; opentelemetry.ambient-context is a re-export of these since 0.90
+    (ambient-context (>= 0.2))
+    (ambient-context-lwt (>= 0.2))
+    (ambient-context-eio (>= 0.2))
+    ; ocurl was renamed to curl upstream and opentelemetry-client-ocurl
+    ; followed in 0.91. This replaces our (ocurl (= 0.9.1)) pin: 0.9.2 broke
+    ; windows (ygrek/ocurl#77), and curl 0.10.0 carries both the
+    ; `#undef TCP_FASTOPEN` fix for it and a dune build. 0.10.0 is currently
+    ; the only released version of the renamed package.
+    (curl (= 0.10.0))
+    (conf-libcurl (= 2))
+    ; web stuff
+    (uri (>= 4.4.0))
+    (uuidm (>= 0.9.10))
+    (cohttp (>= 6.2.1))
+    (cohttp-lwt-unix (>= 6.2.1))
+    (cohttp-eio (>= 6.2.1))
+    (ca-certs (= 1.0.3))
+    (tls-lwt (>= 2.0.3)) ; needed for TLS support in the cohttp HTTP client (only TLS 1.3 seems to work)
+    (ca-certs-nss (>= 3.131.1))
+    (emile (>= 1.1))
+    (digestif (>= 1.3.0))
+    ; concurrency
+    (lwt (>= 5.9.2))
+    (lwt_ppx (>= 5.9.1))
+    (conf-libev (and (<> :os win32) (= 4-13))) ; for lwt, to get better FD perf
+    ;TODO: this is for secrets and should be in ../dune-project but doing so
+    ; slows down a lot our CI because it pulls dependencies that seem
+    ; to cause the removal and recompilation of many packages (e.g., tls) and
+    ; make our GHA opam cache useless. We might need to install here instead
+    ; packages that would avoid this effect.
+    (git-unix (>= 3.18.0))
+    ; Eio
+    ; eio 1.3 appears broken on Windows https://github.com/semgrep/semgrep-proprietary/pull/4322
+    (eio (= 1.2))
+    (eio_main (= 1.2)); Picks a suitable backend (i.e eio_{posix, linux, windows})
+    (tls-eio (>= 2.0.3))
+  )
+)
+
+;; Other opam packages (sorted alphabetically)
 
 (package
   (name aliengrep)
@@ -72,7 +242,6 @@ the other programming languages supported by atdgen."
   (license "LGPL-2.1-only")
   (depends
     (ocaml (>= 4.13.0))
-    (dune (>= 3.2.0))
     (commons (>= 1.8.0))
     (lib_parsing (>= 1.5.5))
     (profiling (>= 1.5.5))
@@ -96,18 +265,18 @@ a few other projects developed at r2c.
 
   (depends
     (ocaml (>= "4.13.0"))
-    (dune (>= "3.2.0" ))
     (ANSITerminal (>= "0.8.4"))
     (alcotest (>= "1.5.0"))
-    (cmdliner (>= "1.1.1" ))
+    (cmdliner (>= "2.0.0"))
     (logs (>= "0.7.0" ))
     (yojson (>= "1.7.0"))
     (re (>= "1.10.4"))
-    (pcre (>= "7.5.0" ))
+    ; hex provides the `Hex` library used by commons/Hex_.ml
+    hex
     ; we're currently "vendoring" pcre2 in libs/pcre2
     ; so no need to get opam to install it
     ;(pcre2 (>= "7.5.3" ))
-    (ppxlib (>= "0.25.0"))
+    (ppxlib (>= "0.35.0"))
     (ppx_deriving (>= "5.2.1"))
     (ppx_hash (>= "v0.14.0" ))
     (digestif (>= "1.0.0"))
@@ -121,10 +290,6 @@ a few other projects developed at r2c.
   (description "XXX")
 )
 
-(package (name concurrency)
-  (synopsis "XXX")
-  (description "XXX")
-)
 (package (name gitignore)
   (synopsis "XXX")
   (description "XXX")
@@ -137,7 +302,15 @@ a few other projects developed at r2c.
   (synopsis "XXX")
   (description "XXX")
 )
+(package (name fast_json)
+  (synopsis "Fast JSON parser emitting a Yojson.Safe-shaped tree with location info")
+  (description "Experimental hand-rolled JSON parser that produces a tree with the same shape as Yojson.Safe.t but with Tok.t location annotations on every value and object key.")
+)
 (package (name networking)
+  (synopsis "XXX")
+  (description "XXX")
+)
+(package (name language_server)
   (synopsis "XXX")
   (description "XXX")
 )
@@ -145,7 +318,6 @@ a few other projects developed at r2c.
   (synopsis "XXX")
   (description "XXX")
 )
-
 (package (name lwt_platform)
   (synopsis "XXX")
   (description "XXX")
@@ -166,7 +338,6 @@ parsers, especially ocamlyacc/menhir based parsers.
 
   (depends
     (ocaml (>= "4.13.0"))
-    (dune (>= "3.2.0" ))
     (commons (>= "1.5.5"))
     (profiling (>= "1.5.5"))
     (fpath (>= "0.7.3"))
@@ -185,10 +356,6 @@ parsers, especially ocamlyacc/menhir based parsers.
   (synopsis "XXX")
   (description "XXX")
 )
-(package (name otarzan)
-  (synopsis "XXX")
-  (description "XXX")
-)
 (package (name parallelism)
   (synopsis "XXX")
   (description "XXX")
@@ -198,10 +365,6 @@ parsers, especially ocamlyacc/menhir based parsers.
   (description "XXX")
 )
 (package (name parser_cairo)
-  (synopsis "XXX")
-  (description "XXX")
-)
-(package (name parser_c)
   (synopsis "XXX")
   (description "XXX")
 )
@@ -222,6 +385,10 @@ parsers, especially ocamlyacc/menhir based parsers.
   (description "XXX")
 )
 (package (name parser_dockerfile)
+  (synopsis "XXX")
+  (description "XXX")
+)
+(package (name parser_fga)
   (synopsis "XXX")
   (description "XXX")
 )
@@ -277,6 +444,10 @@ parsers, especially ocamlyacc/menhir based parsers.
   (synopsis "XXX")
   (description "XXX")
 )
+(package (name parser_objc)
+  (synopsis "XXX")
+  (description "XXX")
+)
 (package (name parser_ocaml)
   (synopsis "XXX")
   (description "XXX")
@@ -294,10 +465,6 @@ parsers, especially ocamlyacc/menhir based parsers.
   (description "XXX")
 )
 (package (name parser_python)
-  (synopsis "XXX")
-  (description "XXX")
-)
-(package (name parser_ql)
   (synopsis "XXX")
   (description "XXX")
 )
@@ -337,10 +504,6 @@ parsers, especially ocamlyacc/menhir based parsers.
   (synopsis "XXX")
   (description "XXX")
 )
-(package (name parser_vue)
-  (synopsis "XXX")
-  (description "XXX")
-)
 (package (name parser_yaml)
   (synopsis "XXX")
   (description "XXX")
@@ -374,7 +537,6 @@ time and memory used by Semgrep.
 
   (depends
     (ocaml (>= "4.13.0"))
-    (dune (>= "3.2.0" ))
     (commons (>= "1.5.5"))
   )
 )
@@ -395,16 +557,15 @@ functions.
 
   (depends
     (ocaml (>= "4.13.0"))
-    (dune (>= "3.2.0" ))
     (commons (>= "1.5.5"))
     (process_limits (>= "1.5.5"))
   )
 )
 
 (package
-  (name tracing)
+  (name telemetry)
   (version "1.5.5")
-  (synopsis "Small library to help trace code")
+  (synopsis "Small library to help observe code")
   (description "\
 This is a small library of utilities used by Semgrep to
 trace functions for the purpose of reporting them in
@@ -417,136 +578,7 @@ metrics
 
   (depends
     (ocaml (>= "4.13.0"))
-    (dune (>= "3.2.0" ))
     (commons (>= "1.5.5"))
-  )
-)
-
-;; coupling: if you modify this package, type 'make semgrep.opam'
-(package (name semgrep)
-  (synopsis "Like grep but for code: fast and syntax-aware semantic code pattern for many languages")
-  (description "\
-Semgrep is like grep but for searching patterns at the AST level while
-leveraging semantic information (e.g., types, control flow) for powerful
-matching.
-
-For more information see https://semgrep.dev
-"
-  )
-  (maintainers "Yoann Padioleau <pad@semgrep.com>")
-  (authors "Yoann Padioleau <pad@semgrep.com>")
-  (license "LGPL-2.1-only")
-
-;note: these are build dependencies. Development-only deps are in 'dev/*.opam'.
-;note: we don't include here as dependencies all the libraries
-; that are "vendored" inside semgrep (e.g., commons, aliengrep, pcre2)
-;coupling: because of the way we need to statically link on macOS, if
-; you add a library here, you'll probably need to update src/main/flags.sh
-; if this library has some C stubs.
-;
-; coupling: if you add a dependency here and the nix workflow fails, you may
-; need to manually trigger the "nix-weekly-update-flake" workflow
-;
-;TODO: restore  "bisect_ppx" {>= "2.5.0"} once can use ppxlib 0.22.0
-  (depends
-    ; core deps
-    (ocaml (>= 4.13.0))
-    (dune (>= 2.7.0 ))
-    base
-    ; parser generators
-    (menhir (= 20230608))
-    ; standard libraries
-    ; We don't use Base directly. If it's being used indirectly
-    ; (is it, though?), we need a version that doesn't register
-    ; rogue exception printers.
-    ; See https://github.com/janestreet/base/issues/146
-    (base (>= v0.15.1))
-    fpath
-    bos
-    fileutils
-    ; unit testing (note that testo is vendored in libs/ so not listed here)
-    ; TODO? still need those alcotest-xx now that we use testo?
-    alcotest
-    alcotest-js
-    alcotest-lwt
-    calendar
-    ; text and terminal formating
-    fmt
-    ocolor
-    ANSITerminal
-    terminal_size
-    ; Unicode - used via python-str-repr
-    uucp
-    uutf
-    ; logging
-    logs
-    ; JSON/YAML/XML
-    atdgen
-    (yojson ( >= 2.0.0 ))
-    yaml
-    xmlm
-    (sarif ( >= 0.3.0 ))
-    ; CLI
-    cmdliner
-    ; PPX
-    ppxlib
-    (ppx_deriving ( >= 6.0.3 ))
-    ppx_deriving_yojson
-    ppx_hash
-    ppx_inline_test
-    (ppx_sexp_conv ( = v0.16.0))
-    ppx_expect
-    (visitors (= 20210608))
-    ; regexps
-    re
-    pcre
-    ; we're currently "vendoring" pcre2 in libs/pcre2
-    ; so no need to get opam to install it
-    ;(pcre2 (>= "7.5.3" ))
-    ; misc
-    ocamlgraph
-    parmap
-    semver
-    (timedesc (>= 2.0.0)) ; used via git-wrapper
-    (lsp (= 1.15.1-5.0))
-    git
-    ; tracing
-    trace
-    ppx_trace
-    (opentelemetry (>= 0.9))
-    ; needed by opentelemetry-client-ocurl but the latest, 0.9.2
-    ; does not work under windows (see https://github.com/ygrek/ocurl/issues/77)
-    ; hence the pin to 0.9.1
-    (ocurl (= 0.9.1))
-    opentelemetry-client-ocurl
-    ambient-context-lwt
-    (conf-libcurl (= 1)) ; force older version of conf-libcurl to make windows work
-    ; web stuff
-    uri
-    (uuidm (>= 0.9.9))
-    (cohttp (= 6.0.0)) ; 6.0.0 for better error handling
-    cohttp-lwt-unix
-    cohttp-lwt-jsoo
-    tls-lwt ; needed for TLS support in the cohttp HTTP client (only TLS 1.3 seems to work)
-    emile
-    (digestif (>= 1.0.0))
-    (tls-mirage (= 0.17.3)) ; force older version of tls-mirage to make windows work
-    ; concurrency
-    lwt
-    lwt_ppx
-    (conf-libev (<> :os win32)) ; for lwt, to get better FD perf
-    ; jsoo
-    (js_of_ocaml (= 5.8.2))
-    (js_of_ocaml-compiler (= 5.8.2))
-    (js_of_ocaml-ppx (= 5.8.2))
-    (js_of_ocaml-lwt (= 5.8.2))
-    integers_stubs_js
-    ;TODO: this is for secrets and should be in ../dune-project but doing so
-    ; slows down a lot our CI because it pulls dependencies that seem
-    ; to cause the removal and recompilation of many packages (e.g., tls) and
-    ; make our GHA opam cache useless. We might need to install here instead
-    ; packages that would avoid this effect.
-    git-unix
   )
 )
 
@@ -566,7 +598,6 @@ Uses indentation and standard braces to determine a crude parse tree
     atdgen
     ANSITerminal
     cmdliner
-    (dune (>= 2.1))
   )
 )
 ; needed because lots of dune language libs use tree-sitter-lang
@@ -577,7 +608,7 @@ Uses indentation and standard braces to determine a crude parse tree
   (allow_empty)
 )
 
-(package (name TCB)
+(package (name collections)
   (synopsis "XXX")
   (description "XXX")
 )

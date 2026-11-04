@@ -14,6 +14,7 @@
  * LICENSE for more details.
  *)
 open Common
+open Maps
 module Log = Log_analyzing.Log
 
 (*****************************************************************************)
@@ -56,7 +57,7 @@ end
 
 type nodei = int
 
-module NodeiSet = Set.Make (Int)
+module NodeiSet = Sets.Int_set
 
 (* The final dataflow result; a map from each program point to a map containing
  * information for each variables.
@@ -123,10 +124,10 @@ module Make (F : Flow) = struct
       (fun s ni v ->
         s
         ^ spf "%2d <- %7s: %15s %s\n" ni
-            ((f.graph#predecessors ni)#fold
-               (fun s (ni, _) -> csv_append s (string_of_int ni))
-               "")
-            (F.short_string_of_node (f.graph#nodes#find ni))
+            (Set_.fold
+               (fun (ni, _) s -> csv_append s (string_of_int ni))
+               (f.graph#predecessors ni) "")
+            (F.short_string_of_node (Int_map.find ni f.graph#nodes))
             (inout_to_str env_to_str v))
       "" mapping
 
@@ -161,14 +162,14 @@ module Make (F : Flow) = struct
     loop 0 workset
 
   let forward_succs (f : F.flow) n =
-    (f.graph#successors n)#fold
-      (fun s (ni, _) -> NodeiSet.add ni s)
-      NodeiSet.empty
+    Set_.fold
+      (fun (ni, _) s -> NodeiSet.add ni s)
+      (f.graph#successors n) NodeiSet.empty
 
   let backward_succs (f : F.flow) n =
-    (f.graph#predecessors n)#fold
-      (fun s (ni, _) -> NodeiSet.add ni s)
-      NodeiSet.empty
+    Set_.fold
+      (fun (ni, _) s -> NodeiSet.add ni s)
+      (f.graph#predecessors n) NodeiSet.empty
 
   let (fixpoint :
         timeout:float ->
@@ -194,16 +195,16 @@ module Make (F : Flow) = struct
     let nb_nodes = f.graph#nb_nodes in
     let max_nodei = ref (-1) in
 
-    f.graph#nodes#tolist
-    |> List.iter (fun (ni, _nod) ->
-           (* actually there are some del_node done in cfg_build, for
-            * switch, so sometimes ni is >= len
-            *
-            * old:
-            * if ni >= nb_nodes
-            * then pr2 "the CFG nodei is bigger than the number of nodes"
-            *)
-           if ni > !max_nodei then max_nodei := ni);
+    f.graph#nodes
+    |> Int_map.iter (fun ni _nod ->
+        (* actually there are some del_node done in cfg_build, for
+         * switch, so sometimes ni is >= len
+         *
+         * old:
+         * if ni >= nb_nodes
+         * then pr2 "the CFG nodei is bigger than the number of nodes"
+         *)
+        if ni > !max_nodei then max_nodei := ni);
     assert (!max_nodei + 1 >= nb_nodes);
     Array.make (!max_nodei + 1) v
 end

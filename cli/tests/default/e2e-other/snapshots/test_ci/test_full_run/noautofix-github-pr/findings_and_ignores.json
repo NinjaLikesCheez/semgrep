@@ -570,6 +570,7 @@
     "supply-chain1",
     "supply-chain2"
   ],
+  "skipped_paths": [],
   "contributions": [
     {
       "commit_hash": "sanitized",
@@ -587,5 +588,6 @@
         "commit_author_email": "test_environment@test.r2c.dev"
       }
     }
-  ]
+  ],
+  "changed_dependency_sources": []
 }

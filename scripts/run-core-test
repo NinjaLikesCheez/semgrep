@@ -18,17 +18,23 @@ NC='\033[0m' # No Color
 # output.
 # Checking the status of the tests and approving the output is done with
 # './test status' and './test approve'. See './test --help' for options.
-# This uses the in-house project testo.
+# This uses our community project Testo.
 #
-# TODO: fix concurrency bugs to remove '-j0'
-./test -j0
+testo_options='--max-inline-log-bytes=100_000'
+if [[ $(uname -o) = "Cygwin" ]]; then
+  # TODO: Remove when https://github.com/semgrep/testo/issues/124 is fixed
+  # Don't run tests in parallel on Windows, to prevent deadlocks
+  ./test -j 0 $testo_options
+else
+  ./test $testo_options
+fi
 
 # run inline tests
 # TODO: make them part of the testo test program above.
-dune runtest -f --no-buffer libs/commons
-dune runtest -f --no-buffer libs/lib_parsing
-dune runtest -f --no-buffer src/engine
-dune runtest -f --no-buffer src/fixing
+dune runtest -f --no-buffer "libs/commons"
+dune runtest -f --no-buffer "libs/lib_parsing"
+dune runtest -f --no-buffer "src/engine"
+dune runtest -f --no-buffer "src/fixing"
 
 # osemgrep expect tests
 # TODO: migrate to testo

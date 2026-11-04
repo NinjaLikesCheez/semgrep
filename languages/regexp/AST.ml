@@ -1,4 +1,16 @@
 (*
+   Copyright (c) 2022-2024 Semgrep Inc.
+
+   This library is free software; you can redistribute it and/or
+   modify it under the terms of the GNU Lesser General Public License
+   version 2.1 as published by the Free Software Foundation.
+
+   This library is distributed in the hope that it will be useful, but
+   WITHOUT ANY WARRANTY; without even the implied warranty of
+   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the file
+   LICENSE for more details.
+*)
+(*
    Regexp AST
 *)
 
@@ -144,7 +156,7 @@ let seq_of_list (l : t list) : t =
   List_.fold_right (fun x acc -> seq x acc) l (Empty dummy_loc)
 
 let seq_of_code_points (l : (loc * int) list) : t =
-  List_.map (fun (loc, c) -> Char (loc, Singleton c)) l |> seq_of_list
+  List.map (fun (loc, c) -> Char (loc, Singleton c)) l |> seq_of_list
 
 let seq_of_ascii_string loc s =
   code_points_of_ascii_string_loc loc s |> seq_of_code_points

@@ -11,6 +11,7 @@
 
     foo.py
    ❯❯❱ eqeq-bad
+          ❰❰ Blocking ❱❱
           useless comparison
 
             4┆ a == a
@@ -28,6 +29,7 @@
            13┆ z == z  # nosemgrep
 
    ❯❯❱ eqeq-four
+          ❰❰ Blocking ❱❱
           useless comparison to 4
 
            18┆ baz == 4  # nosemgrep
@@ -35,6 +37,7 @@
            19┆ baz == 4
 
     ❯❱ taint-test
+          ❰❰ Blocking ❱❱
           unsafe use of danger
 
            27┆ sink(d2)
@@ -98,18 +101,32 @@
   Scanning 1 file with 4 python rules.
 
   SUPPLY CHAIN RULES
-  Scanning 1 file.
+
+  Dependency Sources   Resolution Method   Ecosystem   Dependencies   Rules
+ ───────────────────────────────────────────────────────────────────────────
+  poetry.lock          Lockfile            Pypi        3                  1
+  yarn.lock            Lockfile            Npm         1                  2
+
+
+  Analysis       Rules
+ ──────────────────────
+  Basic              2
+  Reachability       1
+
   Uploading scan results
   Finalizing scan
 
 ┌──────────────┐
 │ Scan Summary │
 └──────────────┘
-Some files were skipped or only partially analyzed.
-  Scan was limited to files tracked by git.
-
+✅ CI scan completed successfully.
+ • Findings: 13 (10 blocking)
+ • Rules run: 7
+ • Targets scanned: 3
+ • Parsed lines: ~100.0%
+ • Scan was limited to files tracked by git
+ • For a detailed list of skipped files and lines, run semgrep with the --verbose flag
 CI scan completed successfully.
-  Found 13 findings (10 blocking) from 7 rules.
   View results in Semgrep Cloud Platform:
     https://semgrep.dev/orgs/org_name/findings?repo=local_scan/checkout_project_name&ref=some/branch-name
     https://semgrep.dev/orgs/org_name/supply-chain/vulnerabilities?repo=local_scan/checkout_project_name&ref=some/branch-name

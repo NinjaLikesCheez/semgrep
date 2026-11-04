@@ -1,3 +1,19 @@
+(* Martin Jambon
+ *
+ * Copyright (C) 2024-2025 Semgrep Inc.
+ *
+ * This library is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU Lesser General Public License
+ * version 2.1 as published by the Free Software Foundation.
+ *
+ * This library is distributed in the hope that it will be useful, but
+ * WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the file
+ * LICENSE for more details.
+ *)
+open Common
+open Fpath_.Operators
+
 (*****************************************************************************)
 (* Prelude *)
 (*****************************************************************************)
@@ -12,9 +28,6 @@
    TODO: create a 'project' library that depends both on 'git_wrapper'
    and 'paths'?
 *)
-
-open Common
-open Fpath_.Operators
 
 (*****************************************************************************)
 (* Types *)
@@ -43,7 +56,7 @@ type t = {
      and starts with one. *)
   string : string;
 }
-[@@deriving show]
+[@@deriving show, eq]
 
 let string_of_segments segments = String.concat "/" segments
 
@@ -73,6 +86,25 @@ let relative_segments (ppath : t) =
   | [ "" ] -> assert false
   | "" :: segs -> segs
   | _ -> assert false
+
+(* The final segment of the path. For a directory path (ending in '/'), this
+   is the empty string. For the root path '/', this is also the empty
+   string. *)
+let last_segment (path : t) : string =
+  match List.rev path.segments with
+  | seg :: _ -> seg
+  | [] -> ""
+
+(* Does [path] denote a directory, i.e. end with a trailing slash? *)
+let is_dir_path (path : t) : bool = last_segment path = ""
+
+(* For a directory path '/a/b/', the final non-empty segment ('b'). Returns
+   [""] when the path is not a directory path or has no non-empty segment
+   before the trailing slash. *)
+let dir_segment (path : t) : string =
+  match List.rev path.segments with
+  | "" :: seg :: _ -> seg
+  | _ -> ""
 
 (*****************************************************************************)
 (* Builder helpers (not exposed in Ppath.mli) *)
@@ -195,14 +227,24 @@ let to_fpath ?root path =
 (*
    Represent Ppaths as strings using '/' as the separator regardless
    of the platform. These are not valid file system paths in general.
+
+   This function isn't exposed under this name to avoid misuse.
+*)
+let of_string string = create (String.split_on_char '/' string)
+
+(*
    They may be used only in tests and in internal assertions
    (assert or invalid_arg).
 *)
-let of_string_for_tests string = create (String.split_on_char '/' string)
+let of_string_for_tests = of_string
 
 (* Show the ppath in string form. Doesn't need to be fast.
    We use a different name to distinguish use cases more clearly. *)
 let to_string_for_tests = to_string_fast
+
+(* For ATD serialization *)
+let wrap = of_string
+let unwrap = to_string_fast
 
 let relativize ~root:orig_root orig_ppath =
   let rec aux root ppath =
@@ -287,9 +329,18 @@ let remove_prefix root path =
 (* Builder entry points *)
 (*****************************************************************************)
 
-let of_relative_fpath (fpath : Fpath.t) =
+(* best effort to get a ppath without knowing the project root
+   and without raising an exception *)
+let fake_from_fpath_DEPRECATED (fpath : Fpath.t) =
+  (* First, remove leading "./" and such *)
+  let fpath = Fpath.normalize fpath in
   if Fpath.is_rel fpath then create ("" :: Fpath.segs fpath)
-  else invalid_arg ("Ppath.of_relative_fpath: " ^ !!fpath)
+  else create (Fpath.segs fpath)
+
+let of_relative_fpath_exn (fpath : Fpath.t) =
+  let fpath = Fpath.normalize fpath in
+  if Fpath.is_rel fpath then create ("" :: Fpath.segs fpath)
+  else invalid_arg ("Ppath.of_relative_fpath_exn: " ^ !!fpath)
 
 (*
    This assumes the input paths are physical paths.
@@ -300,14 +351,15 @@ let in_project_unsafe ~(phys_root : Fpath.t) (phys_path : Fpath.t) =
   match remove_prefix phys_root phys_path with
   | None ->
       Error
-        (Common.spf
+        (spf
            "cannot make path %S relative to project root %S.\n\
             cwd: %s\n\
             realpath for .: %s\n\
-            Sys.argv: %s" !!phys_path !!phys_root (Sys.getcwd ())
+            Sys.argv: %s"
+           !!phys_path !!phys_root (Sys.getcwd ())
            (Rfpath.of_string_exn "." |> Rfpath.show)
            (Sys.argv |> Array.to_list |> String.concat " "))
-  | Some rel_path -> Ok (of_relative_fpath rel_path)
+  | Some rel_path -> Ok (of_relative_fpath_exn rel_path)
 
 let in_project ~(root : Rfpath.t) (path : Rfpath.t) =
   in_project_unsafe

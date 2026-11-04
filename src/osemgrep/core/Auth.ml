@@ -1,3 +1,15 @@
+(*
+   Copyright (c) 2023-2024 Semgrep Inc.
+
+   This library is free software; you can redistribute it and/or
+   modify it under the terms of the GNU Lesser General Public License
+   version 2.1 as published by the Free Software Foundation.
+
+   This library is distributed in the hope that it will be useful, but
+   WITHOUT ANY WARRANTY; without even the implied warranty of
+   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the file
+   LICENSE for more details.
+*)
 (* A Semgrep.dev token representing your identity.
  * This is stored in ~/.semgrep/settings.yml and initially fetched
  * from https://semgrep.dev during 'semgrep login'
@@ -18,27 +30,3 @@ let well_formed token =
   String.length str > 0
 
 let equal (Token a) (Token b) = String.equal a b
-
-type cap_token = < token : token >
-
-(* ugly: can't factorize *)
-let cap_token_and_network token caps =
-  object
-    method token = token
-    method network = caps#network
-  end
-
-let cap_token_and_network_and_tmp token caps =
-  object
-    method token = token
-    method network = caps#network
-    method tmp = caps#tmp
-  end
-
-let cap_token_and_network_and_tmp_and_exec token caps =
-  object
-    method token = token
-    method network = caps#network
-    method tmp = caps#tmp
-    method exec = caps#exec
-  end

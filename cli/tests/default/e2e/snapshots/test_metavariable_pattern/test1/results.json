@@ -1,4 +1,5 @@
 {
+  "engine_requested": "OSS",
   "errors": [
     {
       "code": 2,
@@ -14,6 +15,7 @@
       "targets/metavariable-pattern/test1.yml"
     ]
   },
+  "profiling_results": [],
   "results": [
     {
       "check_id": "rules.metavariable-pattern.yaml.github-actions.security.run-shell-injection.run-shell-injection",
@@ -46,14 +48,6 @@
             "https://docs.github.com/en/actions/learn-github-actions/security-hardening-for-github-actions#understanding-the-risk-of-script-injections",
             "https://securitylab.github.com/research/github-actions-untrusted-input/"
           ],
-          "semgrep.dev": {
-            "rule": {
-              "origin": "community",
-              "rule_id": "v8UjQj",
-              "url": "https://semgrep.dev/playground/r/K3TPZA/yaml.github-actions.security.run-shell-injection.run-shell-injection",
-              "version_id": "K3TPZA"
-            }
-          },
           "shortlink": "https://sg.run/pkzk",
           "source": "https://semgrep.dev/r/yaml.github-actions.security.run-shell-injection.run-shell-injection",
           "subcategory": [
@@ -75,5 +69,6 @@
     }
   ],
   "skipped_rules": [],
+  "time": "<masked in tests>",
   "version": "0.42"
 }

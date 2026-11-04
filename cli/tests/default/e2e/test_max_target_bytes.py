@@ -1,10 +1,22 @@
+#
+# Copyright (c) 2021-2025 Semgrep Inc.
+#
+# This library is free software; you can redistribute it and/or
+# modify it under the terms of the GNU Lesser General Public License
+# version 2.1 as published by the Free Software Foundation.
+#
+# This library is distributed in the hope that it will be useful, but
+# WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the file
+# LICENSE for more details.
+#
 import pytest
 from tests.fixtures import RunSemgrep
 
 
 def generic_test_max_target_bytes(
     run_semgrep_in_tmp: RunSemgrep,
-    snapshot,
+    posix_snapshot,
     max_bytes,
     check_results=True,
     check_output=True,
@@ -16,24 +28,38 @@ def generic_test_max_target_bytes(
         assert_exit_code=None,
     )
     if check_results:
-        snapshot.assert_match(stdout, "results.json")
+        posix_snapshot.assert_match(stdout, "results.json")
     if check_output:
-        snapshot.assert_match(stderr, "error.txt")
+        posix_snapshot.assert_match(stderr, "error.txt")
 
 
 @pytest.mark.kinda_slow
 @pytest.mark.parametrize("max_bytes", ["1MB", "1.3R", "100B", "1B"])
-def test_max_target_bytes_results(run_semgrep_in_tmp: RunSemgrep, snapshot, max_bytes):
+@pytest.mark.osemfail
+def test_max_target_bytes_results(
+    run_semgrep_on_copied_files: RunSemgrep, posix_snapshot, max_bytes
+):
     generic_test_max_target_bytes(
-        run_semgrep_in_tmp, snapshot, max_bytes, check_results=True, check_output=False
+        run_semgrep_on_copied_files,
+        posix_snapshot,
+        max_bytes,
+        check_results=True,
+        check_output=False,
     )
 
 
 @pytest.mark.kinda_slow
 @pytest.mark.parametrize("max_bytes", ["1MB", "1.3R"])
-def test_max_target_bytes_output(run_semgrep_in_tmp: RunSemgrep, snapshot, max_bytes):
+@pytest.mark.osemfail
+def test_max_target_bytes_output(
+    run_semgrep_in_test_folder: RunSemgrep, posix_snapshot, max_bytes
+):
     generic_test_max_target_bytes(
-        run_semgrep_in_tmp, snapshot, max_bytes, check_results=False, check_output=True
+        run_semgrep_in_test_folder,
+        posix_snapshot,
+        max_bytes,
+        check_results=False,
+        check_output=True,
     )
 
 
@@ -50,6 +76,6 @@ def test_max_target_bytes_output(run_semgrep_in_tmp: RunSemgrep, snapshot, max_b
 @pytest.mark.parametrize("max_bytes", ["100B", "1B"])
 @pytest.mark.pysemfail
 def test_max_target_bytes_output_pysemfail(
-    run_semgrep_in_tmp: RunSemgrep, snapshot, max_bytes
+    run_semgrep_on_copied_files: RunSemgrep, posix_snapshot, max_bytes
 ):
-    test_max_target_bytes_output(run_semgrep_in_tmp, snapshot, max_bytes)
+    test_max_target_bytes_output(run_semgrep_on_copied_files, posix_snapshot, max_bytes)

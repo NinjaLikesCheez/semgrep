@@ -1,10 +1,22 @@
+(*
+   Copyright (c) 2023-2025 Semgrep Inc.
+
+   This library is free software; you can redistribute it and/or
+   modify it under the terms of the GNU Lesser General Public License
+   version 2.1 as published by the Free Software Foundation.
+
+   This library is distributed in the hope that it will be useful, but
+   WITHOUT ANY WARRANTY; without even the implied warranty of
+   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the file
+   LICENSE for more details.
+*)
 open Common
 
 type t = Yojson.Basic.t
 
 let cli =
   let parser str =
-    if USys.file_exists str then
+    if Sys_.file_exists str then
       try Ok (str, Yojson.Basic.from_file ~fname:str str) with
       | Yojson.Json_error _ -> Error (`Msg (spf "Invalid JSON file: %s" str))
     else Error (`Msg (spf "%s does not exist" str))

@@ -1,4 +1,5 @@
 {
+  "engine_requested": "OSS",
   "errors": [],
   "interfile_languages_used": [],
   "paths": {
@@ -6,6 +7,7 @@
       "targets/join_rules/user-input-with-unescaped-extension/views.py"
     ]
   },
+  "profiling_results": [],
   "results": [
     {
       "check_id": "rules.join_rules.user-input-with-unescaped-extension",
@@ -72,5 +74,6 @@
     }
   ],
   "skipped_rules": [],
+  "time": "<masked in tests>",
   "version": "0.42"
 }

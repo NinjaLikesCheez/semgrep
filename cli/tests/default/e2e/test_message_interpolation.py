@@ -1,3 +1,15 @@
+#
+# Copyright (c) 2022-2025 Semgrep Inc.
+#
+# This library is free software; you can redistribute it and/or
+# modify it under the terms of the GNU Lesser General Public License
+# version 2.1 as published by the Free Software Foundation.
+#
+# This library is distributed in the hope that it will be useful, but
+# WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the file
+# LICENSE for more details.
+#
 import pytest
 from tests.fixtures import RunSemgrep
 
@@ -44,17 +56,19 @@ from semgrep.constants import OutputFormat
         ),
     ],
 )
-def test_message_interpolation(run_semgrep_in_tmp: RunSemgrep, snapshot, rule, target):
-    snapshot.assert_match(
+def test_message_interpolation(
+    run_semgrep_in_tmp: RunSemgrep, posix_snapshot, rule, target
+):
+    posix_snapshot.assert_match(
         run_semgrep_in_tmp(rule, target_name=target).stdout, "results.json"
     )
 
 
 @pytest.mark.slow
-def test_no_double_interpolation(run_semgrep_in_tmp: RunSemgrep, snapshot):
+def test_no_double_interpolation(run_semgrep_in_tmp: RunSemgrep, posix_snapshot):
     stdout, _ = run_semgrep_in_tmp(
         "rules/message_interpolation/interpolated_message.yaml",
         target_name="message_interpolation/target_with_metavariable.py",
         output_format=OutputFormat.JSON,  # Not the real output format; just disables JSON parsing
     )
-    snapshot.assert_match(stdout, "report.json")
+    posix_snapshot.assert_match(stdout, "report.json")

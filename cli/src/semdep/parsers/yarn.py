@@ -1,3 +1,15 @@
+#
+# Copyright (c) 2023-2025 Semgrep Inc.
+#
+# This library is free software; you can redistribute it and/or
+# modify it under the terms of the GNU Lesser General Public License
+# version 2.1 as published by the Free Software Foundation.
+#
+# This library is distributed in the hope that it will be useful, but
+# WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the file
+# LICENSE for more details.
+#
 """
 Parsers for yarn.lock versions 1 and 2/3
 Version 1 parser based on
@@ -7,6 +19,7 @@ https://classic.yarnpkg.com/lang/en/docs/yarn-lock/
 Version 2/3 parser based on looking at examples on github, I could not find any documentation
 Here are the Yarn 2/3 docs: https://yarnpkg.com/
 """
+import re
 from pathlib import Path
 from typing import List
 from typing import Optional
@@ -16,6 +29,7 @@ from typing import TypedDict
 from typing import TypeVar
 from typing import Union
 
+import semgrep.semgrep_interfaces.semgrep_output_v1 as out
 from semdep.external.parsy import regex
 from semdep.external.parsy import string
 from semdep.external.parsy import success
@@ -31,15 +45,13 @@ from semdep.parsers.util import quoted
 from semdep.parsers.util import safe_parse_lockfile_and_manifest
 from semdep.parsers.util import transitivity
 from semdep.parsers.util import upto
+from semgrep import telemetry
 from semgrep.semgrep_interfaces.semgrep_output_v1 import DependencyChild
 from semgrep.semgrep_interfaces.semgrep_output_v1 import Ecosystem
 from semgrep.semgrep_interfaces.semgrep_output_v1 import FoundDependency
 from semgrep.semgrep_interfaces.semgrep_output_v1 import Fpath
-from semgrep.semgrep_interfaces.semgrep_output_v1 import Jsondoc
 from semgrep.semgrep_interfaces.semgrep_output_v1 import Npm
 from semgrep.semgrep_interfaces.semgrep_output_v1 import ScaParserName
-from semgrep.semgrep_interfaces.semgrep_output_v1 import Yarn1
-from semgrep.semgrep_interfaces.semgrep_output_v1 import Yarn2
 from semgrep.verbose_logging import getLogger
 
 logger = getLogger(__name__)
@@ -74,19 +86,40 @@ def create_dependency_dict(
     return dependency_dict
 
 
+# Yarn protocol prefixes that resolve to a non-npm source. When a version
+# field starts with one of these, the version may still contain '@' (e.g.
+# "patch:resolve@^1.1.7#~builtin<compat/resolve>") but it is NOT npm
+# aliasing and must not be split on '@'.
+_NON_NPM_PROTOCOL_PREFIXES = (
+    "patch:",
+    "file:",
+    "workspace:",
+    "git:",
+    "git+",
+    "ssh://",
+    "https://",
+    "http://",
+)
+
+
 def dep_version_pair(dep: str, version: str) -> Tuple[str, str]:
     """
     Given a dependency and a version, return a tuple of the dependency and version
     """
     stripped_version = remove_npm_prefix(version)
+    if stripped_version.startswith(_NON_NPM_PROTOCOL_PREFIXES):
+        return (dep, stripped_version)
     split_stripped_version = stripped_version.split("@")
-    if len(split_stripped_version) > 1 and not (
-        "ssh://" in split_stripped_version[0] or "https://" in split_stripped_version[0]
-    ):  # Detect npm aliasing
+    if len(split_stripped_version) > 1:  # Detect npm aliasing
         if (
             split_stripped_version[0] == ""
         ):  # Indicates that the package being aliased is scoped itself - use the next element for the package name instead
-            return (f"@{split_stripped_version[1]}", split_stripped_version[2])
+            if len(split_stripped_version) > 2:
+                return (f"@{split_stripped_version[1]}", split_stripped_version[2])
+            else:
+                # Indicates that the package being aliased was aliased with no version constraint
+                # Discard the version constraint since the "version" field will be populated in the lockfile anyway
+                return (f"@{split_stripped_version[1]}", "")
         return (split_stripped_version[0], split_stripped_version[1])
     else:
         return (dep, stripped_version)
@@ -99,7 +132,7 @@ def dep_version_pair(dep: str, version: str) -> Tuple[str, str]:
 # my-package-without-version-constraint:
 # "filedep@file:../../correct/path/filedep":
 # "bats@https://github.com/bats-core/bats-core#master":
-part1 = regex('"?@?([^@:]*)', flags=0, group=1)
+part1 = regex('"?(@?[^@:]*)', flags=0, group=1)
 part2 = regex('@?([^:,"]*(:?(?!\n)[^:,"]*)*)"?', flags=0, group=1)
 source1 = pair(part1, part2)
 
@@ -125,8 +158,7 @@ dependencies1 = (
     .bind(
         lambda title: key_value1.sep_by(string("\n")).map(
             lambda child_info: [
-                dep_version_pair(dep.strip('"').strip("@"), version)
-                for dep, version in child_info
+                dep_version_pair(dep.strip('"'), version) for dep, version in child_info
             ],
         )
         if title
@@ -173,6 +205,18 @@ yarn1 = (
     << (string("\n\n") | string("\n")).optional()
 )
 
+# yarn <= 0.16 wrote the same header without the trailing blank line. Only
+# used when an entry follows directly; other header variants (e.g. extra
+# comment lines) would be misread by yarn_dep1 and must keep failing.
+YARN1_LEGACY_PREFIX = YARN1_PREFIX[:-1]
+YARN1_LEGACY_HEADER = re.compile(re.escape(YARN1_LEGACY_PREFIX) + r"(?![#\s])")
+
+yarn1_legacy = (
+    string(YARN1_LEGACY_PREFIX)
+    >> yarn_dep1.sep_by(string("\n\n"))
+    << (string("\n\n") | string("\n")).optional()
+)
+
 
 # The yarn version 2/3 parser is set up equivalently, with slight differences in sub-parsers
 
@@ -201,7 +245,12 @@ source2 = pair(
 # Examples:
 # "@apidevtools/json-schema-ref-parser@npm:9.0.9"
 # "@babel/generator@npm:^7.12.11, @babel/generator@npm:^7.12.5, @babel/generator@npm:^7.18.10"
-multi_source2 = quoted(source2.sep_by(string(", ")))
+#
+# Yarn Berry also emits a multi-line form inside a YAML explicit-key block,
+# where descriptors are separated by `,\n  ` (comma, newline, two-space
+# continuation indent) instead of `, `. See SC-3479.
+key_separator2 = string(", ") | regex(r",\n  ")
+multi_source2 = quoted(source2.sep_by(key_separator2))
 
 # Examples:
 #   version: 7.18.10
@@ -239,9 +288,15 @@ dependencies2 = (
 #   checksum: 2987dbebb484727a227f1ce3db90810320986cfb3ffd23e6d1d87f75bbd8e7871b5bc44252822d4d5f048a2d872a5702b2a9bf7bab7e07f087d7f306f0ea6c0a
 #   languageName: node
 #   linkType: hard
+# Yarn Berry emits two forms for the key half of an entry:
+#   Inline:        "k1, k2":\n   ...
+#   Explicit-key:  ? "k1,\n  k2"\n:\n   ...
+# The explicit-key form is YAML's way of writing keys too long for one line,
+# and Yarn uses it for comma-joined patch: descriptors. See SC-3479.
+key_terminator2 = string("\n:\n") | string(":\n")
 yarn_dep2 = mark_line(
     pair(
-        multi_source2 << string(":\n"),
+        string("? ").optional() >> multi_source2 << key_terminator2,
         key_value2.sep_by(string("\n")).bind(
             lambda dep_info: dependencies2.map(
                 lambda deps: create_dependency_dict(
@@ -304,19 +359,26 @@ def remove_trailing_octothorpe(s: Optional[str]) -> Optional[str]:
         return "#".join(s.split("#")[:-1]) if "#" in s else s
 
 
+@telemetry.trace(telemetry.TraceOwner.SSC)
 def parse_yarn(
     lockfile_path: Path, manifest_path: Optional[Path]
 ) -> Tuple[List[FoundDependency], List[DependencyParserError]]:
     with open(lockfile_path) as f:
         lockfile_text = f.read()
-    yarn_version = 1 if lockfile_text.startswith(YARN1_PREFIX) else 2
-    parser = yarn1 if yarn_version == 1 else yarn2
+    if lockfile_text.startswith(YARN1_PREFIX):
+        yarn_version, parser = 1, yarn1
+    elif YARN1_LEGACY_HEADER.match(lockfile_text):
+        yarn_version, parser = 1, yarn1_legacy
+    else:
+        yarn_version, parser = 2, yarn2
     parser_name = (
-        ScaParserName(Yarn1()) if yarn_version == 1 else ScaParserName(Yarn2())
+        ScaParserName(out.PYarn1())
+        if yarn_version == 1
+        else ScaParserName(out.PYarn2())
     )
     parsed_lockfile, parsed_manifest, errors = safe_parse_lockfile_and_manifest(
         DependencyFileToParse(lockfile_path, parser, parser_name),
-        DependencyFileToParse(manifest_path, json_doc, ScaParserName(Jsondoc()))
+        DependencyFileToParse(manifest_path, json_doc, ScaParserName(out.PJsondoc()))
         if manifest_path
         else None,
     )
@@ -369,14 +431,6 @@ def parse_yarn(
                     )
                 )
             except KeyError:
-                errors.append(
-                    DependencyParserError(
-                        path=Fpath(str(lockfile_path)),
-                        parser=parser_name,
-                        reason=f"Child dependency version not found for child package {child[0]} of parent package {sources[0][0]}",
-                        line=line_number,
-                    )
-                )
                 continue
 
         output.append(

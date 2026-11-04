@@ -21,6 +21,7 @@
     "org_id": "2",
     "repo_display_name": "project_name/project_name",
     "commit_timestamp": "1970-01-01T00:00:00Z",
+    "base_branch_head_commit": "sanitized",
     "is_sca_scan": false,
     "is_code_scan": false,
     "is_secrets_scan": false
@@ -29,7 +30,9 @@
     "cli_version": "<sanitized version>",
     "unique_id": "<sanitized id>",
     "requested_products": [],
-    "dry_run": false
+    "dry_run": false,
+    "ecosystems": [],
+    "packages": []
   },
   "project_config": {
     "version": "v1"

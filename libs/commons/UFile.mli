@@ -1,4 +1,16 @@
 (*
+   Copyright (c) 2023-2025 Semgrep Inc.
+
+   This library is free software; you can redistribute it and/or
+   modify it under the terms of the GNU Lesser General Public License
+   version 2.1 as published by the Free Software Foundation.
+
+   This library is distributed in the hope that it will be useful, but
+   WITHOUT ANY WARRANTY; without even the implied warranty of
+   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the file
+   LICENSE for more details.
+*)
+(*
    Operations on files in the general sense (regular file, folder, etc.).
 
    As opposed to Fpath.ml, which is purely syntactical, the functions below
@@ -12,14 +24,16 @@
 (* Paths *)
 (*****************************************************************************)
 
-(* ugly: internal flag for files_of_dir_or_files_no_vcs_nofilter *)
-val follow_symlinks : bool ref
-
-(* use the command 'find' internally and tries to skip files in
+(* list recursively files in a directory and tries to skip files in
  * version control system (vcs) (e.g., .git, _darcs, etc.).
- * Deprecated?
+ *
+ * strict: fail hard (Invalid_argument exception) if the paths given
+ * as arguments don't exist.
+ *
+ * DEPRECATED: use instead paths/List_files.mli
  *)
-val files_of_dirs_or_files_no_vcs_nofilter : Fpath.t list -> Fpath.t list
+val files_of_dirs_or_files_no_vcs_nofilter :
+  ?strict:bool -> Fpath.t list -> Fpath.t list
 
 (*****************************************************************************)
 (* IO *)
@@ -67,7 +81,17 @@ val read_file : ?max_len:int -> Fpath.t -> string
  *     pr "this goes in foo.txt"
  *   )
  *)
-val with_open_out : Fpath.t -> ((string -> unit) * out_channel -> 'a) -> 'a
+val with_open_out :
+  ?make_ancestors:bool ->
+  Fpath.t ->
+  ((string -> unit) * out_channel -> 'a) ->
+  'a
+(** [with_open_out ~make_ancestors path f] opens, creating if necessary, [path]
+    and applies [f] to the resulting [out_channel].
+
+    If [make_ancestors] is specified and true, it creates any necessary
+    ancestory directories too. *)
+
 val with_open_in : Fpath.t -> (in_channel -> 'a) -> 'a
 
 val find_first_match_with_whole_line :
@@ -102,8 +126,13 @@ val find_first_match_with_whole_line :
    TODO: is this intentional? Please explain.
 *)
 val is_executable : Fpath.t -> bool
-val filesize : Fpath.t -> int
-val filemtime : Fpath.t -> float
+val filesize : Fpath.t -> (int, Unix.error * string * string) result
+
+val filesize_exn : Fpath.t -> int
+(** [filesize_exn f] is the same as [filesize f] but raises a [Unix.Unix_error]
+    exception if an error is encountered during the [stat] syscall. *)
+
+val filemtime : Fpath.t -> (float, Unix.error * string * string) result
 
 (*
    Functions for testing whether a file exists and is of the expected kind,
@@ -152,7 +181,7 @@ val make_directories : Fpath.t -> unit
 (* Deprecated! *)
 module Legacy : sig
   val files_of_dirs_or_files_no_vcs_nofilter :
-    string (* root *) list -> string (* filename *) list
+    ?strict:bool -> string (* root *) list -> string (* filename *) list
 
   val cat : string (* filename *) -> string list
   val write_file : file:string (* filename *) -> string -> unit
@@ -164,6 +193,7 @@ module Legacy : sig
   val with_open_infile : string (* filename *) -> (in_channel -> 'a) -> 'a
 
   (* NOT IN MAIN API *)
-  val dir_contents : string (* filename *) -> string (* filename *) list
+  val dir_contents :
+    ?strict:bool -> string (* filename *) -> string (* filename *) list
   (** [dir_contents dir] will return a recursive list of all files in a dir *)
 end

@@ -1,4 +1,15 @@
-open Common
+(*
+   Copyright (c) 2022-2025 Semgrep Inc.
+
+   This library is free software; you can redistribute it and/or
+   modify it under the terms of the GNU Lesser General Public License
+   version 2.1 as published by the Free Software Foundation.
+
+   This library is distributed in the hope that it will be useful, but
+   WITHOUT ANY WARRANTY; without even the implied warranty of
+   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the file
+   LICENSE for more details.
+*)
 open Fpath_.Operators
 module Flag = Flag_parsing
 
@@ -9,9 +20,9 @@ module Flag = Flag_parsing
 let t = Testo.create
 
 let parse file =
-  Common.save_excursion Flag.error_recovery false (fun () ->
-      Common.save_excursion Flag.show_parsing_error false (fun () ->
-          Common.save_excursion Flag.verbose_parsing false (fun () ->
+  Hook.with_hook_set Flag.error_recovery false (fun () ->
+      Hook.with_hook_set Flag.show_parsing_error false (fun () ->
+          Hook.with_hook_set Flag.verbose_parsing false (fun () ->
               Parse_cpp.parse file)))
 
 (*****************************************************************************)
@@ -19,7 +30,7 @@ let parse file =
 (*****************************************************************************)
 
 (* ran from the root of the semgrep repository *)
-let tests_path = "tests"
+let tests_path = Fpath.v "tests"
 
 let tests =
   Testo.categorize "parsing_cpp"
@@ -37,47 +48,46 @@ let tests =
       (* Parsing *)
       (*-----------------------------------------------------------------------*)
       t "regression files" (fun () ->
-          let dir = Filename.concat tests_path "cpp/parsing" in
+          let dir = tests_path / "cpp" / "parsing" in
           let files =
-            Common2.glob (spf "%s/*.cpp" dir) @ Common2.glob (spf "%s/*.h" dir)
+            Common2.glob (dir / "*.cpp") @ Common2.glob (dir / "*.h")
           in
-          files |> Fpath_.of_strings
+          files
           |> List.iter (fun file ->
-                 try
-                   let _ast = parse file in
-                   ()
-                 with
-                 | Parsing_error.Syntax_error _ ->
-                     Alcotest.failf "it should correctly parse %s" !!file));
+              try
+                let _ast = parse file in
+                ()
+              with
+              | Parsing_error.Syntax_error _ ->
+                  Alcotest.failf "it should correctly parse %s" !!file));
       t "rejecting bad code" (fun () ->
-          let dir = Filename.concat tests_path "cpp/parsing_errors" in
-          let files = Common2.glob (spf "%s/*.cpp" dir) in
-          files |> Fpath_.of_strings
+          let dir = tests_path / "cpp" / "parsing_errors" in
+          let files = Common2.glob (dir / "*.cpp") in
+          files
           |> List.iter (fun file ->
-                 try
-                   let _ast = parse file in
-                   Alcotest.failf "it should have thrown a Parse_error %s"
-                     !!file
-                 with
-                 | Parsing_error.Syntax_error _ -> ()
-                 | exn ->
-                     Alcotest.failf "throwing wrong exn %s on %s"
-                       (Common.exn_to_s exn) !!file));
+              try
+                let _ast = parse file in
+                Alcotest.failf "it should have thrown a Parse_error %s" !!file
+              with
+              | Parsing_error.Syntax_error _ -> ()
+              | exn ->
+                  Alcotest.failf "throwing wrong exn %s on %s"
+                    (Common.exn_to_s exn) !!file));
       (* parsing C files (and not C++ files) possibly containing C++ keywords *)
       t "C regression files" (fun () ->
-          let dir = Filename.concat tests_path "c/parsing" in
+          let dir = tests_path / "c" / "parsing" in
           let files =
-            Common2.glob (spf "%s/*.c" dir)
+            Common2.glob (dir / "*.c")
             (* @ Common2.glob (spf "%s/*.h" dir) *)
           in
-          files |> Fpath_.of_strings
+          files
           |> List.iter (fun file ->
-                 try
-                   let _ast = parse file in
-                   ()
-                 with
-                 | Parsing_error.Syntax_error _ ->
-                     Alcotest.failf "it should correctly parse %s" !!file))
+              try
+                let _ast = parse file in
+                ()
+              with
+              | Parsing_error.Syntax_error _ ->
+                  Alcotest.failf "it should correctly parse %s" !!file))
       (*-----------------------------------------------------------------------*)
       (* Misc *)
       (*-----------------------------------------------------------------------*);

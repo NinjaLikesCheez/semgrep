@@ -16,7 +16,7 @@
     },
     "engine_requested": "OSS",
     "findings_by_product": {
-      "code": 16,
+      "code": 10,
       "supply-chain": 0
     },
     "supply_chain_stats": {
@@ -31,7 +31,9 @@
               ],
               "path": "yarn.lock"
             }
-          ]
+          ],
+          "unresolved_reason": "skipped",
+          "errors": []
         },
         {
           "subproject_id": "f53a023eedfa3fbf2925ec7dc76eecdc954ea94b7e47065393dbad519613dc89",
@@ -48,11 +50,47 @@
             "resolution_method": "LockfileParsing",
             "dependency_count": 3,
             "ecosystem": "pypi"
-          }
+          },
+          "errors": []
         }
       ]
     }
   },
+  "dependencies": {
+    "poetry.lock": [
+      {
+        "package": "badlib",
+        "version": "99.99.99",
+        "ecosystem": "pypi",
+        "allowed_hashes": {},
+        "transitivity": "unknown",
+        "lockfile_path": "poetry.lock",
+        "line_number": 2,
+        "children": []
+      },
+      {
+        "package": "mypy",
+        "version": "0.950",
+        "ecosystem": "pypi",
+        "allowed_hashes": {},
+        "transitivity": "unknown",
+        "lockfile_path": "poetry.lock",
+        "line_number": 10,
+        "children": []
+      },
+      {
+        "package": "python-dateutil",
+        "version": "2.8.2",
+        "ecosystem": "pypi",
+        "allowed_hashes": {},
+        "transitivity": "unknown",
+        "lockfile_path": "poetry.lock",
+        "line_number": 18,
+        "children": []
+      }
+    ]
+  },
   "dependency_parser_errors": [],
+  "changed_dependency_sources": [],
   "task_id": "00000000-0000-0000-0000-000000000000"
 }

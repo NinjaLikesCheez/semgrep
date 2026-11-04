@@ -1,3 +1,15 @@
+(*
+   Copyright (c) 2024 Semgrep Inc.
+
+   This library is free software; you can redistribute it and/or
+   modify it under the terms of the GNU Lesser General Public License
+   version 2.1 as published by the Free Software Foundation.
+
+   This library is distributed in the hope that it will be useful, but
+   WITHOUT ANY WARRANTY; without even the implied warranty of
+   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the file
+   LICENSE for more details.
+*)
 let py_unicode_version =
   let open Py in
   let unicodedata = PyModule.import "unicodedata" in
@@ -16,7 +28,7 @@ let repr = Python_str_repr.repr ~unicode_version:py_unicode_version
 
 let test_repr =
   let inputs = [ ""; "a"; "'"; "\""; "tab\tthis" ] in
-  List_.map
+  List.map
     (fun input ->
       ( Printf.sprintf "%S" input,
         `Quick,

@@ -14,7 +14,7 @@
  *)
 open Common
 open Fpath_.Operators
-module OutJ = Semgrep_output_v1_j
+module Out = Semgrep_output_v1_j
 
 (*****************************************************************************)
 (* Prelude *)
@@ -33,8 +33,11 @@ module OutJ = Semgrep_output_v1_j
  * better separation of concern to put it here.
  *)
 
+let rule_id_capture_group = "ids"
+
 (* TODO: should be in Rule_ID.ml instead? *)
-let rule_id_re_str = {|(?:[:=][\s]?(?P<ids>([^,\s](?:[,\s]+)?)+))?|}
+let rule_id_re_str =
+  {|(?:[:=][\s]?(?P<|} ^ rule_id_capture_group ^ {|>([^,\s](?:[,\s]+)?)+))?|}
 
 (*
    Inline 'noqa' implementation modified from flake8:
@@ -53,7 +56,9 @@ let rule_id_re_str = {|(?:[:=][\s]?(?P<ids>([^,\s](?:[,\s]+)?)+))?|}
    * nosem and nosemgrep should be interchangeable
 *)
 let nosem_inline_re_str = {| nosem(?:grep)?|} ^ rule_id_re_str
-let nosem_inline_re = Pcre2_.regexp nosem_inline_re_str ~flags:[ `CASELESS ]
+
+let nosem_inline_re =
+  Pcre2_.compile_exn nosem_inline_re_str ~options:[ `CASELESS ]
 
 (*
    A nosemgrep comment alone on its line.
@@ -68,9 +73,9 @@ let nosem_inline_re = Pcre2_.regexp nosem_inline_re_str ~flags:[ `CASELESS ]
      print('nosemgrep');
 *)
 let nosem_previous_line_re =
-  Pcre2_.regexp
-    ({|^[^a-zA-Z0-9]* nosem(?:grep)?|} ^ rule_id_re_str)
-    ~flags:[ `CASELESS ]
+  Pcre2_.compile_exn
+    ({|^[^a-zA-Z0-9]* *nosem(?:grep)?|} ^ rule_id_re_str)
+    ~options:[ `CASELESS ]
 
 (*****************************************************************************)
 (* Helpers *)
@@ -84,26 +89,33 @@ let recognise_and_collect ~rex (line_num, line) =
   (* THINK: It is unclear to me why the following call should ever return more
      than one match The above regex seems like it's recognizing a single instance
      of "nosemgrep: <ids>", which shouldn't occur more than once in a single line?
-  *)
-  match Pcre2_.exec_all ~rex line with
-  | Error _ -> None
-  | Ok arr ->
-      Array.to_list arr
-      |> List.concat_map (fun subst ->
-             match Pcre2_.get_named_substring_and_ofs rex "ids" subst with
-             | Ok (Some (s, (begin_ofs, _end_ofs))) ->
-                 (* TODO: This will associate each ID with the range of the entire ID list.
-                    Fix later.
-                 *)
-                 String.split_on_char ',' s
-                 |> List_.map (fun id ->
-                        (line_num, Common2.strip ' ' id, begin_ofs))
-                 |> List_.map Option.some
-             | Ok None
-             | Error _ ->
-                 (* TODO: log something? *)
-                 [ None ])
-      |> Option.some
+
+     We nonetheless iterate over every match (as the previous [exec_all]-based
+     implementation did): a [nosem] occurrence with no ids yields a single
+     [None] sentinel (which suppresses every rule on the line). *)
+  let rec collect acc captures =
+    match captures () with
+    | Seq.Nil -> Ok (List.rev acc)
+    | Seq.Cons (Error err, _) -> Error err
+    | Seq.Cons (Ok captures, rest) -> (
+        match Pcre2_.named_match_of_captures captures rule_id_capture_group with
+        | Some m ->
+            let { Pcre2_.start; _ } = Pcre2_.range_of_match m in
+            (* TODO: This will associate each ID with the range of the entire ID
+               list. Fix later. *)
+            let acc =
+              String.split_on_char ',' (Pcre2_.substring_of_match m)
+              |> List.fold_left
+                   (fun acc id ->
+                     Some (line_num, Common2.strip ' ' id, start) :: acc)
+                   acc
+            in
+            collect acc rest
+        | None ->
+            (* a [nosem] with no ids: suppress every rule on the line *)
+            collect (None :: acc) rest)
+  in
+  Pcre2_.captures_iter rex line |> collect []
 
 (*
    Try to recognize a possible [nosem] tag into the given [match].
@@ -119,7 +131,7 @@ let rule_match_nosem (pm : Core_match.t) : bool * Core_error.t list =
     let start_line = max 0 (start.pos.line - 1) in
     let end_line = end_.pos.line in
     match UFile.lines_of_file (start_line, end_line) path with
-    | Ok xs -> xs |> List_.mapi (fun idx x -> (start_line + idx, x))
+    | Ok xs -> xs |> List.mapi (fun idx x -> (start_line + idx, x))
     | Error err ->
         (* nosemgrep: no-logs-in-library *)
         Logs.warn (fun m ->
@@ -136,7 +148,7 @@ let rule_match_nosem (pm : Core_match.t) : bool * Core_error.t list =
     (* bugfix: This is only needed in relatively rare cases, and it's costly to
      * compute both in time and memory. Making it lazy avoids this computation
      * when it's not needed. *)
-    lazy (Pos.full_converters_large path).linecol_to_bytepos_fun
+    lazy_safe (Pos.full_converters_large path).linecol_to_bytepos_fun
   in
 
   let previous_line, line =
@@ -152,17 +164,20 @@ let rule_match_nosem (pm : Core_match.t) : bool * Core_error.t list =
 
   let ids_line =
     match line with
-    | None -> None
-    | Some line -> recognise_and_collect ~rex:nosem_inline_re line
+    | None -> []
+    | Some line ->
+        recognise_and_collect ~rex:nosem_inline_re line
+        |> Result.value ~default:[]
   in
   let ids_previous_line =
     match previous_line with
-    | None -> None
+    | None -> []
     | Some previous_line ->
         recognise_and_collect ~rex:nosem_previous_line_re previous_line
+        |> Result.value ~default:[]
   in
 
-  match (ids_line ||| [], ids_previous_line ||| []) with
+  match (ids_line, ids_previous_line) with
   | [], [] ->
       (* no lines or no [nosemgrep] occurrences found, keep the [rule_match]. *)
       (false, [])
@@ -173,15 +188,22 @@ let rule_match_nosem (pm : Core_match.t) : bool * Core_error.t list =
   | ids_line, ids_previous_line ->
       let ids = ids_line @ ids_previous_line in
       let ids =
-        ids |> List_.filter_map Fun.id
-        |> List_.map (fun (line_num, s, col) ->
-               (* [String.split_on_char] can **not** return an empty list. *)
-               ( line_num,
-                 List.hd (String.split_on_char ' ' s) (* nosemgrep: list-hd *),
-                 col ))
+        ids |> List.filter_map Fun.id
+        |> List.map (fun (line_num, s, col) ->
+            (* [String.split_on_char] can **not** return an empty list. *)
+            ( line_num,
+              List.hd (String.split_on_char ' ' s) (* nosemgrep: list-hd *),
+              col ))
       in
       (* check if the id specified by the user is the [rule_match]'s [rule_id]. *)
-      let nosem_matches id =
+      let nosem_matches (id : string) : bool =
+        (* This is used to make sure an unexpected error in the Nosemgrep code
+         * does not crash the whole scan. See r2c_nosemgrep_was_fatal.py pytest
+         * file for more info and Core_scan.post_process_matches()
+         *)
+        if id = "nosemgrep_r_2_c_was_fatal" then
+          failwith "nosemgrep_r_2_c_was_fatal";
+
         match Rule_ID.of_string_opt id with
         | Some id -> Rule_ID.ends_with pm.rule_id.id ~suffix:id
         (* If `id` isn't a valid identifier don't supress any rule. *)
@@ -198,15 +220,16 @@ let rule_match_nosem (pm : Core_match.t) : bool * Core_error.t list =
           *)
           let id = Common2.strip '"' id in
           let loc =
-            lazy
-              Tok.
+            lazy_safe
+              Loc.
                 {
                   str = id;
                   pos =
                     Pos.
                       {
                         bytepos =
-                          (Lazy.force linecol_to_bytepos_fun) (line_num, col);
+                          (Lazy_safe.force linecol_to_bytepos_fun)
+                            (line_num, col);
                         line = line_num;
                         column = col;
                         file = path;
@@ -250,7 +273,7 @@ let rule_match_nosem (pm : Core_match.t) : bool * Core_error.t list =
                   Core_error.rule_id = None;
                   typ = SemgrepWarning;
                   msg;
-                  loc = Some (Lazy.force loc);
+                  loc = Some (Lazy_safe.force loc);
                   details = None;
                 }
               in
@@ -264,7 +287,7 @@ let rule_match_nosem (pm : Core_match.t) : bool * Core_error.t list =
 (* Entry points *)
 (*****************************************************************************)
 
-let produce_single_ignored (match_ : Core_result.processed_match) :
+let produce_ignored (match_ : Core_result.processed_match) :
     Core_result.processed_match * Core_error.t list =
   try
     let is_ignored, errors = rule_match_nosem match_.pm in
@@ -285,16 +308,7 @@ let produce_single_ignored (match_ : Core_result.processed_match) :
       let e = Exception.create exn trace in
       Exception.reraise e
 
-(* TODO Inline at callsites? *)
-let produce_ignored (matches : Core_result.processed_match list) :
-    Core_result.processed_match list * Core_error.t list =
-  (* filters [rule_match]s by the [nosemgrep] tag. *)
-  let matches, wide_errors =
-    matches |> List_.map produce_single_ignored |> List_.split
-  in
-  (matches, List_.flatten wide_errors)
-
-let filter_ignored ~keep_ignored (matches : OutJ.core_match list) =
+let filter_ignored ~keep_ignored (matches : Out.core_match list) =
   matches
-  |> List.filter (fun (m : OutJ.core_match) ->
-         keep_ignored || not m.extra.is_ignored)
+  |> List.filter (fun (m : Out.core_match) ->
+      keep_ignored || not m.extra.is_ignored)

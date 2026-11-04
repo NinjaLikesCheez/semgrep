@@ -1,3 +1,15 @@
+(*
+   Copyright (c) 2022-2025 Semgrep Inc.
+
+   This library is free software; you can redistribute it and/or
+   modify it under the terms of the GNU Lesser General Public License
+   version 2.1 as published by the Free Software Foundation.
+
+   This library is distributed in the hope that it will be useful, but
+   WITHOUT ANY WARRANTY; without even the implied warranty of
+   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the file
+   LICENSE for more details.
+*)
 open Common
 module Env = Semgrep_envvars
 module Out = Semgrep_output_v1_t
@@ -23,7 +35,7 @@ module Out = Semgrep_output_v1_t
  *)
 type conf = {
   (* opti and limits *)
-  num_jobs : int;
+  num_jobs : Core_scan_config.num_jobs;
   optimizations : bool;
   max_memory_mb : int;
   timeout : float;
@@ -43,11 +55,14 @@ type conf = {
    * even if it was not requested by the CLI
    *)
   dataflow_traces : bool;
+  use_parmap : bool;
+  (* symbol_analysis and fips_mode are set by the scan config from the app *)
+  symbol_analysis : bool;
+  fips_mode : bool;
 }
 [@@deriving show]
 
 type pro_conf = {
-  diff_config : Differential_scan_config.t;
   (* TODO: change to root: Fpath.t, like in Deep_scan_config.interfile_config *)
   roots : Scanning_root.t list;
   engine_type : Engine_type.t;
@@ -75,20 +90,13 @@ type func = {
     (* LATER? alt: use Config_resolve.rules_and_origin instead? *)
     Rule_error.rules_and_invalid ->
     (* Takes a list of target files, not scanning roots. *)
-    Fpath.t list ->
+    Fppath.t list ->
     Core_result.result_or_exn;
 }
 
 let default_conf : conf =
   {
-    (* Maxing out number of cores used to 16 if more not requested to
-     * not overload on large machines.
-     * Also, hardcode num_jobs to 1 for non-unix (i.e. Windows) because
-     * we don't believe that Parmap works in those environments
-     * TODO: figure out a solution for Windows multi-processing (OCaml 5 in
-     * the worst case)
-     *)
-    num_jobs = min 16 (if Sys.unix then Parmap_.get_cpu_count () else 1);
+    num_jobs = Default Resources.resources.cpu.recommended_multicore_domains;
     timeout = 5.0;
     (* ^ seconds, keep up-to-date with User_settings.ml and constants.py *)
     timeout_threshold = 3;
@@ -99,6 +107,10 @@ let default_conf : conf =
     time_flag = false;
     nosem = true;
     strict = false;
+    use_parmap = true;
+    (* XXX: This needs to be flipped to false *)
+    symbol_analysis = false;
+    fips_mode = false;
   }
 
 (*****************************************************************************)
@@ -132,8 +144,8 @@ let hook_pro_git_remote_scan_setup : (func -> func) option Hook.t =
 (* Metrics and reporting *)
 (*************************************************************************)
 let report_status_and_add_metrics_languages ~respect_gitignore
-    (lang_jobs : Lang_job.t list) (rules : Rule.t list) (targets : Fpath.t list)
-    =
+    (lang_jobs : Lang_job.t list) (rules : Rule.t list)
+    (targets : Fppath.t list) =
   Logs.app (fun m ->
       m "%s"
         (* TODO: validate if target is actually within a git repo and
@@ -142,57 +154,8 @@ let report_status_and_add_metrics_languages ~respect_gitignore
            ~num_targets:(List.length targets) ~respect_gitignore lang_jobs));
   lang_jobs
   |> List.iter (fun { Lang_job.analyzer; _ } ->
-         Metrics_.add_feature "language" (Analyzer.to_string analyzer));
+      Metrics_.add_feature "language" (Analyzer.to_string analyzer));
   ()
-
-(*************************************************************************)
-(* SCA targeting *)
-(*************************************************************************)
-
-(* TODO: port subproject_matchers.py
- * TODO(matthew): We'll ultimately need to do something different, because
- * right now if a lockfile is ignored by .semgrepignore, it should still
- * be possible to produce reachable findings that reference that lockfile,
- * though we won't produce any lockfile-only findings for it
- *)
-let find_lockfiles (targets : Fpath.t list) : Lockfile.t list =
-  targets
-  |> List_.filter_map (fun (target : Fpath.t) ->
-         let res =
-           match Fpath.basename target with
-           | "package-lock.json" ->
-               Some (Lockfile.mk_lockfile Out.NpmPackageLockJson target)
-           | _else_ -> None
-         in
-         res
-         |> Option.iter (fun (lockfile : Lockfile.t) ->
-                Logs.debug (fun m ->
-                    m "found lockfile %s" (Lockfile.show lockfile)));
-         res)
-
-(* TODO: take just Target.regular instead
- * TODO: port subproject_matchers.py and more
- * TODO: we should use the path in the lockfile and the path in the
- *  target to associate the most precise lockfile.
- * TODO: the code below is wrong; it's just a v0 to get a demo working;
- * it will just attach the very first lockfile we found to every single
- * JS target.
- *)
-let add_possibly_lockfile_to_regular_target (lockfiles : Lockfile.t list)
-    (targets : Target.t list) : Target.t list =
-  lockfiles
-  |> List.fold_left
-       (fun acc (lockfile : Lockfile.t) ->
-         acc
-         |> List_.map (fun (target : Target.t) ->
-                match target with
-                | Lockfile _ -> target
-                | Regular
-                    ({ analyzer = Analyzer.L (Lang.Js, _); lockfile = None; _ }
-                     as regular) ->
-                    Regular { regular with lockfile = Some lockfile }
-                | Regular _ -> target))
-       targets
 
 (*************************************************************************)
 (* Input/output adapters to Core_scan input/output *)
@@ -211,14 +174,17 @@ let core_scan_config_of_conf (conf : conf) : Core_scan_config.t =
    nosem = _TODO;
    strict;
    time_flag;
+   use_parmap;
    (* TODO *)
    dataflow_traces = _;
+   symbol_analysis;
+   fips_mode;
   } ->
       (* We do our own output in osemgrep, no need for Core_scan.scan() output *)
       let output_format = Core_scan_config.NoOutput in
       let filter_irrelevant_rules = optimizations in
       {
-        ncores = num_jobs;
+        num_jobs;
         output_format;
         timeout;
         timeout_threshold;
@@ -235,10 +201,17 @@ let core_scan_config_of_conf (conf : conf) : Core_scan_config.t =
          * alt: we could use a 'Core_scan_config.default with ...' but better
          * to list all the fields.
          *)
-        equivalences_file = None;
         respect_rule_paths = true;
         max_match_per_file = Core_scan_config.default.max_match_per_file;
-        tracing = None;
+        telemetry = None;
+        symbol_analysis;
+        fips_mode;
+        use_parmap;
+        (* XXX: careful!  Unless we are opting out of eio,
+         * it still falls to the caller to set up the parallelism config
+         * (since Eio "so very helpfully" insists on everything being lexically-
+         * scoped) *)
+        par_conf = Parallelism_config.default;
       }
 
 (* output adapter to Core_scan.scan.
@@ -247,7 +220,9 @@ let core_scan_config_of_conf (conf : conf) : Core_scan_config.t =
  *)
 let mk_result (all_rules : Rule.rule list) (res : Core_result.t) : result =
   (* similar to Core_command.output_core_results code *)
-  let scanned = res.scanned |> List_.map Target.internal_path |> Set_.of_list in
+  let scanned =
+    res.scanned |> List.map Target.internal_path |> Fpath_.Fpath_set.of_list
+  in
   let match_results = Core_json_output.core_output_of_matches_and_errors res in
   (* TOPORT? or move in semgrep-core so get info ASAP
      if match_results.skipped_targets:
@@ -270,7 +245,7 @@ let mk_result (all_rules : Rule.rule list) (res : Core_result.t) : result =
 let mk_core_run_for_osemgrep (core_scan_func : Core_scan.func) : func =
   let run ?file_match_hook (conf : conf) (targeting_conf : Find_targets.conf)
       (rules_and_invalid : Rule_error.rules_and_invalid)
-      (targets : Fpath.t list) : Core_result.result_or_exn =
+      (target_paths : Fppath.t list) : Core_result.result_or_exn =
     (*
        At this point, we already have the full list of targets. These targets
        will populate the 'target_source' field of the config object
@@ -285,10 +260,10 @@ let mk_core_run_for_osemgrep (core_scan_func : Core_scan.func) : func =
     let valid_rules =
       valid_rules
       |> List_.deduplicate_gen ~get_key:(fun r ->
-             Rule_ID.to_string (fst r.Rule.id))
+          Rule_ID.to_string (fst r.Rule.id))
     in
     let rule_errors : Core_error.t list =
-      invalid_rules |> List_.map Core_error.error_of_invalid_rule
+      invalid_rules |> List.map Core_error.error_of_invalid_rule
     in
     let config : Core_scan_config.t = core_scan_config_of_conf conf in
     let config = { config with file_match_hook } in
@@ -302,18 +277,14 @@ let mk_core_run_for_osemgrep (core_scan_func : Core_scan.func) : func =
        See https://www.notion.so/r2cdev/Osemgrep-scanning-algorithm-5962232bfd74433ba50f97c86bd1a0f3
     *)
     let lang_jobs =
-      Core_targeting.split_jobs_by_language targeting_conf valid_rules targets
+      Core_targeting.split_jobs_by_language targeting_conf valid_rules
+        target_paths
     in
     report_status_and_add_metrics_languages
       ~respect_gitignore:targeting_conf.respect_gitignore lang_jobs valid_rules
-      targets;
-    let code_targets, applicable_rules =
+      target_paths;
+    let targets, applicable_rules =
       Core_targeting.targets_and_rules_of_lang_jobs lang_jobs
-    in
-    let lockfiles = find_lockfiles targets in
-    let final_targets =
-      add_possibly_lockfile_to_regular_target lockfiles code_targets
-      @ (lockfiles |> List_.map (fun x -> Target.Lockfile x))
     in
     Logs.debug (fun m ->
         m "core runner: %i applicable rules of %i valid rules, %i invalid rules"
@@ -323,9 +294,23 @@ let mk_core_run_for_osemgrep (core_scan_func : Core_scan.func) : func =
     let config =
       {
         config with
-        target_source = Targets final_targets;
+        target_source = Targets targets;
         rule_source = Rules applicable_rules;
       }
+    in
+
+    (* Lastly, wrap the core scan operation in an Eio loop.
+     * It's unfortunate that this has to happen here, but is a consequence of
+     * Eio being "lexically-scoped". *)
+    let core_scan_func =
+      if config.use_parmap then core_scan_func
+      else fun config ->
+        Eio_main.run (fun env ->
+            let par_conf = Parallelism_config.create env in
+            let res : Core_result.result_or_exn =
+              core_scan_func { config with par_conf }
+            in
+            res)
     in
 
     (* !!!!Finally! this is where we branch to semgrep-core core scan fun!!! *)
@@ -343,9 +328,8 @@ let mk_core_run_for_osemgrep (core_scan_func : Core_scan.func) : func =
         rules_with_targets;
       }
     in
-
     let scanned =
-      res.scanned |> List_.map Target.internal_path |> Set_.of_list
+      res.scanned |> List.map Target.internal_path |> Set_.of_list
     in
 
     Metrics_.add_max_memory_bytes res.profiling;

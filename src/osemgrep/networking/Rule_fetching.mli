@@ -1,3 +1,23 @@
+(*
+   Copyright (c) 2022-2025 Semgrep Inc.
+
+   This library is free software; you can redistribute it and/or
+   modify it under the terms of the GNU Lesser General Public License
+   version 2.1 as published by the Free Software Foundation.
+
+   This library is distributed in the hope that it will be useful, but
+   WITHOUT ANY WARRANTY; without even the implied warranty of
+   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the file
+   LICENSE for more details.
+*)
+(* Fetching rules from the local filesystem or from the network (registry) *)
+
+(* capabilities required to fetch rules from a Rules_source.t
+ *  - network: for registry rules
+ *  - tmp: for saving the downloaded rules somewhere so we can
+ *    loading them from disk (alt: parse rules from a buffer instead of a file)
+ *  - readdir: for config_string denotating local directories
+ *)
 type rules_and_origin = {
   rules : Rule.rule list;
   invalid_rules : Rule_error.invalid_rule list;
@@ -53,8 +73,8 @@ val langs_of_pattern : string * Analyzer.t option -> Analyzer.t list
  * It also returns "unrecoverable errors", in the form of `Rule.Error.t`,
  * which are errors that should prevent further execution, and not be skipped.
  *
- * The <Cap.tmp> is because we can fetch rules from the registry but
- * Parse_rule.ml requires a (temporary) file to parse.
+ * We may fetch rules from the registry, in which case Parse_rule.ml
+ * requires a (temporary) file to parse.
  *
  * Note that this also handles the experiment rules in jsonnet!
  *)
@@ -62,7 +82,6 @@ val rules_from_rules_source :
   token_opt:Auth.token option ->
   rewrite_rule_ids:bool ->
   strict:bool ->
-  < Cap.network ; Cap.tmp > ->
   Rules_source.t ->
   rules_and_origin list * Rule_error.t list
 
@@ -71,7 +90,6 @@ val rules_from_rules_source_async :
   token_opt:Auth.token option ->
   rewrite_rule_ids:bool ->
   strict:bool ->
-  < Cap.network ; Cap.tmp > ->
   Rules_source.t ->
   (rules_and_origin list * Rule_error.t list) Lwt.t
 
@@ -80,9 +98,14 @@ val rules_from_rules_source_async :
 val rules_from_dashdash_config_async :
   rewrite_rule_ids:bool ->
   token_opt:Auth.token option ->
-  < Cap.network ; Cap.tmp ; .. > ->
   Rules_config.t ->
   (rules_and_origin list * Rule_error.t list) Lwt.t
+
+val rules_from_dashdash_config_eio :
+  rewrite_rule_ids:bool ->
+  token_opt:Auth.token option ->
+  Rules_config.t ->
+  rules_and_origin list * Rule_error.t list
 
 (* [rules_from_dashdash_config] returns a list of rules_and_origin
  * because the [Rules_config.t] can be a [Dir], in which case we return one
@@ -91,15 +114,18 @@ val rules_from_dashdash_config_async :
 val rules_from_dashdash_config :
   rewrite_rule_ids:bool ->
   token_opt:Auth.token option ->
-  < Cap.network ; Cap.tmp ; .. > ->
   Rules_config.t ->
   rules_and_origin list * Rule_error.t list
 
-(* low-level API *)
+(* low-level API
+ * This may use the network because we could load a jsonnet file
+ * that internally imports rules from the registry.
+ * If you just want to load a simple Yaml or JSON file,
+ * use Parse_rule.parse directly.
+ *)
 val load_rules_from_file :
   rewrite_rule_ids:bool ->
   origin:origin ->
-  < Cap.network ; Cap.tmp ; .. > ->
   Fpath.t ->
   (rules_and_origin, Rule_error.t) Result.t
 
@@ -107,6 +133,5 @@ val load_rules_from_url :
   origin:origin ->
   ?token_opt:Auth.token ->
   ?ext:string ->
-  < Cap.network ; Cap.tmp ; .. > ->
   Uri.t ->
   (rules_and_origin, Rule_error.t) Result.t

@@ -1,3 +1,15 @@
+(*
+   Copyright (c) 2020-2025 Semgrep Inc.
+
+   This library is free software; you can redistribute it and/or
+   modify it under the terms of the GNU Lesser General Public License
+   version 2.1 as published by the Free Software Foundation.
+
+   This library is distributed in the hope that it will be useful, but
+   WITHOUT ANY WARRANTY; without even the implied warranty of
+   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the file
+   LICENSE for more details.
+*)
 (* [parsing_stats l json_output paths] recursively explores [paths] to
  * find files in given language [l]. Then it parses those files using
  * [Parse_target.parse_program] (which internally uses either a
@@ -10,22 +22,13 @@
  *   {"total":111,"bad":0,"percent_correct":100.0}
  *)
 val parsing_stats :
-  < Cap.time_limit ; Cap.memory_limit > ->
-  ?json:bool ->
-  ?verbose:bool ->
-  Lang.t ->
-  string (* filename *) list ->
-  unit
-
-(* TODO: parsing regressions as in pfff (unfinished) *)
-val parsing_regressions :
-  < Cap.time_limit ; Cap.memory_limit > -> Lang.t -> Fpath.t list -> unit
+  ?json:bool -> ?verbose:bool -> Lang.t -> string (* filename *) list -> unit
 
 (* Similar to [parsing_stats], but uses only tree-sitter parsers,
  * and stop the parsing at the tree-sitter CST level (it does not
  * try to convert this CST in the generic AST).
  *)
-val test_parse_tree_sitter : Lang.t -> Fpath.t list -> unit
+val test_parse_tree_sitter : Lang.t -> Fpath.t (* root *) -> unit
 
 (* Dump the tree-sitter CST of the given file (it automatically detects
  * the language and parser to use based on the filename extension). *)
@@ -44,8 +47,8 @@ val dump_lang_ast : Lang.t -> Fpath.t -> unit
  *)
 val diff_pfff_tree_sitter : Fpath.t list -> unit
 
-(* [test_parse_rules paths] recursively explores [paths] to
+(* [test_parse_rules root] recursively explores [root] to
  * find YAML files containing rules and check if they
  * parse correctly using Parse_rule.parse.
  *)
-val test_parse_rules : Fpath.t list -> unit
+val test_parse_rules : Fpath.t (* root *) -> unit

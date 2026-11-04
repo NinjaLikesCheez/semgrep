@@ -1,3 +1,15 @@
+(*
+   Copyright (c) 2021-2025 Semgrep Inc.
+
+   This library is free software; you can redistribute it and/or
+   modify it under the terms of the GNU Lesser General Public License
+   version 2.1 as published by the Free Software Foundation.
+
+   This library is distributed in the hope that it will be useful, but
+   WITHOUT ANY WARRANTY; without even the implied warranty of
+   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the file
+   LICENSE for more details.
+*)
 module Log = Log_engine.Log
 
 (*****************************************************************************)
@@ -51,6 +63,7 @@ let range_to_pattern_match_adjusted (r : Rule.t) (range : t) : Core_match.t =
       langs;
       message = r.message (* keep pattern_str which can be useful to debug *);
       metadata = r.metadata;
+      severity = Some r.severity;
     }
   in
   (* Need env to be the result of evaluate_formula, which propagates metavariables *)
@@ -70,9 +83,9 @@ let included_in config rv1 rv2 =
   (Range.( $<=$ ) rv1.r rv2.r || rv2.kind = Anywhere)
   && rv1.mvars
      |> List.for_all (fun (mvar, mval1) ->
-            match List.assoc_opt mvar rv2.mvars with
-            | None -> true
-            (* Numeric capture group metavariables (of the form $1, $2, etc) may
+         match List.assoc_opt mvar rv2.mvars with
+         | None -> true
+         (* Numeric capture group metavariables (of the form $1, $2, etc) may
                be introduced implicitly via regular expressions that have
                capture groups in them. The unification of these metavariables
                can be dangerous, as it will prevent matches, when users may not
@@ -82,9 +95,9 @@ let included_in config rv1 rv2 =
                note: this does not affect named capture group metavariables
                from <?xxx>, which will still be unified as normal
             *)
-            | _ when Mvar.is_metavar_for_capture_group mvar -> true
-            | Some mval2 ->
-                Matching_generic.equal_ast_bound_code config mval1 mval2)
+         | _ when Mvar.is_metavar_for_capture_group mvar -> true
+         | Some mval2 ->
+             Matching_generic.equal_ast_bound_code config mval1 mval2)
 
 (* when we know x <= y, are the ranges also in the good Inside direction *)
 let inside_compatible x y =
@@ -127,7 +140,7 @@ let intersect_ranges config ~debug_matches xs ys =
     else None
   in
   let merge p us vs =
-    us |> Common2.map_flatten (fun u -> vs |> List_.filter_map (fun v -> p u v))
+    us |> Common2.map_flatten (fun u -> vs |> List.filter_map (fun v -> p u v))
   in
   if debug_matches then
     Log.debug (fun m ->
@@ -141,22 +154,22 @@ let difference_ranges config pos neg =
   let surviving_pos =
     pos
     |> List.filter (fun x ->
-           not
-             (neg
-             |> List.exists (fun y ->
-                    (* pattern-not vs pattern-not-inside vs pattern-not-regex,
-                     * the difference matters!
-                     * This fixed 10 mismatches in semgrep-rules and some e2e tests.
-                     *)
-                    match y.kind with
-                    (* pattern-not-inside: x cannot occur inside y *)
-                    | Inside -> included_in config x y
-                    (* pattern-not-regex: x and y exclude each other *)
-                    | Regexp -> included_in config x y || included_in config y x
-                    (* pattern-not: we require the ranges to be equal *)
-                    | Plain -> included_in config x y && included_in config y x
-                    (* not: { anywhere: y } -- y cannot occur *)
-                    | Anywhere -> true)))
+        not
+          (neg
+          |> List.exists (fun y ->
+              (* pattern-not vs pattern-not-inside vs pattern-not-regex,
+               * the difference matters!
+               * This fixed 10 mismatches in semgrep-rules and some e2e tests.
+               *)
+              match y.kind with
+              (* pattern-not-inside: x cannot occur inside y *)
+              | Inside -> included_in config x y
+              (* pattern-not-regex: x and y exclude each other *)
+              | Regexp -> included_in config x y || included_in config y x
+              (* pattern-not: we require the ranges to be equal *)
+              | Plain -> included_in config x y && included_in config y x
+              (* not: { anywhere: y } -- y cannot occur *)
+              | Anywhere -> true)))
   in
   surviving_pos
 [@@profiling]

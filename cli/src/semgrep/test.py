@@ -1,3 +1,15 @@
+#
+# Copyright (c) 2020-2025 Semgrep Inc.
+#
+# This library is free software; you can redistribute it and/or
+# modify it under the terms of the GNU Lesser General Public License
+# version 2.1 as published by the Free Software Foundation.
+#
+# This library is distributed in the hope that it will be useful, but
+# WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the file
+# LICENSE for more details.
+#
 # This file is DEPRECATED! Please modify instead osemgrep test in
 # src/osemgrep/cli_test/Test_subcommand.ml
 import collections
@@ -28,6 +40,7 @@ from ruamel.yaml import YAML
 import semgrep.run_scan
 from semgrep.constants import BREAK_LINE
 from semgrep.engine import EngineType
+from semgrep.run_scan import AutofixBehavior
 from semgrep.util import final_suffix_matches
 from semgrep.util import is_config_fixtest_suffix
 from semgrep.util import is_config_suffix
@@ -294,10 +307,12 @@ def _generate_fixcheck_output_line(
 
 
 def invoke_semgrep_multi(
-    config: Path, targets: List[Path], **kwargs: Any
+    config: Path, scanning_roots: List[Path], **kwargs: Any
 ) -> Tuple[Path, Optional[str], Any]:
     try:
-        output = semgrep.run_scan.run_scan_and_return_json(config, targets, **kwargs)
+        output = semgrep.run_scan.run_scan_and_return_json(
+            config=config, scanning_roots=scanning_roots, **kwargs
+        )
     except Exception:
         # We must get the string of the error because the multiprocessing library
         # will fail the marshal the error and hang
@@ -542,24 +557,27 @@ def generate_test_results(
         str(c) for c, _fixtest in config_without_fixtests if config_contains_fix_key(c)
     ]
 
+    # TODO: dead code due to configs_with_fixtests being unused and commented out below!
     # this saves execution time: fix will not be correct, if regular test is not correct
-    passed_test_filenames = [
-        filename
-        for _config_filename, matches, soft_errors in tested
-        for _check_id, filename_and_matches in matches.items()
-        for filename, expected_and_reported_lines in filename_and_matches.items()
-        if expected_and_reported_lines["expected_lines"]
-        == expected_and_reported_lines["reported_lines"]
-        and not soft_errors
-    ]
-    configs_with_fixtests = {
-        config: [
-            (target, fixtest)
-            for target, fixtest in testfiles
-            if os.path.abspath(target) in passed_test_filenames
-        ]
-        for config, testfiles in config_with_fixtests
-    }
+    # passed_test_filenames = [
+    #    filename
+    #    for _config_filename, matches, soft_errors in tested
+    #    for _check_id, filename_and_matches in matches.items()
+    #    for filename, expected_and_reported_lines in filename_and_matches.items()
+    #    if expected_and_reported_lines["expected_lines"]
+    #    == expected_and_reported_lines["reported_lines"]
+    #    and not soft_errors
+    # ]
+
+    # TODO: unused misspelled variable 'configs_with_fixtests'! Enable this code?
+    # configs_with_fixtests = {
+    #    config: [
+    #        (target, fixtest)
+    #        for target, fixtest in testfiles
+    #        if os.path.abspath(target) in passed_test_filenames
+    #    ]
+    #    for config, testfiles in config_with_fixtests
+    # }
 
     temp_copies: Dict[Path, str] = {
         target: create_temporary_copy(target)
@@ -583,7 +601,7 @@ def generate_test_results(
         strict=strict,
         optimizations=optimizations,
         # only option that differs from the earlier call to semgrep-core:
-        autofix=True,
+        autofix=AutofixBehavior.APPLY,
     )
 
     with multiprocessing.Pool(multiprocessing.cpu_count()) as pool:
@@ -698,7 +716,7 @@ def generate_test_results(
 
 def test_main(
     *,
-    target: Sequence[str],
+    scanning_roots: Sequence[str],
     config: Optional[Sequence[str]],
     test_ignore_todo: bool,
     strict: bool,
@@ -706,21 +724,21 @@ def test_main(
     optimizations: str,
     engine_type: EngineType,
 ) -> None:
-    if len(target) != 1:
+    if len(scanning_roots) != 1:
         raise Exception("only one target directory allowed for tests")
-    target_path = Path(target[0])
+    scanning_root_path = Path(scanning_roots[0])
 
     if config:
         if len(config) != 1:
             raise Exception("only one config directory allowed for tests")
         config_path = Path(config[0])
     else:
-        if target_path.is_file():
+        if scanning_root_path.is_file():
             raise Exception("--config is required when running a test on single file")
-        config_path = target_path
+        config_path = scanning_root_path
 
     generate_test_results(
-        target=target_path,
+        target=scanning_root_path,
         config=config_path,
         strict=strict,
         json_output=json,

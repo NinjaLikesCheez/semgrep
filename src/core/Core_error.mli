@@ -1,4 +1,16 @@
 (*
+   Copyright (c) 2021-2025 Semgrep Inc.
+
+   This library is free software; you can redistribute it and/or
+   modify it under the terms of the GNU Lesser General Public License
+   version 2.1 as published by the Free Software Foundation.
+
+   This library is distributed in the hope that it will be useful, but
+   WITHOUT ANY WARRANTY; without even the implied warranty of
+   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the file
+   LICENSE for more details.
+*)
+(*
    Exception and error management for semgrep-core
 *)
 
@@ -51,3 +63,10 @@ val string_of_error : t -> string
 
 val severity_of_error :
   Semgrep_output_v1_t.error_type -> Semgrep_output_v1_t.error_severity
+
+(*****************************************************************************)
+(* Misc *)
+(*****************************************************************************)
+
+val split_fixpoint_timeouts :
+  t list -> t list * [> `Fixpoint_timeouts of t list ]

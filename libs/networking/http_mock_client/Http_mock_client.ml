@@ -27,6 +27,8 @@ module Header = Cohttp.Header
 
 type test_response = { response : Response.t; body : Body.t }
 type make_response_fn = Request.t -> Body.t -> test_response Lwt.t
+type test_response_eio = { response : Response.t; body : Cohttp_eio.Body.t }
+type make_response_fn_eio = Request.t -> Cohttp_eio.Body.t -> test_response_eio
 
 module type S = sig
   val make_response : make_response_fn
@@ -39,6 +41,12 @@ module Make (M : S) : Cohttp_lwt.S.Client = struct
   type 'a with_context = ?ctx:ctx -> 'a
   type 'a io = 'a Lwt.t
   type body = Cohttp_lwt.Body.t
+
+  (* Cohttp_lwt.S.Client requires an IO module (since cohttp 6.2.0). The mock
+     [call] short-circuits before any real IO happens, but the module type
+     still requires [IO] to be present; reuse the real Lwt/Unix implementation
+     so the mock behaves correctly if anything reaches into it. *)
+  module IO = Cohttp_lwt_unix.Private.IO
 
   let map_context (x : 'a with_context) (f : 'a -> 'b) ?ctx = x ?ctx |> f
 
@@ -121,12 +129,24 @@ end
 let basic_response ?(status = 200) ?(headers = Header.init ()) body =
   let status = Cohttp.Code.status_of_code status in
   let response = Response.make ~status ~headers () in
-  { response; body }
+  let res : test_response = { response; body } in
+  res
+
+let basic_response_eio ?(status = 200) ?(headers = Header.init ()) body =
+  let status = Cohttp.Code.status_of_code status in
+  let response = Response.make ~status ~headers () in
+  let res : test_response_eio = { response; body } in
+  res
 
 let body_of_file ?(trim = false) (path : Fpath.t) =
   let content = UFile.read_file path in
   let content = if trim then String.trim content else content in
   Cohttp_lwt.Body.of_string content
+
+let body_of_file_eio ?(trim = false) (path : Fpath.t) =
+  let content = UFile.read_file path in
+  let content = if trim then String.trim content else content in
+  Cohttp_eio.Body.of_string content
 
 let check_body expected_body actual_body =
   let%lwt actual_body_content = Cohttp_lwt.Body.to_string actual_body in
@@ -158,7 +178,7 @@ let check_header req header header_val =
 let check_headers actual_headers expected_headers =
   let lowercase_and_sort xs =
     xs
-    |> List_.map (fun (x, y) -> (String.lowercase_ascii x, y))
+    |> List.map (fun (x, y) -> (String.lowercase_ascii x, y))
     |> List.sort (fun (x, _) (y, _) -> String.compare x y)
   in
   let actual_headers = actual_headers |> Header.to_list |> lowercase_and_sort in
@@ -178,20 +198,30 @@ let check_headers actual_headers expected_headers =
     | ( (expected_header, expected_value) :: expected_headers,
         (actual_header, actual_value) :: actual_headers ) ->
         if String.equal expected_header actual_header then
+          (* Anchor the whole match at compile time: the new [is_match] only
+             accepts match options, and [`ANCHORED]/[`ENDANCHORED] are compile
+             options, so we set them here to preserve the previous exact-match
+             semantics. *)
           let value_regex =
             if
               String.starts_with ~prefix:"regex{" expected_value
               && String.ends_with ~suffix:"}" expected_value
             then
-              Pcre2_.regexp
+              Pcre2_.compile
+                ~options:[ `ANCHORED; `ENDANCHORED ]
                 (String.sub expected_value 6 (String.length expected_value - 7))
-            else Pcre2_.regexp (Pcre2_.quote expected_value)
+            else
+              Pcre2_.compile
+                ~options:[ `ANCHORED; `ENDANCHORED ]
+                (Pcre2_.quote expected_value)
           in
-          match
-            Pcre2_.pmatch
-              ~flags:[ `ANCHORED; `ENDANCHORED ]
-              ~rex:value_regex actual_value
-          with
+          let value_regex =
+            match value_regex with
+            | Ok re -> re
+            | Error e ->
+                Alcotest.failf "Invalid regex: %a" Pcre2.pp_compile_error e
+          in
+          match Pcre2_.is_match value_regex actual_value with
           | Ok true -> check (expected_headers, actual_headers)
           | Ok false ->
               Alcotest.failf
@@ -206,7 +236,8 @@ let check_headers actual_headers expected_headers =
                 value_regex
                 (Fmt.styled `Red Fmt.string)
                 actual_value
-          | Error err -> Alcotest.failf "Invalid regex: %a" Pcre2_.pp_error err
+          | Error err ->
+              Alcotest.failf "Regex matching error: %a" Pcre2.pp_match_error err
         else
           Alcotest.failf
             "Expected header '%a', but it was either missing, or header counts \
@@ -227,15 +258,21 @@ let get_header req header =
 (* Entrypoint *)
 (*****************************************************************************)
 
-let with_testing_client make_fn test_fn () =
+let with_mocked_http make_fn test_fn () =
   let new_client : (module Cohttp_lwt.S.Client) =
     (module Make (struct
       let make_response = make_fn
     end))
   in
-  Http_helpers.with_client_ref new_client
-    (fun () -> Common.save_excursion Http_helpers.in_mock_context true test_fn)
-    ()
+  Http_helpers.with_client_ref new_client test_fn ()
+
+let with_eio_mocked_http (make_fn : make_response_fn_eio) test_fn () =
+  Http_helpers.with_hook_eio_call_fn_set
+    (fun ~sw:_ ~headers ~body ~chunked meth uri ->
+      let req = Request.make_for_client ~headers ~chunked meth uri in
+      let response = make_fn req body in
+      (response.response, response.body))
+    test_fn
 
 (*****************************************************************************)
 (* Saved Request/Reponse Mocking *)
@@ -283,13 +320,12 @@ let trim_front s =
 
 let parse_headers headers =
   headers
-  |> List_.map (fun header ->
-         let i = String.index header ':' in
-         let before, after =
-           ( Str.first_chars header i,
-             Str.string_after header (i + 1) |> trim_front )
-         in
-         (before, after))
+  |> List.map (fun header ->
+      let i = String.index header ':' in
+      let before, after =
+        (Str.first_chars header i, Str.string_after header (i + 1) |> trim_front)
+      in
+      (before, after))
   |> Cohttp.Header.of_list
 
 let take_while p xs =
@@ -341,7 +377,7 @@ let client_from_file (req_resp_file : Fpath.t) =
   let pairs = go contents [] in
   let new_client : (module Cohttp_lwt.S.Client) =
     (module Make (struct
-      let make_response (req : Request.t) body =
+      let make_response (req : Request.t) body : test_response Lwt.t =
         match
           List.find_opt
             (fun (((req' : Request.t), _), _, used) ->
@@ -350,17 +386,24 @@ let client_from_file (req_resp_file : Fpath.t) =
         with
         | Some ((expected_req, request_body), (response, response_body), used)
           ->
+            (*
+               Check body first to avoid opaque errors on the 'content-length'
+               header being shown first.
+               TODO: print a snapshot so what we can update expected test
+               output easily.
+            *)
+            Lwt.async (fun () -> check_body body request_body);
             check_method expected_req.meth req.meth;
             check_headers req.headers expected_req.headers;
-            Lwt.async (fun () -> check_body body request_body);
             used := true;
-            Lwt.return { response; body = response_body }
+            let resp : test_response = { response; body = response_body } in
+            Lwt.return resp
         | None -> Alcotest.fail "Given request does not match any resources"
     end))
   in
   ( new_client,
     fun f ->
       f
-      @@ List_.filter_map
+      @@ List.filter_map
            (fun (req, resp, used) -> if !used then None else Some (req, resp))
            pairs )

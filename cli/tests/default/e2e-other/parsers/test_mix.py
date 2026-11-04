@@ -1,9 +1,22 @@
+#
+# Copyright (c) 2024-2025 Semgrep Inc.
+#
+# This library is free software; you can redistribute it and/or
+# modify it under the terms of the GNU Lesser General Public License
+# version 2.1 as published by the Free Software Foundation.
+#
+# This library is distributed in the hope that it will be useful, but
+# WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the file
+# LICENSE for more details.
+#
 from pathlib import Path
 from typing import Tuple
 
 import pytest
 from tests.fixtures import RunSemgrep
 
+import semgrep.semgrep_interfaces.semgrep_output_v1 as out
 from semdep.parsers import mix
 from semgrep.semgrep_interfaces.semgrep_output_v1 import Direct
 from semgrep.semgrep_interfaces.semgrep_output_v1 import Ecosystem
@@ -11,7 +24,6 @@ from semgrep.semgrep_interfaces.semgrep_output_v1 import FoundDependency
 from semgrep.semgrep_interfaces.semgrep_output_v1 import Fpath
 from semgrep.semgrep_interfaces.semgrep_output_v1 import Hex
 from semgrep.semgrep_interfaces.semgrep_output_v1 import Transitive
-from semgrep.semgrep_interfaces.semgrep_output_v1 import Transitivity
 
 
 @pytest.mark.parametrize(
@@ -399,7 +411,7 @@ def test_full_mix_parsing(run_semgrep_on_copied_files: RunSemgrep):
                 version="2.12.0",
                 ecosystem=Ecosystem(value=Hex()),
                 allowed_hashes={},
-                transitivity=Transitivity(value=Transitive()),
+                transitivity=out.DependencyKind(value=Transitive()),
                 resolved_url=None,
                 line_number=2,
                 children=None,
@@ -412,7 +424,7 @@ def test_full_mix_parsing(run_semgrep_on_copied_files: RunSemgrep):
                 version="2.9.0",
                 ecosystem=Ecosystem(value=Hex()),
                 allowed_hashes={},
-                transitivity=Transitivity(value=Transitive()),
+                transitivity=out.DependencyKind(value=Transitive()),
                 resolved_url=None,
                 line_number=3,
                 children=None,
@@ -425,7 +437,7 @@ def test_full_mix_parsing(run_semgrep_on_copied_files: RunSemgrep):
                 version="2.8.0",
                 ecosystem=Ecosystem(value=Hex()),
                 allowed_hashes={},
-                transitivity=Transitivity(value=Transitive()),
+                transitivity=out.DependencyKind(value=Transitive()),
                 resolved_url=None,
                 line_number=4,
                 children=None,
@@ -438,7 +450,7 @@ def test_full_mix_parsing(run_semgrep_on_copied_files: RunSemgrep):
                 version="0.5.7",
                 ecosystem=Ecosystem(value=Hex()),
                 allowed_hashes={},
-                transitivity=Transitivity(value=Transitive()),
+                transitivity=out.DependencyKind(value=Transitive()),
                 resolved_url=None,
                 line_number=5,
                 children=None,
@@ -451,7 +463,7 @@ def test_full_mix_parsing(run_semgrep_on_copied_files: RunSemgrep):
                 version="0.4.13",
                 ecosystem=Ecosystem(value=Hex()),
                 allowed_hashes={},
-                transitivity=Transitivity(value=Transitive()),
+                transitivity=out.DependencyKind(value=Transitive()),
                 resolved_url=None,
                 line_number=6,
                 children=None,
@@ -464,7 +476,7 @@ def test_full_mix_parsing(run_semgrep_on_copied_files: RunSemgrep):
                 version="2.5.3",
                 ecosystem=Ecosystem(value=Hex()),
                 allowed_hashes={},
-                transitivity=Transitivity(value=Transitive()),
+                transitivity=out.DependencyKind(value=Transitive()),
                 resolved_url=None,
                 line_number=7,
                 children=None,
@@ -477,7 +489,7 @@ def test_full_mix_parsing(run_semgrep_on_copied_files: RunSemgrep):
                 version="2.1.0",
                 ecosystem=Ecosystem(value=Hex()),
                 allowed_hashes={},
-                transitivity=Transitivity(value=Direct()),
+                transitivity=out.DependencyKind(value=Direct()),
                 resolved_url=None,
                 line_number=8,
                 children=None,
@@ -490,7 +502,7 @@ def test_full_mix_parsing(run_semgrep_on_copied_files: RunSemgrep):
                 version="2.5.3",
                 ecosystem=Ecosystem(value=Hex()),
                 allowed_hashes={},
-                transitivity=Transitivity(value=Direct()),
+                transitivity=out.DependencyKind(value=Direct()),
                 resolved_url=None,
                 line_number=9,
                 children=None,
@@ -503,7 +515,7 @@ def test_full_mix_parsing(run_semgrep_on_copied_files: RunSemgrep):
                 version="2.4.1",
                 ecosystem=Ecosystem(value=Hex()),
                 allowed_hashes={},
-                transitivity=Transitivity(value=Direct()),
+                transitivity=out.DependencyKind(value=Direct()),
                 resolved_url=None,
                 line_number=10,
                 children=None,
@@ -516,7 +528,7 @@ def test_full_mix_parsing(run_semgrep_on_copied_files: RunSemgrep):
                 version="0.9.0.1",
                 ecosystem=Ecosystem(value=Hex()),
                 allowed_hashes={},
-                transitivity=Transitivity(value=Transitive()),
+                transitivity=out.DependencyKind(value=Transitive()),
                 resolved_url=None,
                 line_number=11,
                 children=None,
@@ -529,7 +541,7 @@ def test_full_mix_parsing(run_semgrep_on_copied_files: RunSemgrep):
                 version="0.6.12",
                 ecosystem=Ecosystem(value=Hex()),
                 allowed_hashes={},
-                transitivity=Transitivity(value=Transitive()),
+                transitivity=out.DependencyKind(value=Transitive()),
                 resolved_url=None,
                 line_number=12,
                 children=None,
@@ -542,7 +554,7 @@ def test_full_mix_parsing(run_semgrep_on_copied_files: RunSemgrep):
                 version="1.3.7",
                 ecosystem=Ecosystem(value=Hex()),
                 allowed_hashes={},
-                transitivity=Transitivity(value=Transitive()),
+                transitivity=out.DependencyKind(value=Transitive()),
                 resolved_url=None,
                 line_number=13,
                 children=None,
@@ -555,7 +567,7 @@ def test_full_mix_parsing(run_semgrep_on_copied_files: RunSemgrep):
                 version="1.20.1",
                 ecosystem=Ecosystem(value=Hex()),
                 allowed_hashes={},
-                transitivity=Transitivity(value=Direct()),
+                transitivity=out.DependencyKind(value=Direct()),
                 resolved_url=None,
                 line_number=14,
                 children=None,
@@ -568,7 +580,7 @@ def test_full_mix_parsing(run_semgrep_on_copied_files: RunSemgrep):
                 version="6.1.1",
                 ecosystem=Ecosystem(value=Hex()),
                 allowed_hashes={},
-                transitivity=Transitivity(value=Transitive()),
+                transitivity=out.DependencyKind(value=Transitive()),
                 resolved_url=None,
                 line_number=15,
                 children=None,
@@ -581,7 +593,7 @@ def test_full_mix_parsing(run_semgrep_on_copied_files: RunSemgrep):
                 version="1.4.1",
                 ecosystem=Ecosystem(value=Hex()),
                 allowed_hashes={},
-                transitivity=Transitivity(value=Direct()),
+                transitivity=out.DependencyKind(value=Direct()),
                 resolved_url=None,
                 line_number=16,
                 children=None,
@@ -594,7 +606,7 @@ def test_full_mix_parsing(run_semgrep_on_copied_files: RunSemgrep):
                 version="2.6.0",
                 ecosystem=Ecosystem(value=Hex()),
                 allowed_hashes={},
-                transitivity=Transitivity(value=Direct()),
+                transitivity=out.DependencyKind(value=Direct()),
                 resolved_url=None,
                 line_number=17,
                 children=None,
@@ -607,7 +619,7 @@ def test_full_mix_parsing(run_semgrep_on_copied_files: RunSemgrep):
                 version="1.11.6",
                 ecosystem=Ecosystem(value=Hex()),
                 allowed_hashes={},
-                transitivity=Transitivity(value=Transitive()),
+                transitivity=out.DependencyKind(value=Transitive()),
                 resolved_url=None,
                 line_number=18,
                 children=None,
@@ -620,7 +632,7 @@ def test_full_mix_parsing(run_semgrep_on_copied_files: RunSemgrep):
                 version="1.0.1",
                 ecosystem=Ecosystem(value=Hex()),
                 allowed_hashes={},
-                transitivity=Transitivity(value=Transitive()),
+                transitivity=out.DependencyKind(value=Transitive()),
                 resolved_url=None,
                 line_number=19,
                 children=None,
@@ -633,7 +645,7 @@ def test_full_mix_parsing(run_semgrep_on_copied_files: RunSemgrep):
                 version="2.0.5",
                 ecosystem=Ecosystem(value=Hex()),
                 allowed_hashes={},
-                transitivity=Transitivity(value=Transitive()),
+                transitivity=out.DependencyKind(value=Transitive()),
                 resolved_url=None,
                 line_number=20,
                 children=None,
@@ -646,7 +658,7 @@ def test_full_mix_parsing(run_semgrep_on_copied_files: RunSemgrep):
                 version="1.2.0",
                 ecosystem=Ecosystem(value=Hex()),
                 allowed_hashes={},
-                transitivity=Transitivity(value=Transitive()),
+                transitivity=out.DependencyKind(value=Transitive()),
                 resolved_url=None,
                 line_number=21,
                 children=None,
@@ -659,7 +671,7 @@ def test_full_mix_parsing(run_semgrep_on_copied_files: RunSemgrep):
                 version="3.4.1",
                 ecosystem=Ecosystem(value=Hex()),
                 allowed_hashes={},
-                transitivity=Transitivity(value=Transitive()),
+                transitivity=out.DependencyKind(value=Transitive()),
                 resolved_url=None,
                 line_number=22,
                 children=None,
@@ -672,7 +684,7 @@ def test_full_mix_parsing(run_semgrep_on_copied_files: RunSemgrep):
                 version="2.0.4",
                 ecosystem=Ecosystem(value=Hex()),
                 allowed_hashes={},
-                transitivity=Transitivity(value=Transitive()),
+                transitivity=out.DependencyKind(value=Transitive()),
                 resolved_url=None,
                 line_number=23,
                 children=None,
@@ -685,7 +697,7 @@ def test_full_mix_parsing(run_semgrep_on_copied_files: RunSemgrep):
                 version="1.8.0",
                 ecosystem=Ecosystem(value=Hex()),
                 allowed_hashes={},
-                transitivity=Transitivity(value=Transitive()),
+                transitivity=out.DependencyKind(value=Transitive()),
                 resolved_url=None,
                 line_number=24,
                 children=None,
@@ -698,7 +710,7 @@ def test_full_mix_parsing(run_semgrep_on_copied_files: RunSemgrep):
                 version="1.8.0-emqx-2",
                 ecosystem=Ecosystem(value=Hex()),
                 allowed_hashes={},
-                transitivity=Transitivity(value=Transitive()),
+                transitivity=out.DependencyKind(value=Transitive()),
                 resolved_url=None,
                 line_number=25,
                 children=None,
@@ -711,7 +723,7 @@ def test_full_mix_parsing(run_semgrep_on_copied_files: RunSemgrep):
                 version="1.0.7",
                 ecosystem=Ecosystem(value=Hex()),
                 allowed_hashes={},
-                transitivity=Transitivity(value=Transitive()),
+                transitivity=out.DependencyKind(value=Transitive()),
                 resolved_url=None,
                 line_number=26,
                 children=None,
@@ -724,7 +736,7 @@ def test_full_mix_parsing(run_semgrep_on_copied_files: RunSemgrep):
                 version="1.1.7",
                 ecosystem=Ecosystem(value=Hex()),
                 allowed_hashes={},
-                transitivity=Transitivity(value=Transitive()),
+                transitivity=out.DependencyKind(value=Transitive()),
                 resolved_url=None,
                 line_number=27,
                 children=None,
@@ -737,7 +749,7 @@ def test_full_mix_parsing(run_semgrep_on_copied_files: RunSemgrep):
                 version="0.7.4",
                 ecosystem=Ecosystem(value=Hex()),
                 allowed_hashes={},
-                transitivity=Transitivity(value=Direct()),
+                transitivity=out.DependencyKind(value=Direct()),
                 resolved_url=None,
                 line_number=28,
                 children=None,
@@ -750,7 +762,7 @@ def test_full_mix_parsing(run_semgrep_on_copied_files: RunSemgrep):
                 version="1.2.1",
                 ecosystem=Ecosystem(value=Hex()),
                 allowed_hashes={},
-                transitivity=Transitivity(value=Transitive()),
+                transitivity=out.DependencyKind(value=Transitive()),
                 resolved_url=None,
                 line_number=29,
                 children=None,
@@ -763,7 +775,7 @@ def test_full_mix_parsing(run_semgrep_on_copied_files: RunSemgrep):
                 version="0.9.1",
                 ecosystem=Ecosystem(value=Hex()),
                 allowed_hashes={},
-                transitivity=Transitivity(value=Transitive()),
+                transitivity=out.DependencyKind(value=Transitive()),
                 resolved_url=None,
                 line_number=30,
                 children=None,
@@ -776,7 +788,7 @@ def test_full_mix_parsing(run_semgrep_on_copied_files: RunSemgrep):
                 version="0.7.0",
                 ecosystem=Ecosystem(value=Hex()),
                 allowed_hashes={},
-                transitivity=Transitivity(value=Transitive()),
+                transitivity=out.DependencyKind(value=Transitive()),
                 resolved_url=None,
                 line_number=32,
                 children=None,
@@ -789,7 +801,7 @@ def test_full_mix_parsing(run_semgrep_on_copied_files: RunSemgrep):
                 version="1.1.8",
                 ecosystem=Ecosystem(value=Hex()),
                 allowed_hashes={},
-                transitivity=Transitivity(value=Direct()),
+                transitivity=out.DependencyKind(value=Direct()),
                 resolved_url=None,
                 line_number=33,
                 children=None,

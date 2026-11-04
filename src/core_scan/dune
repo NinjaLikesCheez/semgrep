@@ -4,10 +4,13 @@
  (name semgrep_core_scan)
  (wrapped false)
  (libraries
+    base
+    collections
+
     parallelism
 
     commons
-    tracing
+    eio
 
     semgrep.core
     semgrep.parsing
@@ -18,6 +21,6 @@
  (preprocess (pps
       ppx_deriving.show
       ppx_profiling
-      ppx_tracing
+      ppx_telemetry
    ))
 )

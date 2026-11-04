@@ -1,13 +1,29 @@
-from pathlib import Path
+#
+# Copyright (c) 2024-2025 Semgrep Inc.
+#
+# This library is free software; you can redistribute it and/or
+# modify it under the terms of the GNU Lesser General Public License
+# version 2.1 as published by the Free Software Foundation.
+#
+# This library is distributed in the hope that it will be useful, but
+# WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the file
+# LICENSE for more details.
+#
 from typing import FrozenSet
 from typing import List
 
 import semgrep.semgrep_interfaces.semgrep_output_v1 as out
 from semdep.matchers.base import ExactLockfileManifestMatcher
 from semdep.matchers.base import ExactManifestOnlyMatcher
+from semdep.matchers.base import PatternManifestStaticLockfileMatcher
 from semdep.matchers.base import SubprojectMatcher
+from semdep.matchers.bazel import BazelMavenInstallMatcher
 from semdep.matchers.gradle import GradleMatcher
 from semdep.matchers.pip_requirements import PipRequirementsMatcher
+from semdep.matchers.sbt import SbtMatcher
+from semgrep.simple_profiling import simple_profiling
+from semgrep.types import Target
 
 # NOTE: the order that these matchers are defined in matters. In find_subprojects, we
 # use each dependency source file for at most one matcher, running the matchers in the
@@ -20,6 +36,23 @@ MATCHERS: List[SubprojectMatcher] = [
         manifest_file_extension="in",
         default_manifest_file_base="requirements",
     ),
+    # Bun
+    ExactLockfileManifestMatcher(
+        lockfile_name="bun.lock",
+        manifest_name="package.json",
+        lockfile_kind=out.LockfileKind(out.BunLock()),
+        manifest_kind=out.ManifestKind(out.PackageJson()),
+        ecosystem=out.Ecosystem(out.Npm()),
+        make_manifest_only_subprojects=False,
+    ),
+    ExactLockfileManifestMatcher(
+        lockfile_name="bun.lockb",
+        manifest_name="package.json",
+        lockfile_kind=out.LockfileKind(out.BunBinaryLock()),
+        manifest_kind=out.ManifestKind(out.PackageJson()),
+        ecosystem=out.Ecosystem(out.Npm()),
+        make_manifest_only_subprojects=False,
+    ),
     # Npm
     ExactLockfileManifestMatcher(
         lockfile_name="package-lock.json",
@@ -27,6 +60,7 @@ MATCHERS: List[SubprojectMatcher] = [
         lockfile_kind=out.LockfileKind(out.NpmPackageLockJson()),
         manifest_kind=out.ManifestKind(out.PackageJson()),
         ecosystem=out.Ecosystem(out.Npm()),
+        make_manifest_only_subprojects=False,
     ),
     ExactLockfileManifestMatcher(
         lockfile_name="yarn.lock",
@@ -34,6 +68,7 @@ MATCHERS: List[SubprojectMatcher] = [
         lockfile_kind=out.LockfileKind(out.YarnLock()),
         manifest_kind=out.ManifestKind(out.PackageJson()),
         ecosystem=out.Ecosystem(out.Npm()),
+        make_manifest_only_subprojects=False,
     ),
     ExactLockfileManifestMatcher(
         lockfile_name="pnpm-lock.yaml",
@@ -41,6 +76,7 @@ MATCHERS: List[SubprojectMatcher] = [
         lockfile_kind=out.LockfileKind(out.PnpmLock()),
         manifest_kind=out.ManifestKind(out.PackageJson()),
         ecosystem=out.Ecosystem(out.Npm()),
+        make_manifest_only_subprojects=False,
     ),
     # Gem
     ExactLockfileManifestMatcher(
@@ -49,14 +85,16 @@ MATCHERS: List[SubprojectMatcher] = [
         lockfile_kind=out.LockfileKind(out.GemfileLock()),
         manifest_kind=out.ManifestKind(out.Gemfile()),
         ecosystem=out.Ecosystem(out.Gem()),
+        make_manifest_only_subprojects=False,
     ),
     # Go modules
     ExactLockfileManifestMatcher(
         lockfile_name="go.mod",
         manifest_name="go.mod",
-        lockfile_kind=out.LockfileKind(out.GoMod()),
-        manifest_kind=out.ManifestKind(out.GoMod_()),
+        lockfile_kind=out.LockfileKind(out.GoModLock()),
+        manifest_kind=out.ManifestKind(out.GoModManifest()),
         ecosystem=out.Ecosystem(out.Gomod()),
+        make_manifest_only_subprojects=False,
     ),
     # Cargo
     ExactLockfileManifestMatcher(
@@ -65,6 +103,7 @@ MATCHERS: List[SubprojectMatcher] = [
         lockfile_kind=out.LockfileKind(out.CargoLock()),
         manifest_kind=out.ManifestKind(out.CargoToml()),
         ecosystem=out.Ecosystem(out.Cargo()),
+        make_manifest_only_subprojects=False,
     ),
     # Maven
     ExactLockfileManifestMatcher(
@@ -73,6 +112,7 @@ MATCHERS: List[SubprojectMatcher] = [
         lockfile_kind=out.LockfileKind(out.MavenDepTree()),
         manifest_kind=out.ManifestKind(out.PomXml()),
         ecosystem=out.Ecosystem(out.Maven()),
+        make_manifest_only_subprojects=False,
     ),
     ExactManifestOnlyMatcher(
         manifest_kind=out.ManifestKind(out.PomXml()),
@@ -80,6 +120,8 @@ MATCHERS: List[SubprojectMatcher] = [
         ecosystem=out.Ecosystem(out.Maven()),
     ),
     GradleMatcher(),
+    # Bazel + rules_jvm_external (maven_install.json under a MODULE.bazel/WORKSPACE)
+    BazelMavenInstallMatcher(),
     # Composer
     ExactLockfileManifestMatcher(
         lockfile_name="composer.lock",
@@ -87,14 +129,16 @@ MATCHERS: List[SubprojectMatcher] = [
         lockfile_kind=out.LockfileKind(out.ComposerLock()),
         manifest_kind=out.ManifestKind(out.ComposerJson()),
         ecosystem=out.Ecosystem(out.Composer()),
+        make_manifest_only_subprojects=False,
     ),
     # Nuget
-    ExactLockfileManifestMatcher(
+    PatternManifestStaticLockfileMatcher(
         lockfile_name="packages.lock.json",
-        manifest_name="nuget.manifest.json",
+        manifest_pattern="*.csproj",
         lockfile_kind=out.LockfileKind(out.NugetPackagesLockJson()),
-        manifest_kind=out.ManifestKind(out.NugetManifestJson()),
+        manifest_kind=out.ManifestKind(out.Csproj()),
         ecosystem=out.Ecosystem(out.Nuget()),
+        make_manifest_only_subprojects=True,
     ),
     # Pub
     ExactLockfileManifestMatcher(
@@ -103,6 +147,7 @@ MATCHERS: List[SubprojectMatcher] = [
         lockfile_kind=out.LockfileKind(out.PubspecLock()),
         manifest_kind=out.ManifestKind(out.PubspecYaml()),
         ecosystem=out.Ecosystem(out.Pub()),
+        make_manifest_only_subprojects=False,
     ),
     # Swift PM
     ExactLockfileManifestMatcher(
@@ -111,6 +156,7 @@ MATCHERS: List[SubprojectMatcher] = [
         lockfile_kind=out.LockfileKind(out.SwiftPackageResolved()),
         manifest_kind=out.ManifestKind(out.PackageSwift()),
         ecosystem=out.Ecosystem(out.SwiftPM()),
+        make_manifest_only_subprojects=False,
     ),
     # Hex
     ExactLockfileManifestMatcher(
@@ -119,6 +165,7 @@ MATCHERS: List[SubprojectMatcher] = [
         lockfile_kind=out.LockfileKind(out.MixLock()),
         manifest_kind=out.ManifestKind(out.MixExs()),
         ecosystem=out.Ecosystem(out.Hex()),
+        make_manifest_only_subprojects=False,
     ),
     # Pipenv
     ExactLockfileManifestMatcher(
@@ -127,6 +174,7 @@ MATCHERS: List[SubprojectMatcher] = [
         lockfile_kind=out.LockfileKind(out.PipfileLock()),
         manifest_kind=out.ManifestKind(out.Pipfile()),
         ecosystem=out.Ecosystem(out.Pypi()),
+        make_manifest_only_subprojects=False,
     ),
     # Poetry
     ExactLockfileManifestMatcher(
@@ -135,6 +183,7 @@ MATCHERS: List[SubprojectMatcher] = [
         lockfile_kind=out.LockfileKind(out.PoetryLock()),
         manifest_kind=out.ManifestKind(out.PyprojectToml()),
         ecosystem=out.Ecosystem(out.Pypi()),
+        make_manifest_only_subprojects=False,
     ),
     # UV
     ExactLockfileManifestMatcher(
@@ -143,19 +192,34 @@ MATCHERS: List[SubprojectMatcher] = [
         lockfile_kind=out.LockfileKind(out.UvLock()),
         manifest_kind=out.ManifestKind(out.PyprojectToml()),
         ecosystem=out.Ecosystem(out.Pypi()),
+        make_manifest_only_subprojects=False,
     ),
+    # Setup.py
+    ExactManifestOnlyMatcher(
+        manifest_kind=out.ManifestKind(out.SetupPy()),
+        manifest_name="setup.py",
+        ecosystem=out.Ecosystem(out.Pypi()),
+    ),
+    # SBT
+    SbtMatcher(),
 ]
 
 
-def filter_dependency_source_files(candidates: FrozenSet[Path]) -> FrozenSet[Path]:
+def get_all_subproject_identifying_glob_filters() -> FrozenSet[str]:
+    nested_sets = [matcher.subproject_identifying_glob_filters for matcher in MATCHERS]
+    return frozenset(pat for pats in nested_sets for pat in pats)
+
+
+def filter_dependency_source_files(candidates: FrozenSet[Target]) -> FrozenSet[Target]:
     """
     Returns the paths in `candidates` that are dependency source files.
     """
     return frozenset(path for path in candidates if _is_dependency_source_file(path))
 
 
-def _is_dependency_source_file(path: Path) -> bool:
+@simple_profiling
+def _is_dependency_source_file(path: Target) -> bool:
     """
     Check if a path is a valid dependency source file (lockfile, manifest, SBOM, etc)
     """
-    return any(matcher.is_match(path) for matcher in MATCHERS)
+    return any(matcher.is_match(path.fpath) for matcher in MATCHERS)

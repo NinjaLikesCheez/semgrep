@@ -1,4 +1,16 @@
-(* Build "commands" to be executed by CapExec.ml (or UCmd.ml) *)
+(*
+   Copyright (c) 2023-2025 Semgrep Inc.
+
+   This library is free software; you can redistribute it and/or
+   modify it under the terms of the GNU Lesser General Public License
+   version 2.1 as published by the Free Software Foundation.
+
+   This library is distributed in the hope that it will be useful, but
+   WITHOUT ANY WARRANTY; without even the implied warranty of
+   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the file
+   LICENSE for more details.
+*)
+(* Build "commands" to be executed by UCmd.ml *)
 
 (* command name, e.g. "git" *)
 type name = Name of string [@@deriving show]
@@ -15,6 +27,18 @@ type t = name * args [@@deriving show]
 val bos_apply : (Bos.Cmd.t -> 'a) -> t -> 'a
 
 type run_status = Bos.OS.Cmd.run_status
+
+(* environment variables *)
+type env = { vars : (string * string) list; inherit_parent_env : bool }
+
+(* [env_of_list vars] will generate an environment to pass to the
+ * UCmd.xxx_of_run functions to execute an external program with
+ * environment variables set as described in [vars]. Note that
+ * by default inherit_parent_env is set to true meaning the environment
+ * variables specified in [vars] are added to the environment of the
+ * parent process (and possibly overriding them).
+ *)
+val env_of_list : ?inherit_parent_env:bool -> (string * string) list -> env
 
 (* for error messages *)
 val to_string : t -> string

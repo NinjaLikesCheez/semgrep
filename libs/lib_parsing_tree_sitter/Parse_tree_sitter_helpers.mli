@@ -1,3 +1,15 @@
+(*
+   Copyright (c) 2020-2024 Semgrep Inc.
+
+   This library is free software; you can redistribute it and/or
+   modify it under the terms of the GNU Lesser General Public License
+   version 2.1 as published by the Free Software Foundation.
+
+   This library is distributed in the hope that it will be useful, but
+   WITHOUT ANY WARRANTY; without even the implied warranty of
+   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the file
+   LICENSE for more details.
+*)
 type 'a env = {
   file : Fpath.t;
   (* Get the byte offset (0-based) in the source from a (line, column) pair.
@@ -26,15 +38,25 @@ val token : 'a env -> Tree_sitter_run.Token.t -> Tok.t
 val str : 'a env -> Tree_sitter_run.Token.t -> string * Tok.t
 val debug_sexp_cst_after_error : Sexplib.Sexp.t -> unit
 
-(*
+val wrap_parser :
+  (unit -> ('cst, 'extra) Tree_sitter_run.Parsing_result.t) ->
+  ('cst -> 'extra list -> 'ast) ->
+  ('ast, unit) Tree_sitter_run.Parsing_result.t
+(**
    Call a tree-sitter parser and then map the CST into an AST
    with the user-provided function. Takes care of error handling but lets
    exceptions go through.
 
    Extras (e.g. comments, heredoc bodies, ...) must be injected into the AST
    at this stage.
+
+   Extras are little trees with their own root and type. Some of
+   them are ordinary comments and should be discarded. Others may be
+   comments with special syntax that is worth parsing and somehow
+   scanning with semgrep. There are also extras such as heredoc
+   templates that start on the line after the opening marker and
+   after any other heredoc body (whose opening markers come first on
+   a line with multiple opening markers). Matching heredoc openings
+   with their heredoc bodies would be done by inspecting the source
+   locations of the heredoc openings and their matching bodies.
 *)
-val wrap_parser :
-  (unit -> ('cst, 'extra) Tree_sitter_run.Parsing_result.t) ->
-  ('cst -> 'extra list -> 'ast) ->
-  ('ast, unit) Tree_sitter_run.Parsing_result.t

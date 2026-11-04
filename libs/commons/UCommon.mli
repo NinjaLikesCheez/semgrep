@@ -1,3 +1,15 @@
+(*
+   Copyright (c) 2023-2025 Semgrep Inc.
+
+   This library is free software; you can redistribute it and/or
+   modify it under the terms of the GNU Lesser General Public License
+   version 2.1 as published by the Free Software Foundation.
+
+   This library is distributed in the hope that it will be useful, but
+   WITHOUT ANY WARRANTY; without even the implied warranty of
+   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the file
+   LICENSE for more details.
+*)
 (* Same as print_endline: print the string and a newline, then flush stdout.
  * Just shorter. *)
 val pr : string -> unit
@@ -13,30 +25,6 @@ val pr2 : string -> unit
 
 (* Print on stderr any data structure (using Dumper.dump) *)
 val pr2_gen : 'a -> unit
-
-(* Print on stderr but only once (to avoid printing the same error
- * again and again) *)
-val pr2_once : string -> unit
-
-(* forbid pr2_once to do the once "optimisation" *)
-val _already_printed : (string, bool) Hashtbl.t
-val disable_pr2_once : bool ref
-
-(*****************************************************************************)
-(* Profiling *)
-(*****************************************************************************)
-
-(*
-   Run a function and print how long it took to return or to raise an
-   exception. pr_time prints to stdout.
-*)
-val pr_time : string -> (unit -> 'a) -> 'a
-
-(*
-   Run a function and print how long it took to return or to raise an
-   exception. pr2_time prints to stderr.
-*)
-val pr2_time : string -> (unit -> 'a) -> 'a
 
 (*****************************************************************************)
 (* Misc *)

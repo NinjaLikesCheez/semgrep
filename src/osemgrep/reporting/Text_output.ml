@@ -1,7 +1,20 @@
+(*
+   Copyright (c) 2024-2025 Semgrep Inc.
+
+   This library is free software; you can redistribute it and/or
+   modify it under the terms of the GNU Lesser General Public License
+   version 2.1 as published by the Free Software Foundation.
+
+   This library is distributed in the hope that it will be useful, but
+   WITHOUT ANY WARRANTY; without even the implied warranty of
+   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the file
+   LICENSE for more details.
+*)
 open Common
 open Fpath_.Operators
 module Out = Semgrep_output_v1_t
 module Log = Log_reporting.Log
+module Raw_json = Yojson.Basic.Util
 
 (*****************************************************************************)
 (* Prelude *)
@@ -57,6 +70,7 @@ type report_group =
   | `Blocking
   | (* at some point `Blocking and `Nonblocking groups become `Merged *)
     `Merged ]
+[@@deriving show]
 
 let group_titles : report_group -> string = function
   | `Unreachable -> "Unreachable Supply Chain Finding"
@@ -95,12 +109,12 @@ let sort_by_groups als =
 let lookup_field = Yojson.Basic.Util.member
 
 let is_blocking (json : Yojson.Basic.t) =
-  match Yojson.Basic.Util.member "dev.semgrep.actions" json with
+  match lookup_field "dev.semgrep.actions" json with
   | `List stuff ->
       stuff
       |> List.exists (function
-           | `String s -> String.equal s "block"
-           | _else -> false)
+        | `String s -> String.equal s "block"
+        | _else -> false)
   | _else -> false
 
 let ws_prefix s =
@@ -117,7 +131,7 @@ let ws_prefix s =
 let dedent_lines (lines : string list) =
   let ws_prefixes =
     List.sort compare
-      (List_.filter_map
+      (List.filter_map
          (fun line ->
            if String.(length (trim line)) =|= 0 then None
            else Some (ws_prefix line))
@@ -143,7 +157,7 @@ let dedent_lines (lines : string list) =
     in
     eq hd tl (min (List.length hd) (List.length tl)) 0
   in
-  ( List_.map
+  ( List.map
       (fun line ->
         if String.(length (trim line)) =|= 0 then line
         else Str.string_after line longest_prefix)
@@ -387,14 +401,18 @@ let matches_output ~max_chars_per_line ~max_lines_per_finding
               prf " %s\n" (Console.bold txt);
               rest
               |> List.iter (fun (indentation, txt) ->
-                     prf "%s%s\n" indentation (Console.bold txt));
+                  prf "%s%s\n" indentation (Console.bold txt));
+              if is_blocking cur.extra.metadata then
+                (* TODO? was base_indent instead of detail_indent *)
+                prf "%s%s\n" detail_indent
+                  Console.(color red @@ bold "❰❰ Blocking ❱❱");
               cur.extra.sca_info
               |> Option.iter (fun _ ->
-                     match lookup_field "sca-severity" cur.extra.metadata with
-                     | `String txt ->
-                         (* TODO? was base_indent instead of detail_indent *)
-                         prf "%sSeverity: %s\n" detail_indent (Console.bold txt)
-                     | _ -> ());
+                  match lookup_field "sca-severity" cur.extra.metadata with
+                  | `String txt ->
+                      (* TODO? was base_indent instead of detail_indent *)
+                      prf "%sSeverity: %s\n" detail_indent (Console.bold txt)
+                  | _ -> ());
 
               if must_print_message then (
                 let message_wrapped =
@@ -404,7 +422,7 @@ let matches_output ~max_chars_per_line ~max_lines_per_finding
                 in
                 message_wrapped
                 |> List.iter (fun (indentation, txt) ->
-                       prf "%s%s\n" indentation txt);
+                    prf "%s%s\n" indentation txt);
                 (match lookup_field "shortlink" cur.extra.metadata with
                 | `String txt -> prf "%sDetails: %s\n" detail_indent txt
                 | _ -> ());
@@ -433,31 +451,36 @@ let text_output ~max_chars_per_line ~max_lines_per_finding
   let groups : (report_group, Out.cli_match list) Assoc.t =
     cli_output.results |> Semgrep_output_utils.sort_cli_matches
     |> Assoc.group_by (fun (m : Out.cli_match) ->
-           match Product.of_cli_match m with
-           | `SCA ->
-               (* TO PORT:
-                         subgroup = match.exposure_type or "undetermined"
-
-                          figuring out the product, python uses (rule.py):
-                             RuleProduct.sca
-                             if "r2c-internal-project-depends-on" in self._raw
-                             else RuleProduct.sast
-
-                          and exposure_type (rule_match.py):
-                          if "sca_info" not in self.extra:
-                              return None
-
-                          if self.metadata.get("sca-kind") == "upgrade-only":
-                              return "reachable"
-                          elif self.metadata.get("sca-kind") == "legacy":
-                              return "undetermined"
-                          else:
-                              return "reachable" if self.extra["sca_info"].reachable else "unreachable" *)
-               `Undetermined
-           | `SAST ->
-               if is_blocking m.extra.metadata then `Blocking else `Nonblocking
-           | `Secrets ->
-               (m.extra.validation_state ||| `No_validator :> report_group))
+        match Product.of_cli_match m with
+        | `SCA -> (
+            let sca_rule_kind =
+              m.extra.metadata |> Raw_json.to_assoc |> Assoc.find_opt "sca-kind"
+              |> Option.map Raw_json.to_string
+            in
+            match (m.extra.sca_info, sca_rule_kind) with
+            | _, Some "upgrade-only" -> `Reachable
+            | _, Some "legacy" -> `Undetermined
+            | Some { kind = Some DirectReachable; _ }, _ -> `Reachable
+            | Some { kind = Some (TransitiveUndetermined _); _ }, _ ->
+                (* TODO: we should tag them as `Undetermined at some point *)
+                `Unreachable
+            (* TODO: handle TransitiveReachable at some point *)
+            | ( Some
+                  {
+                    kind =
+                      Some
+                        ( LockfileOnlyMatch _ | TransitiveReachable _
+                        | TransitiveUnreachable _ );
+                    _;
+                  },
+                _ ) ->
+                `Undetermined
+            | Some { kind = None; _ }, _ -> `Undetermined
+            | None, _ -> `Undetermined)
+        | `SAST ->
+            if is_blocking m.extra.metadata then `Blocking else `Nonblocking
+        | `Secrets ->
+            (m.extra.validation_state ||| `No_validator :> report_group))
   in
   (* TO PORT: if not is_ci_invocation: *)
   let merged =
@@ -474,11 +497,10 @@ let text_output ~max_chars_per_line ~max_lines_per_finding
 
       groups |> sort_by_groups
       |> List.iter (fun (group, matches) ->
-             if not (List_.null matches) then begin
-               prf "%s"
-                 (Console.heading
-                    (String_.unit_str (List.length matches) (group_titles group)));
-               prf "%s"
-                 (matches_output ~max_chars_per_line ~max_lines_per_finding
-                    matches)
-             end))
+          if not (List_.null matches) then begin
+            prf "%s"
+              (Console.heading
+                 (String_.unit_str (List.length matches) (group_titles group)));
+            prf "%s"
+              (matches_output ~max_chars_per_line ~max_lines_per_finding matches)
+          end))

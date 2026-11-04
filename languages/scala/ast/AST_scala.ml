@@ -513,6 +513,8 @@ and constr_app = type_ * arguments list
 (* ------------------------------------------------------------------------- *)
 and function_definition = {
   fkind : function_kind wrap;
+  (* scala3: polymorphic function literal type params, e.g. [T] => body *)
+  ftparams : type_parameters option;
   (* a list of list of parameters! but usually 0/1/2 *)
   fparams : bindings list;
   (* scala3? remove None and force : Unit ? *)
@@ -574,6 +576,7 @@ and template_definition = {
 and template_parents = {
   cextends : (type_ * arguments list) option;
   cwith : type_ list;
+  cderives : type_ list;
 }
 
 and template_body = (self_type option * block) bracket
@@ -625,16 +628,21 @@ type program = top_stat list [@@deriving show]
 (* Any *)
 (*****************************************************************************)
 
-type any = Pr of program | Ex of expr | Ss of block | Tk of tok
+type any =
+  | Pr of program
+  | Ex of expr
+  | Ss of block
+  | Cs of (pattern, block) case_clause
+  | Tk of tok
 [@@deriving show { with_path = false }]
 
 (*****************************************************************************)
 (* Helpers *)
 (*****************************************************************************)
 
-let empty_cparents = { cextends = None; cwith = [] }
-let attrs_of_mods xs = List_.map (fun x -> M x) xs
-let attrs_of_annots xs = List_.map (fun x -> A x) xs
+let empty_cparents = { cextends = None; cwith = []; cderives = [] }
+let attrs_of_mods xs = List.map (fun x -> M x) xs
+let attrs_of_annots xs = List.map (fun x -> A x) xs
 let mods_with_annots mods annots = attrs_of_annots annots @ attrs_of_mods mods
 
 let is_variable_name s =

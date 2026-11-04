@@ -1,3 +1,15 @@
+#
+# Copyright (c) 2022-2025 Semgrep Inc.
+#
+# This library is free software; you can redistribute it and/or
+# modify it under the terms of the GNU Lesser General Public License
+# version 2.1 as published by the Free Software Foundation.
+#
+# This library is distributed in the hope that it will be useful, but
+# WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the file
+# LICENSE for more details.
+#
 from typing import NamedTuple
 from typing import Optional
 
@@ -43,10 +55,7 @@ REPOS = [
     Repo("https://github.com/coinbase/fenrir"),
     Repo("https://github.com/coinbase/node-process-lock"),
     Repo("https://github.com/coinbase/odin"),
-    Repo("https://github.com/coinbase/protoc-gen-rbi"),
     Repo("https://github.com/coinbase/pwnbot"),
-    Repo("https://github.com/coinbase/rosetta-cli"),
-    Repo("https://github.com/coinbase/rosetta-sdk-go"),
     Repo("https://github.com/coinbase/self-service-iam"),
     Repo("https://github.com/coinbase/solidity-workshop"),
     Repo("https://github.com/coinbase/step"),
@@ -113,7 +122,7 @@ REPOS = [
     Repo("https://github.com/preset-io/elasticsearch-dbapi"),
     Repo("https://github.com/apache/libcloud"),
     Repo("https://github.com/keybase/pykeybasebot"),
-    Repo("https://gitbox.apache.org/repos/asf/cassandra"),
+    Repo("https://github.com/apache/cassandra"),
     Repo("https://github.com/keybase/python-triplesec"),
     Repo("https://github.com/psycopg/psycopg2"),
     Repo("https://github.com/preset-io/flask-jwt-extended"),

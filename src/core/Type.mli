@@ -1,3 +1,15 @@
+(*
+   Copyright (c) 2024 Semgrep Inc.
+
+   This library is free software; you can redistribute it and/or
+   modify it under the terms of the GNU Lesser General Public License
+   version 2.1 as published by the Free Software Foundation.
+
+   This library is distributed in the hope that it will be useful, but
+   WITHOUT ANY WARRANTY; without even the implied warranty of
+   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the file
+   LICENSE for more details.
+*)
 (* Types for type inference.
  *
  * 'r below stands for 'resolved
@@ -22,19 +34,20 @@ and 'r type_arg_constraint =
 
 and 'r t =
   | N of 'r name * (* alt names *) AST_generic.alternate_name list
-  (* e.g. for unresolved types in core libraries*)
   | UnresolvedName of string * 'r type_argument list
+      (** e.g. for unresolved types in core libraries. *)
   | Builtin of builtin_type
-  (* for null analysis *)
-  | Null
-  (* int option for the cases where we know the size of the array *)
+  | Null  (** for null analysis *)
   | Array of Parsed_int.t option * 'r t
+      (** int option for the cases where we know the size of the array. *)
+  | Record of 'r record
   | Function of 'r function_type
   | Pointer of 'r t
-  (* NoType is to avoid some Type.t option and use of let* everywhere.
-   * See also of_opt() below.
-   *)
+  | Superclass of 'r t option
+      (** The actual type is a superclass of the current class, if unspecified.
+          Otherwise, the actual type is the specified type or one of its superclasses. *)
   | NoType
+      (** NoType is to avoid Type.t option and use of let* everywhere. See also of_opt() below. *)
   | Todo of todo_kind
 
 and builtin_type =
@@ -46,6 +59,7 @@ and builtin_type =
   | Number
   | OtherBuiltins of string
 
+and 'r record = (string * 'r t) list
 and 'r function_type = 'r parameter list * 'r t
 and 'r parameter = Param of 'r parameter_classic | OtherParam of todo_kind
 
@@ -94,6 +108,7 @@ class virtual ['c] map : object ('c)
        ; visit_OtherTypeArg : 'd -> todo_kind -> 'h type_argument
        ; visit_Param : 'd -> 'g parameter_classic -> 'h parameter
        ; visit_Pointer : 'd -> 'g t -> 'h t
+       ; visit_Record : 'd -> (string * 'g t) list -> 'h t
        ; visit_String : 'd -> builtin_type
        ; visit_TA : 'd -> 'g t -> 'h type_argument
        ; visit_TALower : 'd -> 'g t -> 'h type_arg_constraint
@@ -112,6 +127,7 @@ class virtual ['c] map : object ('c)
        ; visit_parameter_classic :
            'd -> 'g parameter_classic -> 'h parameter_classic
        ; visit_parsed_int : 'd -> Parsed_int.t -> Parsed_int.t
+       ; visit_record : 'd -> 'g record -> 'h record
        ; visit_t : 'd -> 'g t -> 'h t
        ; visit_todo_kind : 'd -> todo_kind -> todo_kind
        ; visit_type_arg_constraint :
@@ -128,6 +144,7 @@ class virtual ['c] map : object ('c)
   method visit_Int : 'd -> builtin_type
   method visit_N : 'd -> 'g name -> AST_generic.alternate_name list -> 'h t
   method visit_NoType : 'd -> 'h t
+  method visit_Superclass : 'd -> 'g t option -> 'h t
   method visit_Null : 'd -> 'h t
   method visit_Number : 'd -> builtin_type
   method visit_OtherBuiltins : 'd -> string -> builtin_type
@@ -135,6 +152,7 @@ class virtual ['c] map : object ('c)
   method visit_OtherTypeArg : 'd -> todo_kind -> 'h type_argument
   method visit_Param : 'd -> 'g parameter_classic -> 'h parameter
   method visit_Pointer : 'd -> 'g t -> 'h t
+  method visit_Record : 'd -> (string * 'g t) list -> 'h t
   method visit_String : 'd -> builtin_type
   method visit_TA : 'd -> 'g t -> 'h type_argument
   method visit_TALower : 'd -> 'g t -> 'h type_arg_constraint
@@ -183,6 +201,7 @@ class virtual ['c] map : object ('c)
     'd -> 'g parameter_classic -> 'h parameter_classic
 
   method visit_parsed_int : 'd -> Parsed_int.t -> Parsed_int.t
+  method visit_record : 'd -> 'g record -> 'h record
 
   method private visit_ref :
     'env 'a 'b. ('env -> 'a -> 'b) -> 'env -> 'a ref -> 'b ref
@@ -192,8 +211,8 @@ class virtual ['c] map : object ('c)
     ('env -> 'a -> 'b) ->
     ('env -> 'e -> 'f) ->
     'env ->
-    ('a, 'e) Result.result ->
-    ('b, 'f) Result.result
+    ('a, 'e) result ->
+    ('b, 'f) result
 
   method private visit_string : 'env. 'env -> string -> string
   method visit_t : 'd -> 'g t -> 'h t

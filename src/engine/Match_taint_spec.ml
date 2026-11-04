@@ -21,7 +21,8 @@ module MV = Metavariable
 module R = Rule
 module RM = Range_with_metavars
 module OutJ = Semgrep_output_v1_t
-module D = Dataflow_tainting
+module TM = Taint_spec_match
+module TP = Taint_spec_preds
 
 (* Taint-tracking via ranges
  * -------------------------
@@ -64,25 +65,50 @@ module D = Dataflow_tainting
  *)
 
 type propagator_match = {
-  id : Taint_rule_inst.var;
+  id : TP.var;
   rwm : RM.t;
   from : Range.t;
   to_ : Range.t;
   spec : R.taint_propagator;
 }
 
+type raw_spec_matches = {
+  raw_sources : (RM.t * R.taint_source) list;
+  raw_propagators : propagator_match list;
+  raw_sanitizers : (RM.t * R.taint_sanitizer) list;
+  raw_sinks : (RM.t * R.taint_sink) list;
+}
+
 type spec_matches = {
   sources : (RM.t * R.taint_source) list;
-  propagators : propagator_match list;
+  propagation_points : TP.propagation_point TM.t list;
   sanitizers : (RM.t * R.taint_sanitizer) list;
-  sinks : (RM.t * R.taint_sink) list;
+  sinks : (RM.t * TP.sink) list;
 }
 
 (*****************************************************************************)
 (* Hooks *)
 (*****************************************************************************)
 
-let hook_mk_taint_spec_match_preds = ref None
+let hook_mk_taint_spec_match_preds :
+    (Rule.rule -> spec_matches -> TP.t) option Hook.t =
+  Hook.create None
+
+(*****************************************************************************)
+(* Helpers *)
+(*****************************************************************************)
+
+let filter_map_warn_if_None ~warn f xs =
+  xs
+  |> List.filter_map (fun x ->
+      let opt_y = f x in
+      if Option.is_none opt_y then Log.warn (fun m -> m "%s" warn);
+      opt_y)
+
+let rule_needs_to_track_control_taint (rule : R.taint_rule) =
+  let (`Taint spec) = rule.mode in
+  spec.sources |> snd
+  |> List.exists (fun (src : R.taint_source) -> src.source_control)
 
 (*****************************************************************************)
 (* Finding matches for taint specs *)
@@ -103,9 +129,9 @@ let concat_map_with_expls f xs =
   let res =
     xs
     |> List.concat_map (fun x ->
-           let ys, expls = f x in
-           Stack_.push expls all_expls;
-           ys)
+        let ys, expls = f x in
+        Stack_.push expls all_expls;
+        ys)
   in
   (res, List_.flatten (List.rev !all_expls))
 
@@ -120,38 +146,129 @@ let find_range_w_metas formula_cache (xconf : Match_env.xconfig)
   (* if perf is a problem, we could build an interval set here *)
   specs
   |> concat_map_with_expls (fun (pf, x) ->
-         let ranges, expls =
-           Formula_cache.cached_find_opt formula_cache pf (fun () ->
-               range_w_metas_of_formula xconf xtarget rule pf)
-         in
-         (ranges |> List_.map (fun rwm -> (rwm, x)), expls))
+      let ranges, expls =
+        Formula_cache.cached_find_opt formula_cache pf (fun () ->
+            range_w_metas_of_formula xconf xtarget rule pf)
+      in
+      (ranges |> List.map (fun rwm -> (rwm, x)), expls))
+
+(* Construct a Range_with_metavars.t from a byte-range, with no metavar
+   bindings and a synthetic Core_match.t origin.  Used when a spec entry
+   carries Ranges instead of a formula. *)
+let mk_synthetic_rwm ~(rule : R.t) ~(lang : Lang.t)
+    ~(converters : Pos.bytepos_linecol_converters) (file : Fpath.t)
+    (br : R.byte_range) : RM.t =
+  let r : Range.t = { start = br.start; end_ = br.end_ } in
+  let mk_loc bytepos : Tok.location =
+    let line, column = converters.bytepos_to_linecol_fun bytepos in
+    { Loc.pos = { Pos.file; bytepos; line; column }; str = "" }
+  in
+  let origin : Core_match.t =
+    {
+      Core_match.path =
+        {
+          origin = Origin.Unfilterable_target_file file;
+          internal_path_to_content = file;
+        };
+      range_loc = (mk_loc r.start, mk_loc r.end_);
+      rule_id =
+        {
+          id = fst rule.id;
+          message = "";
+          metadata = None;
+          fix = None;
+          fix_regexp = None;
+          langs = [ lang ];
+          pattern_string = "";
+          severity = Some rule.severity;
+        };
+      engine_of_match = `OSS;
+      env = [];
+      ast_node = None;
+      tokens = Lazy_safe.from_val [];
+      taint_trace = None;
+      sca_match = None;
+      validation_state = `No_validator;
+      severity_override = None;
+      metadata_override = None;
+      fix_text = None;
+      facts = [];
+    }
+  in
+  RM.{ r; mvars = []; kind = Plain; origin }
+
+(* Given a list of (ranges_list, spec) pairs, filter to the ranges that
+   fall within the current file and build synthetic RWMs. *)
+let mk_ranges_rwm_matches ~(rule : R.t) ~(xtarget : Xtarget.t)
+    (range_specs : ((Fpath.t * R.byte_range) list * 'a) list) : (RM.t * 'a) list
+    =
+  match range_specs with
+  | [] -> []
+  | _ :: _ ->
+      let file = xtarget.path.internal_path_to_content in
+      let lang = Analyzer.to_lang_exn rule.target_analyzer in
+      (* potentially expensive, but guarded by the fact that we only call this for
+         range rules and not formula rules
+         TODO: revisit if we end up in a world where we have a ton of different
+         pre-specified ranges
+       *)
+      let converters = Pos.full_converters_large file in
+      List.concat_map
+        (fun (ranges, spec) ->
+          List.filter_map
+            (fun (f, r) ->
+              if Fpath.equal f file then
+                Some (mk_synthetic_rwm ~rule ~lang ~converters f r, spec)
+              else None)
+            ranges)
+        range_specs
 
 let find_sources_ranges formula_cache xconf xtarget rule (spec : R.taint_spec) =
-  find_range_w_metas formula_cache xconf xtarget rule
-    (spec.sources |> snd
-    |> List_.map (fun (src : R.taint_source) -> (src.source_formula, src)))
+  let formula_specs, range_specs =
+    spec.sources |> snd
+    |> List.partition_map (fun (src : R.taint_source) ->
+        match src.source_formula with
+        | R.Formula f -> Left (f, src)
+        | R.Ranges rs -> Right (rs, src))
+  in
+  let formula_results, expls =
+    find_range_w_metas formula_cache xconf xtarget rule formula_specs
+  in
+  let range_results = mk_ranges_rwm_matches ~rule ~xtarget range_specs in
+  (formula_results @ range_results, expls)
 [@@trace_trace]
 
 let find_sinks_ranges formula_cache xconf xtarget rule (spec : R.taint_spec) =
-  find_range_w_metas formula_cache xconf xtarget rule
-    (spec.sinks |> snd
-    |> List_.map (fun (sink : R.taint_sink) -> (sink.sink_formula, sink)))
+  let formula_specs, range_specs =
+    spec.sinks |> snd
+    |> List.partition_map (fun (sink : R.taint_sink) ->
+        match sink.sink_formula with
+        | R.Formula f -> Left (f, sink)
+        | R.Ranges rs -> Right (rs, sink))
+  in
+  let formula_results, expls =
+    find_range_w_metas formula_cache xconf xtarget rule formula_specs
+  in
+  let range_results = mk_ranges_rwm_matches ~rule ~xtarget range_specs in
+  (formula_results @ range_results, expls)
 [@@trace_trace]
 
 let find_sanitizers_matches formula_cache (xconf : Match_env.xconfig)
     (xtarget : Xtarget.t) (rule : R.t) (specs : R.taint_sanitizer list) :
     (bool * RM.t * R.taint_sanitizer) list * ME.t list =
   specs
-  |> concat_map_with_expls (fun (sanitizer : R.taint_sanitizer) ->
-         let ranges, expls =
-           Formula_cache.cached_find_opt formula_cache
-             sanitizer.sanitizer_formula (fun () ->
-               range_w_metas_of_formula xconf xtarget rule
-                 sanitizer.sanitizer_formula)
-         in
-         ( ranges
-           |> List_.map (fun x -> (sanitizer.R.not_conflicting, x, sanitizer)),
-           expls ))
+  |> concat_map_with_expls (fun (san : R.taint_sanitizer) ->
+      match san.sanitizer_formula with
+      | R.Formula formula ->
+          let ranges, expls =
+            Formula_cache.cached_find_opt formula_cache formula (fun () ->
+                range_w_metas_of_formula xconf xtarget rule formula)
+          in
+          ( ranges |> List.map (fun rwm -> (san.R.not_conflicting, rwm, san)),
+            expls )
+      | R.Ranges rs ->
+          let rwms = mk_ranges_rwm_matches ~rule ~xtarget [ (rs, san) ] in
+          (rwms |> List.map (fun (rwm, s) -> (s.R.not_conflicting, rwm, s)), []))
 [@@trace_trace]
 
 (* Finds all matches of `pattern-propagators`. *)
@@ -160,80 +277,88 @@ let find_propagators_matches formula_cache (xconf : Match_env.xconfig)
     (propagators_spec : R.taint_propagator list) =
   propagators_spec
   |> List.concat_map (fun (p : R.taint_propagator) ->
-         let mvar_pfrom, tok_pfrom = p.from in
-         let mvar_pto, tok_pto = p.to_ in
-         let ranges_w_metavars, _expsTODO =
-           Formula_cache.cached_find_opt formula_cache p.propagator_formula
-             (fun () ->
-               range_w_metas_of_formula xconf xtarget rule p.propagator_formula)
-         in
-         (* Now, for each match of the propagator pattern, we try to construct
-          * a `propagator_match`. We just need to look up what code is captured
-          * by the metavariables `from` and `to`, and check if we can obtain good
-          * location info for that code (i.e., we have real tokens rather than
-          * fake ones). *)
-         ranges_w_metavars
-         |> List_.filter_map (fun rwm ->
-                (* The piece of code captured by the `from` metavariable.  *)
-                let* _mvar_from, mval_from =
-                  List.find_opt
-                    (fun (mvar, _mval) -> MV.equal_mvar mvar_pfrom mvar)
-                    rwm.RM.mvars
-                in
-                (* The piece of code captured by the `to` metavariable.  *)
-                let* _mvar_to, mval_to =
-                  List.find_opt
-                    (fun (mvar, _mval) -> MV.equal_mvar mvar_pto mvar)
-                    rwm.RM.mvars
-                in
-                (* TODO: log a warning when we cannot obtain a taint propagator due to
-                 * lacking range info. *)
-                match (Tok.loc_of_tok tok_pfrom, Tok.loc_of_tok tok_pto) with
-                | Error _, _
-                | _, Error _ ->
-                    None
-                | Ok loc_pfrom, Ok loc_pto ->
-                    let* mval_from_start_loc, mval_from_end_loc =
-                      AST_generic_helpers.range_of_any_opt
-                        (MV.mvalue_to_any mval_from)
-                    in
-                    let* mval_to_start_loc, mval_to_end_loc =
-                      AST_generic_helpers.range_of_any_opt
-                        (MV.mvalue_to_any mval_to)
-                    in
-                    let from =
-                      Range.range_of_token_locations mval_from_start_loc
-                        mval_from_end_loc
-                    in
-                    let to_ =
-                      Range.range_of_token_locations mval_to_start_loc
-                        mval_to_end_loc
-                    in
-                    let id =
-                      Common.spf "propagator:%d:%d:%d:%d:%d:%d"
-                        loc_pfrom.pos.bytepos loc_pto.pos.bytepos
-                        from.Range.start from.Range.end_ to_.Range.start
-                        to_.Range.end_
-                    in
-                    Some { id; rwm; from; to_; spec = p }))
+      let mvar_pfrom, tok_pfrom = p.from in
+      let mvar_pto, tok_pto = p.to_ in
+      let ranges_w_metavars, _expsTODO =
+        Formula_cache.cached_find_opt formula_cache p.propagator_formula
+          (fun () ->
+            range_w_metas_of_formula xconf xtarget rule p.propagator_formula)
+      in
+      (* Now, for each match of the propagator pattern, we try to construct
+       * a `propagator_match`. We just need to look up what code is captured
+       * by the metavariables `from` and `to`, and check if we can obtain good
+       * location info for that code (i.e., we have real tokens rather than
+       * fake ones). *)
+      ranges_w_metavars
+      |> filter_map_warn_if_None
+           ~warn:"Skipping propagator match because we lack range info"
+           (fun rwm ->
+             (* The piece of code captured by the `from` metavariable.  *)
+             let* _mvar_from, mval_from =
+               List.find_opt
+                 (fun (mvar, _mval) -> MV.equal_mvar mvar_pfrom mvar)
+                 rwm.RM.mvars
+             in
+             (* The piece of code captured by the `to` metavariable.  *)
+             let* _mvar_to, mval_to =
+               List.find_opt
+                 (fun (mvar, _mval) -> MV.equal_mvar mvar_pto mvar)
+                 rwm.RM.mvars
+             in
+             match (Tok.loc_of_tok tok_pfrom, Tok.loc_of_tok tok_pto) with
+             | Error _, _
+             | _, Error _ ->
+                 None
+             | Ok loc_pfrom, Ok loc_pto ->
+                 let* mval_from_start_loc, mval_from_end_loc =
+                   AST_generic_helpers.range_of_any_opt
+                     (MV.mvalue_to_any mval_from)
+                 in
+                 let* mval_to_start_loc, mval_to_end_loc =
+                   AST_generic_helpers.range_of_any_opt
+                     (MV.mvalue_to_any mval_to)
+                 in
+                 let from =
+                   Range.range_of_token_locations mval_from_start_loc
+                     mval_from_end_loc
+                 in
+                 let to_ =
+                   Range.range_of_token_locations mval_to_start_loc
+                     mval_to_end_loc
+                 in
+                 let id =
+                   Common.spf "propagator<%d,%d>(%s@l.%d/%d-%d-->%s@l.%d/%d-%d)"
+                     loc_pfrom.pos.bytepos loc_pto.pos.bytepos mvar_pfrom
+                     mval_from_start_loc.Loc.pos.line from.Range.start
+                     from.Range.end_ mvar_pto mval_to_start_loc.Loc.pos.line
+                     to_.Range.start to_.Range.end_
+                 in
+                 Some { id; rwm; from; to_; spec = p }))
 [@@trace_trace]
 
 (*****************************************************************************)
-(* Spec matches *)
+(* Raw spec matches *)
 (*****************************************************************************)
 
-let spec_matches_of_taint_rule ~per_file_formula_cache xconf file ast_and_errors
-    ({ mode = `Taint spec; _ } as rule : R.taint_rule) =
+(* THINK(iago): Split into different functions for sources/sinks/etc ? *)
+let raw_spec_matches_of_taint_rule ~per_file_formula_cache xconf file
+    ast_and_errors ({ mode = `Taint spec; _ } as rule : R.taint_rule) =
   let file = Fpath.v file in
   let formula_cache = per_file_formula_cache in
   let xconf = Match_env.adjust_xconfig_with_rule_options xconf rule.options in
-  let lazy_ast_and_errors = lazy ast_and_errors in
+  let lazy_ast_and_errors = lazy_safe ast_and_errors in
+  let lazy_content = lazy_safe (UFile.read_file file) in
   (* TODO: should this function just take a target, rather than a file? *)
   let xtarget : Xtarget.t =
     {
-      path = { origin = File file; internal_path_to_content = file };
+      path =
+        {
+          origin = Unfilterable_target_file file;
+          internal_path_to_content = file;
+        };
       analyzer = rule.target_analyzer;
-      lazy_content = lazy (UFile.read_file file);
+      lazy_content;
+      lazy_utf8_valid = Lazy_safe.map String.is_valid_utf_8 lazy_content;
       lazy_ast_and_errors;
     }
   in
@@ -241,6 +366,42 @@ let spec_matches_of_taint_rule ~per_file_formula_cache xconf file ast_and_errors
     find_sources_ranges formula_cache xconf xtarget rule spec
   in
   let (propagators_ranges : propagator_match list) =
+    (* NOTE "Symbolic-propagation & Taint-propagation"
+
+       Symbolic-propagation and taint-propagation can interact in a rather
+       unfortunate way leading to unexpected results.
+
+       E.g. Give the code below and the propagator `$TO.prepare_url($FROM)`
+       we would get a finding in line 4!
+
+           1 def test():
+           2      tainted_url = taint
+           3      r = safe
+           4      sink(r) # unexpected finding :-(
+           5      r.prepare_url(tainted_url)
+
+       This is due to symbolic-propagation tracking that `r = safe` and
+       `tainted_url = taint`, so the propagator `$TO.prepare_url($FROM)`
+       produces **four** matches rather than just one, where `$FROM` is
+       either `tainted_url` or `taint`, and `$TO` is either `r` or `safe`.
+       So, we end up propagating taint from `taint` (line 2) to `safe`
+       (line 3), thus producing a false positive.
+
+       Thus we disable symbolic-propagation to match taint propagators.
+
+       [Iago] I am not sure whether symbolic-propagation should produce
+       these four findings, but rather just one. I think we should just
+       have `$FROM=tainted_url` and `$TO=r`, and e.g. if we later apply
+       a `metavariable-regex` to `$TO` then that needs to take the
+       sym-prop'ed value of `r` into account. In fact, that is how it
+       works for const-prop'ed values already. But while that gets fixed
+       then this is an OK solution.
+    *)
+    Log.warn (fun m ->
+        m "Disabling symbolic-propagation to match taint propagators");
+    let xconf =
+      { xconf with config = { xconf.config with symbolic_propagation = false } }
+    in
     find_propagators_matches formula_cache xconf xtarget rule spec.propagators
   in
   let (sinks_ranges : (RM.t * R.taint_sink) list), expls_sinks =
@@ -259,8 +420,11 @@ let spec_matches_of_taint_rule ~per_file_formula_cache xconf file ast_and_errors
      * Without this, `$F(...)` will automatically sanitize any other function
      * call acting as a sink or a source. *)
     sanitizers_ranges
-    |> List_.filter_map (fun (not_conflicting, range, spec) ->
-           (* TODO: Warn user when we filter out a sanitizer? *)
+    |> filter_map_warn_if_None
+         ~warn:"Skipping (DEPRECATED) not-conflicting sanitizer due to conflict"
+         (fun (not_conflicting, range, spec) ->
+           (* TODO: Need to remove not-conflicting sanitizers, it has been
+                DEPRECATED for a long time already. *)
            if not_conflicting then
              if
                not
@@ -278,8 +442,8 @@ let spec_matches_of_taint_rule ~per_file_formula_cache xconf file ast_and_errors
     if xconf.matching_explanations then
       let ranges_to_pms ranges_and_stuff =
         ranges_and_stuff
-        |> List_.map (fun (rwm, _) ->
-               RM.range_to_pattern_match_adjusted rule rwm)
+        |> List.map (fun (rwm, _) ->
+            RM.range_to_pattern_match_adjusted rule rwm)
       in
       [
         {
@@ -320,12 +484,158 @@ let spec_matches_of_taint_rule ~per_file_formula_cache xconf file ast_and_errors
     else []
   in
   ( {
-      sources = sources_ranges;
-      propagators = propagators_ranges;
-      sanitizers = sanitizers_ranges;
-      sinks = sinks_ranges;
+      raw_sources = sources_ranges;
+      raw_propagators = propagators_ranges;
+      raw_sanitizers = sanitizers_ranges;
+      raw_sinks = sinks_ranges;
     },
     expls )
+
+(*****************************************************************************)
+(* Spec matches *)
+(*****************************************************************************)
+
+(* From a propagator match we get two propagation points: a '`From' and a '`To'
+  point. *)
+let mk_propagation_points_of_propagator rule (prop : propagator_match) =
+  let spec_pm = RM.range_to_pattern_match_adjusted rule prop.rwm in
+  let mk_prop_point kind r =
+    let spec : TP.propagation_point =
+      {
+        kind;
+        var = prop.id;
+        prop_by_side_effect = prop.spec.propagator_by_side_effect;
+        prop_requires =
+          prop.spec.propagator_requires
+          |> Option.map (fun pwr -> pwr.R.precondition);
+        prop_label = prop.spec.propagator_label;
+        prop_replace_labels = prop.spec.propagator_replace_labels;
+        prop_orig = Prop prop.spec;
+      }
+    in
+    {
+      TM.spec;
+      spec_id = prop.spec.propagator_id;
+      spec_pm;
+      range = r;
+      overlap = 1.0;
+    }
+  in
+  [ mk_prop_point `From prop.from; mk_prop_point `To prop.to_ ]
+
+let propagation_points_of_propagators rule prop_matches =
+  prop_matches |> List.concat_map (mk_propagation_points_of_propagator rule)
+
+(* NOTE "Multi-requires as propagators"
+
+  The example below shows a common use of "multi-requires", where we have a
+  sink function `foobar` that is too generic, and we want the sink to apply only
+  when the receiver object $OBJ has a certain property that we will track with
+  a separate label TYPE.
+
+      pattern-sinks:
+      - patterns:
+          - pattern: $OBJ.foobar($SINK)
+          - focus-metavariable: $SINK
+        requires:
+        - $SINK: TAINT
+        - $OBJ: TYPE
+
+  It may feel "trivial" to implement this, after all, we can look at the code
+  bound by $OBJ and check what taint it has... Wrong! There is no trivial way
+  of knowing what are the taints of that sub-tree of the Generic AST. We would
+  need to convert it into the IL first, then re-run taint inference under the
+  correct environment...
+
+  So, what we do is to treat this as a propagation problem. We consider $OBJ
+  and $SINK in `$OBJ.foobar($SINK)` to be "from" propagation points, with the
+  destination/"to" being the corresponding $OBJ and $SINK in the `requires:`.
+  This way we reuse the propagation machinery to capture the taints of the
+  expressions bound by $OBJ and $SINK, and just query the propagation variables
+  when evaluating the `requires:` (see 'Dataflow_tainting.sink_of_match').
+ *)
+let mk_requires_and_propagation_points_of_sink
+    ((rwm : RM.t), (taint_sink : R.taint_sink)) =
+  let prop_var_of_requires ((mvar, tok), (pwr : Rule.precondition_with_range)) =
+    let* _mvar, mval =
+      List.find_opt
+        (fun (mvar', _mval) -> MV.equal_mvar mvar mvar')
+        rwm.RM.mvars
+    in
+    let* mvar_rule_loc = Tok.loc_of_tok tok |> Result.to_option in
+    let* mval_start_loc, mval_end_loc =
+      AST_generic_helpers.range_of_any_opt (MV.mvalue_to_any mval)
+    in
+    let r_req = Range.range_of_token_locations mval_start_loc mval_end_loc in
+    let id =
+      Common.spf "sink-requires<%s@l.%d>l.%d/%d-%d" mvar
+        mvar_rule_loc.Loc.pos.line mval_start_loc.Loc.pos.line r_req.Range.start
+        r_req.Range.end_
+    in
+    let spec : TP.propagation_point =
+      {
+        kind = `From;
+        var = id;
+        prop_by_side_effect = false;
+        prop_requires =
+          (* Even if the sink has a `requires:`, propagation here is unconditional,
+            they are unrelated. *)
+          None;
+        prop_label = None;
+        prop_replace_labels = None;
+        prop_orig = SinkMultiReq taint_sink;
+      }
+    in
+    let tsm =
+      {
+        TM.spec;
+        spec_id = taint_sink.sink_id ^ "/" ^ mvar;
+        spec_pm = rwm.origin;
+        range = r_req;
+        overlap = 1.0;
+      }
+    in
+    Some ((id, pwr.precondition), tsm)
+  in
+  let requires, req_prop_points =
+    match taint_sink.sink_requires with
+    | None -> (TP.UniReq Rule.(PLabel default_source_label), [])
+    | Some (UniReq pwr) -> (TP.UniReq pwr.precondition, [])
+    | Some (MultiReq mvars_w_preconds) ->
+        let mvars_w_preconds, req_prop_points =
+          mvars_w_preconds
+          |> filter_map_warn_if_None
+               ~warn:"Skipping sink requires because we lack range info"
+               prop_var_of_requires
+          |> List_.split
+        in
+        (TP.MultiReq mvars_w_preconds, req_prop_points)
+  in
+  let sink : TP.sink = { requires; spec = taint_sink } in
+  ((rwm, sink), req_prop_points)
+
+let requires_and_propagation_points_of_sinks sinks_ranges =
+  let sinks_ranges, sink_req_props =
+    sinks_ranges
+    |> List.map mk_requires_and_propagation_points_of_sink
+    |> List_.split
+  in
+  (sinks_ranges, List_.flatten sink_req_props)
+
+let spec_matches_of_raw rule raw =
+  let prop_ts_matches =
+    propagation_points_of_propagators rule raw.raw_propagators
+  in
+  let sinks_ranges, sinks_prop_ts_matches =
+    requires_and_propagation_points_of_sinks raw.raw_sinks
+  in
+  let prop_ts_matches = List.rev_append sinks_prop_ts_matches prop_ts_matches in
+  {
+    sources = raw.raw_sources;
+    propagation_points = prop_ts_matches;
+    sanitizers = raw.raw_sanitizers;
+    sinks = sinks_ranges;
+  }
 
 (*****************************************************************************)
 (* Testing whether a an AST node matches a taint spec *)
@@ -370,53 +680,35 @@ let any_is_in_matches_OSS rule matches ~get_id any =
   let ( let* ) = option_bind_list in
   let* r = range_of_any any in
   matches
-  |> List_.filter_map (fun (rwm, spec) ->
-         if Range.( $<=$ ) r rwm.RM.r then
-           Some
-             (let spec_pm = RM.range_to_pattern_match_adjusted rule rwm in
-              let overlap = overlap_with ~match_range:rwm.RM.r r in
-              Taint_spec_match.
-                { spec; spec_id = get_id spec; spec_pm; range = r; overlap })
-         else None)
+  |> List.filter_map (fun (rwm, spec) ->
+      if Range.( $<=$ ) r rwm.RM.r then
+        Some
+          (let spec_pm = RM.range_to_pattern_match_adjusted rule rwm in
+           let overlap = overlap_with ~match_range:rwm.RM.r r in
+           TM.{ spec; spec_id = get_id spec; spec_pm; range = r; overlap })
+      else None)
 
 let is_exact_match ~match_range r =
   let overlap = overlap_with ~match_range r in
   let r1 = match_range in
   Range.( $<=$ ) r r1 && overlap > 0.99
 
-let mk_propagator_match rule (prop : propagator_match) var kind r =
-  let spec_pm = RM.range_to_pattern_match_adjusted rule prop.rwm in
-  let spec : Taint_rule_inst.a_propagator = { kind; prop = prop.spec; var } in
-  {
-    Taint_spec_match.spec;
-    spec_id = prop.spec.propagator_id;
-    spec_pm;
-    range = r;
-    overlap = 1.0;
-  }
-
 (* Check whether `any` matches either the `from` or the `to` of any of the
  * `pattern-propagators`. Matches must be exact (overlap > 0.99) to make
  * taint propagation more precise and predictable. *)
-let any_is_in_propagators_matches_OSS rule matches any :
-    Taint_rule_inst.a_propagator Taint_spec_match.t list =
+let any_is_in_propagators_matches_OSS matches any :
+    TP.propagation_point TM.t list =
   match range_of_any any with
   | None -> []
   | Some r ->
       matches
-      |> List.concat_map (fun prop ->
-             let var = prop.id in
-             let is_from = is_exact_match ~match_range:prop.from r in
-             let is_to = is_exact_match ~match_range:prop.to_ r in
-             let mk_match kind = mk_propagator_match rule prop var kind r in
-             (if is_from then [ mk_match `From ] else [])
-             @ (if is_to then [ mk_match `To ] else [])
-             @ [])
+      |> List.filter_map (fun (tm : _ TM.t) ->
+          if is_exact_match ~match_range:tm.range r then Some tm else None)
 
 let mk_taint_spec_match_preds rule matches =
-  match !hook_mk_taint_spec_match_preds with
+  match Hook.get hook_mk_taint_spec_match_preds with
   | None ->
-      Taint_rule_inst.
+      TP.
         {
           is_source =
             (fun any ->
@@ -424,7 +716,7 @@ let mk_taint_spec_match_preds rule matches =
                 ~get_id:(fun (ts : R.taint_source) -> ts.source_id));
           is_propagator =
             (fun any ->
-              any_is_in_propagators_matches_OSS rule matches.propagators any);
+              any_is_in_propagators_matches_OSS matches.propagation_points any);
           is_sanitizer =
             (fun any ->
               any_is_in_matches_OSS rule matches.sanitizers any
@@ -432,39 +724,45 @@ let mk_taint_spec_match_preds rule matches =
           is_sink =
             (fun any ->
               any_is_in_matches_OSS rule matches.sinks any
-                ~get_id:(fun (ts : R.taint_sink) -> ts.sink_id));
+                ~get_id:(fun (sink : TP.sink) -> sink.spec.sink_id));
         }
   | Some hook -> hook rule matches
 
 (*****************************************************************************)
-(* Entry point *)
+(* Taint "configs" *)
 (*****************************************************************************)
 
-let default_effect_handler _fun_name new_effects = new_effects
-
-let taint_config_of_rule ~per_file_formula_cache
-    ?(handle_effects = default_effect_handler) xconf lang file ast_and_errors
-    ({ mode = `Taint spec; _ } as rule : R.taint_rule) =
-  let spec_matches, expls =
-    spec_matches_of_taint_rule ~per_file_formula_cache xconf !!file
+let preds_of_rule ~per_file_formula_cache ~(file : Taint_rule_inst.file) xconf
+    ast_and_errors rule =
+  let raw_spec_matches, expls =
+    raw_spec_matches_of_taint_rule ~per_file_formula_cache xconf !!(file.path)
       ast_and_errors rule
+  in
+  let stats =
+    Taint_coverage_stats.record_taint_spec_matches
+      ~sources:(List.map snd raw_spec_matches.raw_sources)
+      ~sinks:(List.map snd raw_spec_matches.raw_sinks)
+  in
+  let spec_matches = spec_matches_of_raw (rule :> Rule.rule) raw_spec_matches in
+  let preds = mk_taint_spec_match_preds (rule :> Rule.rule) spec_matches in
+  (preds, stats, raw_spec_matches, expls)
+
+let taint_config_of_rule ~per_file_formula_cache ~(file : Taint_rule_inst.file)
+    xconf ast_and_errors rule =
+  let preds, stats, raw_spec_matches, expls =
+    preds_of_rule ~per_file_formula_cache ~file xconf ast_and_errors rule
   in
   let xconf = Match_env.adjust_xconfig_with_rule_options xconf rule.options in
   let options = xconf.config in
-  let preds = mk_taint_spec_match_preds rule spec_matches in
   ( Taint_rule_inst.
       {
-        lang;
         file;
-        rule_id = fst rule.R.id;
+        rule = fst rule.id;
         options;
-        track_control =
-          spec.sources |> snd
-          |> List.exists (fun (src : R.taint_source) -> src.source_control);
+        track_control = rule_needs_to_track_control_taint rule;
         preds;
-        handle_effects;
-        java_props_cache = Hashtbl.create 30;
+        stats;
       },
-    spec_matches,
+    raw_spec_matches,
     expls )
 [@@trace_trace]

@@ -11,12 +11,14 @@
 
     targets/basic/stupid.js
    ❯❯❱ rules.javascript-basic-eqeq-bad
+          ❰❰ Blocking ❱❱
           useless comparison
 
             3┆ console.log(x == x)
 
     targets/basic/stupid.py
    ❯❯❱ rules.eqeq-is-bad
+          ❰❰ Blocking ❱❱
           useless comparison operation `a + b == a + b` or `a + b != a + b`
           Details: https://sg.run/xyz1
 
@@ -26,18 +28,12 @@
 === end of stdout - plain
 
 === stderr - plain
-METRICS: Using configs from the Registry (like --config=p/ci) reports pseudonymous rule metrics to semgrep.dev.
-To disable Registry rule metrics, use "--metrics=off".
-Using configs only from local files (like --config=xyz.yml) does not enable metrics.
-
-More information: https://semgrep.dev/docs/metrics
-
 
 
 ┌─────────────┐
 │ Scan Status │
 └─────────────┘
-  Scanning 24 files tracked by git with 4 Code rules:
+  Scanning 23 files tracked by git with 4 Code rules:
 
   Language   Rules   Files          Origin   Rules
  ──────────────────────────        ────────────────
@@ -49,9 +45,13 @@ More information: https://semgrep.dev/docs/metrics
 ┌──────────────┐
 │ Scan Summary │
 └──────────────┘
-Some files were skipped or only partially analyzed.
-  Scan was limited to files tracked by git.
-
+✅ Scan completed successfully.
+ • Findings: 2 (2 blocking)
+ • Rules run: 4
+ • Targets scanned: 14
+ • Parsed lines: ~100.0%
+ • Scan was limited to files tracked by git
+ • For a detailed list of skipped files and lines, run semgrep with the --verbose flag
 Ran 4 rules on 14 files: 2 findings.
 
 === end of stderr - plain
@@ -65,12 +65,14 @@ Ran 4 rules on 14 files: 2 findings.
 
   [36m[22m[24m  targets/basic/stupid.js[0m
    [31m❯❯❱[0m [1mrules.javascript-basic-eqeq-bad[0m
+          [31m[1m[24m❰❰ Blocking ❱❱[0m
           useless comparison
 
             3┆ console.log([1mx == x[0m)
 
   [36m[22m[24m  targets/basic/stupid.py[0m
    [31m❯❯❱[0m [1mrules.eqeq-is-bad[0m
+          [31m[1m[24m❰❰ Blocking ❱❱[0m
           useless comparison operation `a + b == a + b` or `a + b != a + b`
           Details: https://sg.run/xyz1
 
@@ -80,18 +82,12 @@ Ran 4 rules on 14 files: 2 findings.
 === end of stdout - color
 
 === stderr - color
-[33m[22m[24mMETRICS: Using configs from the Registry (like --config=p/ci) reports pseudonymous rule metrics to semgrep.dev.
-To disable Registry rule metrics, use "--metrics=off".
-Using configs only from local files (like --config=xyz.yml) does not enable metrics.
-
-More information: https://semgrep.dev/docs/metrics
-[0m
 
 
 ┌─────────────┐
 │ Scan Status │
 └─────────────┘
-  Scanning 24 files tracked by git with 4 Code rules:
+  Scanning 23 files tracked by git with 4 Code rules:
 
   Language   Rules   Files          Origin   Rules
  ──────────────────────────        ────────────────
@@ -103,9 +99,13 @@ More information: https://semgrep.dev/docs/metrics
 ┌──────────────┐
 │ Scan Summary │
 └──────────────┘
-Some files were skipped or only partially analyzed.
-  Scan was limited to files tracked by git.
-
+✅ Scan completed successfully.
+ • Findings: 2 (2 blocking)
+ • Rules run: 4
+ • Targets scanned: 14
+ • Parsed lines: ~100.0%
+ • Scan was limited to files tracked by git
+ • For a detailed list of skipped files and lines, run semgrep with the --verbose flag
 Ran 4 rules on 14 files: 2 findings.
 
 === end of stderr - color

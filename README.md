@@ -46,7 +46,7 @@ Semgrep is a fast, open-source, static analysis tool that searches code, finds b
 
 Semgrep is semantic grep for code. While running `grep "2"` would only match the exact string _2_, Semgrep would [match `x = 1; y = x + 1` when searching for _2_](https://semgrep.dev/playground/s/5rKgj). Semgrep rules look like the code you already write; no abstract syntax trees, regex wrestling, or painful DSLs.
 
-Note that in security contexts, Semgrep OSS will miss many true positives as it can only analyze code within the boundaries of a single function or file. If you want to use Semgrep for security purposes (**SAST**, **SCA**, or **secrets scanning**), the Semgrep AppSec Platform is strongly recommended since it adds the following critical capabilities:
+Note that in security contexts, Semgrep Community Edition will miss many true positives as it can only analyze code within the boundaries of a single function or file. If you want to use Semgrep for security purposes (**SAST**, **SCA**, or **secrets scanning**), the Semgrep AppSec Platform is strongly recommended since it adds the following critical capabilities:
 
 1. Improved core analysis capabilities (cross-file, cross-function, data-flow reachability) that greatly reduce false positives by 25% and increase detected true positives by 250%
 2. Contextual post-processing of findings with Semgrep Assistant (AI) to further reduce noise by [~20%](https://a.storyblok.com/f/151984/x/2d12dc0223/whitepaper_-ai-powered-appsec-engineer-automate.pdf?cv=1728584410408).  In addition, Assistant enriches findings with tailored, step-by-step remediation guidance that humans find actionable >80% of the time.
@@ -98,38 +98,43 @@ If there are any issues, <a href="https://go.semgrep.dev/slack" target="_blank">
 
 ### Option 2: Getting started from the CLI
 
-1.  Install Semgrep CLI
+1. Install Semgrep CLI
 
-```
-# For macOS
-$ brew install semgrep
+    ```
+    # For macOS
+    # preferred: install through pipx (https://pipx.pypa.io/stable/how-to/install-pipx.html)
+    pipx install semgrep
 
-# For Ubuntu/WSL/Linux/macOS
-$ python3 -m pip install semgrep
+    # preferred: install through uv (https://docs.astral.sh/uv/getting-started/installation/)
+    uv tool install semgrep
 
-# To try Semgrep without installation run via Docker
-$ docker run -it -v "${PWD}:/src" semgrep/semgrep semgrep login
-$ docker run -e SEMGREP_APP_TOKEN=<TOKEN> --rm -v "${PWD}:/src" semgrep/semgrep semgrep ci
-```
+    # best-effort: install through homebrew (maintained on a best-effort basis; often lags behind the latest release)
+    brew install semgrep
 
-2.  Run `semgrep login` to create your account and login to Semgrep.
+    # For Ubuntu/WSL/Linux/macOS
+    $ python3 -m pip install semgrep
 
-Logging into Semgrep gets you access to:
+    # To try Semgrep without installation run via Docker
+    $ docker run -it -v "${PWD}:/src" semgrep/semgrep semgrep login
+    $ docker run -e SEMGREP_APP_TOKEN=<TOKEN> --rm -v "${PWD}:/src" semgrep/semgrep semgrep ci
+    ```
 
-- [Semgrep Supply Chain](https://semgrep.dev/products/semgrep-supply-chain?utm_medium=readme&utm_source=github&utm_content=ssc-product): A dependency scanner that detects reachable vulnerabilities in third party libraries
-- [Semgrep Code's Pro rules](https://semgrep.dev/products/semgrep-code?utm_medium=readme&utm_source=github&utm_content=code-pro-rules): 600+ high confidence rules written by Semgrep's security research team
-- [Semgrep Code's Pro engine](https://semgrep.dev/products/pro-engine?utm_medium=readme&utm_source=github&utm_content=pro-engine): An advanced code analysis engine, designed to detect complex vulnerabilities, and reduce false positives
+1. Run `semgrep login` to create your account and login to Semgrep. This step is optional, but logging into Semgrep gets you access to:
 
-3.  Go to your app's root directory and run `semgrep ci`. This will scan your project to check for vulnerabilities in your source code and its dependencies.
+    - [Semgrep Supply Chain](https://semgrep.dev/products/semgrep-supply-chain?utm_medium=readme&utm_source=github&utm_content=ssc-product): A dependency scanner that detects reachable vulnerabilities in third party libraries
+    - [Semgrep Code's Pro rules](https://semgrep.dev/products/semgrep-code?utm_medium=readme&utm_source=github&utm_content=code-pro-rules): 600+ high confidence rules written by Semgrep's security research team
+    - [Semgrep Code's Pro engine](https://semgrep.dev/products/pro-engine?utm_medium=readme&utm_source=github&utm_content=pro-engine): An advanced code analysis engine, designed to detect complex vulnerabilities, and reduce false positives
 
-4.  Try writing your own query interactively with `-e`. For example, a check for Python == where the left and right hand sides are the same (potentially a bug):
+1. Go to your app's root directory and run `semgrep ci`. This will scan your project to check for vulnerabilities in your source code and its dependencies.
+
+1. Try writing your own query interactively with `-e`. For example, a check for Python == where the left and right hand sides are the same (potentially a bug):
     `$ semgrep -e '$X == $X' --lang=py path/to/src`
 
 ### Semgrep Ecosystem
 
 The Semgrep ecosystem includes the following:
 
-- [Semgrep OSS](https://semgrep.dev/docs/cli-reference/) - The open-source program analysis engine at the heart of everything. Suitable for ad-hoc use cases with a high tolerance for false positives - think consultants, security auditors, or pentesters.
+- [Semgrep Community Edition](https://semgrep.dev/docs/cli-reference/) - The open-source program analysis engine at the heart of everything. Suitable for ad-hoc use cases with a high tolerance for false positives - think consultants, security auditors, or pentesters.
 
 - [Semgrep AppSec Platform](https://semgrep.dev/login?utm_medium=readme&utm_source=github&utm_content=appsec-platform) - Easily orchestrate and scale SAST, SCA, and Secrets scanning across an organization, with no risk of overwhelming developers.  Customize which findings developers see, where they see them, and integrate with CI providers like GitHub, GitLab, CircleCI, and more. Includes both free and paid tiers.
 
@@ -140,6 +145,13 @@ The Semgrep ecosystem includes the following:
   - [Semgrep Secrets (Secrets scanning)](https://semgrep.dev/blog/2023/introducing-semgrep-secrets/) - Secrets detection that uses semantic analysis, improved entropy analysis, and validation to accurately surface sensitive credentials in the developer workflow.
 
   - [Semgrep Assistant (AI)](https://semgrep.dev/products/semgrep-code/assistant?utm_medium=readme&utm_source=github&utm_content=assistant) - Assistant is an AI-powered AppSec engineer that helps both developers and AppSec teams prioritize, triage, and remediate Semgrep findings at scale. Humans agree with Assistant auto-triage decisions 97% of the time, and rate generated remediation guidance as helpful 80% of the time. For an overview of how Assistant works, [read this overview](https://a.storyblok.com/f/151984/x/2d12dc0223/whitepaper_-ai-powered-appsec-engineer-automate.pdf?cv=1728584410408).
+
+- [Semgrep MCP Server](https://github.com/semgrep/semgrep/tree/develop/cli/src/semgrep/mcp) - A [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) server that lets AI coding assistants run Semgrep scans directly. Integrates with Cursor, VS Code, Windsurf, Claude Desktop, and more. Run `semgrep mcp` to start it locally.
+
+  - **Hooks** - Automatically trigger Semgrep scans as you code.
+  - **Skills / Prompts** - Built-in MCP prompts like `write_custom_semgrep_rule` help AI assistants write accurate Semgrep rules.
+  - **Claude Code plugin** - Available on the official marketplace and via the [semgrep/mcp-marketplace](https://github.com/semgrep/mcp-marketplace) repo: `/plugin marketplace add semgrep/mcp-marketplace`
+  - **Cursor plugin** - Available on the official marketplace and via the [semgrep/cursor-plugin](https://github.com/semgrep/cursor-plugin) repo.
 
 Additional resources:
 
@@ -189,7 +201,7 @@ Browse the full Semgrep [documentation on the website](https://semgrep.dev/docs)
 
 Using remote configuration from the [Registry](https://semgrep.dev/r) (like `--config=p/ci`) reports pseudonymous rule metrics to semgrep.dev.
 
-Using configs from local files (like `--config=xyz.yml`) does **not** enable metrics.
+When using configs from local files (like `--config=xyz.yml`), metrics are sent only when the user is logged in.
 
 To disable Registry rule metrics, use `--metrics=off`.
 
@@ -211,11 +223,14 @@ The Semgrep [privacy policy](https://semgrep.dev/docs/metrics) describes the pri
 To upgrade, run the command below associated with how you installed Semgrep:
 
 ```sh
+# Using pipx
+$ pipx upgrade semgrep
+
+# Using uv tool command
+$ uv tool upgrade semgrep
+
 # Using Homebrew
 $ brew upgrade semgrep
-
-# Using pip
-$ python3 -m pip install --upgrade semgrep
 
 # Using Docker
 $ docker pull semgrep/semgrep:latest

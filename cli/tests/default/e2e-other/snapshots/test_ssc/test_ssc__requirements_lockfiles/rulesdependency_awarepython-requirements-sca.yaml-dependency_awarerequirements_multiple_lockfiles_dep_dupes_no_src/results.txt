@@ -4,6 +4,7 @@
 
 === stdout - plain
 {
+  "engine_requested": "OSS",
   "errors": [],
   "paths": {
     "scanned": [
@@ -12,13 +13,14 @@
       "targets/dependency_aware/requirements_multiple_lockfiles_dep_dupes_no_src/requirements.txt"
     ]
   },
+  "profiling_results": [],
   "results": [
     {
       "check_id": "rules.dependency_aware.python-requirements-sca",
       "end": {
         "col": 1,
         "line": 37,
-        "offset": 1
+        "offset": 0
       },
       "extra": {
         "engine_kind": "OSS",
@@ -55,7 +57,7 @@
       "start": {
         "col": 1,
         "line": 37,
-        "offset": 1
+        "offset": 0
       }
     },
     {
@@ -63,7 +65,7 @@
       "end": {
         "col": 1,
         "line": 1,
-        "offset": 1
+        "offset": 0
       },
       "extra": {
         "engine_kind": "OSS",
@@ -100,11 +102,12 @@
       "start": {
         "col": 1,
         "line": 1,
-        "offset": 1
+        "offset": 0
       }
     }
   ],
   "skipped_rules": [],
+  "time": "<masked in tests>",
   "version": "0.42"
 }
 === end of stdout - plain
@@ -115,20 +118,39 @@
 ┌─────────────┐
 │ Scan Status │
 └─────────────┘
-  Scanning 4 files tracked by git with 0 Code rules, 1 Supply Chain rule:
+  Scanning 4 files tracked by git with 1 Supply Chain rule:
 
 
   CODE RULES
-  Nothing to scan.
+  No code rules to run.
 
   SUPPLY CHAIN RULES
-  Nothing to scan.
+
+  Dependency Sources                                               Resolution Method   Ecosystem   Dependencies   Rules
+ ───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  targets/dependency_aware/requirements_multiple_lockfiles_dep_d   Lockfile            Pypi        88                 1
+  upes_no_src/requirements/prod.txt,
+  targets/dependency_aware/requirements_multiple_lockfiles_dep_d
+  upes_no_src/requirements/stage.txt,
+  targets/dependency_aware/requirements_multiple_lockfiles_dep_d
+  upes_no_src/requirements.txt
+
+
+  Analysis   Rules
+ ──────────────────
+  Unknown        1
+
 
 
 ┌──────────────┐
 │ Scan Summary │
 └──────────────┘
-
+✅ Scan completed successfully.
+ • Findings: 2 (0 blocking)
+ • Rules run: 1
+ • Targets scanned: 3
+ • Parsed lines: ~100.0%
+ • No ignore information available
 Ran 1 rule on 3 files: 2 findings.
 
 === end of stderr - plain

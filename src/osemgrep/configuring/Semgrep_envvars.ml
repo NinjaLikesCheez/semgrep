@@ -1,3 +1,15 @@
+(*
+   Copyright (c) 2022-2025 Semgrep Inc.
+
+   This library is free software; you can redistribute it and/or
+   modify it under the terms of the GNU Lesser General Public License
+   version 2.1 as published by the Free Software Foundation.
+
+   This library is distributed in the hope that it will be useful, but
+   WITHOUT ANY WARRANTY; without even the implied warranty of
+   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the file
+   LICENSE for more details.
+*)
 open Fpath_.Operators
 
 (*****************************************************************************)
@@ -107,6 +119,9 @@ type t = {
   min_fetch_depth : int;
   (* TODO(reynir): is this deprecated?! *)
   mock_using_registry : bool;
+  (* Whether to disable the v2 config download endpoint. Default: false.
+   * Set SEMGREP_DISABLE_CONFIG_DOWNLOAD_V2=1 as a kill switch. *)
+  disable_config_download_v2 : bool;
 }
 
 (* What about temp? Well we use ocaml stdlib definition of a temp directory.
@@ -122,7 +137,7 @@ let of_current_sys_env () : t =
       if Sys.win32 then "USERPROFILE" else "XDG_CONFIG_HOME"
     in
     match env_opt home_env_var with
-    | Some x when Sys.is_directory x -> Fpath.v x
+    | Some x when Sys_.is_directory x -> Fpath.v x
     | Some _
     | None ->
         Fpath.v (env_or (fun x -> x) "HOME" "/")
@@ -173,6 +188,7 @@ let of_current_sys_env () : t =
     in_agent = in_env "SEMGREP_AGENT";
     min_fetch_depth = env_or int_of_string "SEMGREP_GHA_MIN_FETCH_DEPTH" 0;
     mock_using_registry = in_env "MOCK_USING_REGISTRY";
+    disable_config_download_v2 = env_truthy "SEMGREP_DISABLE_CONFIG_DOWNLOAD_V2";
   }
 
 (* less: make it Lazy? so at least not run in ocaml init time before main() *)

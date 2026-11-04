@@ -1,3 +1,15 @@
+(*
+   Copyright (c) 2022-2025 Semgrep Inc.
+
+   This library is free software; you can redistribute it and/or
+   modify it under the terms of the GNU Lesser General Public License
+   version 2.1 as published by the Free Software Foundation.
+
+   This library is distributed in the hope that it will be useful, but
+   WITHOUT ANY WARRANTY; without even the implied warranty of
+   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the file
+   LICENSE for more details.
+*)
 (* This module is essentially an adapter around Core_scan.scan()
  * (and Deep_scan.scan()) so that it can be used from osemgrep. We try to
  * imitate what is done in pysemgrep which calls semgrep-core
@@ -7,7 +19,7 @@
 (* input *)
 type conf = {
   (* opti and limits *)
-  num_jobs : int;
+  num_jobs : Core_scan_config.num_jobs;
   optimizations : bool;
   max_memory_mb : int;
   timeout : float;
@@ -19,6 +31,12 @@ type conf = {
   time_flag : bool;
   matching_explanations : bool;
   dataflow_traces : bool;
+  use_parmap : bool;
+  (* extra scan-adjacent information: symbol_analysis and fips_mode
+     are only set by the scan config received from the app
+  *)
+  symbol_analysis : bool;
+  fips_mode : bool;
 }
 [@@deriving show]
 
@@ -39,19 +57,15 @@ type func = {
     conf ->
     Find_targets.conf ->
     Rule_error.rules_and_invalid ->
-    Fpath.t list ->
+    Fppath.t list ->
     Core_result.result_or_exn;
 }
 
-type pro_conf = {
-  diff_config : Differential_scan_config.t;
-  roots : Scanning_root.t list;
-  engine_type : Engine_type.t;
-}
+type pro_conf = { roots : Scanning_root.t list; engine_type : Engine_type.t }
 
 val default_conf : conf
 
-(* Semgrep Pro hook for osemgrep *)
+(* osemgrep-pro hooks *)
 val hook_mk_pro_core_run_for_osemgrep : (pro_conf -> func) option Hook.t
 val hook_pro_git_remote_scan_setup : (func -> func) option Hook.t
 

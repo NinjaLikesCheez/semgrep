@@ -1,3 +1,15 @@
+(*
+   Copyright (c) 2024 Semgrep Inc.
+
+   This library is free software; you can redistribute it and/or
+   modify it under the terms of the GNU Lesser General Public License
+   version 2.1 as published by the Free Software Foundation.
+
+   This library is distributed in the hope that it will be useful, but
+   WITHOUT ANY WARRANTY; without even the implied warranty of
+   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the file
+   LICENSE for more details.
+*)
 type make_fixed_lines_case = {
   test_name : string;
   contents : string;
@@ -87,14 +99,14 @@ let fakepath = Fpath.v (Filename.get_temp_dir_name () ^ "/fake.txt")
 let create_make_fixed_lines_test { test_name; contents; fixes; expected } =
   Testo.create test_name (fun () ->
       let edits =
-        List_.map
+        List.map
           (fun (start, end_, replacement_text) ->
             Textedit.{ start; end_; replacement_text; path = fakepath })
           fixes
       in
       let env = Fixed_lines.mk_env () in
       let all_fixed_lines : string list option list =
-        List_.map (Fixed_lines.make_fixed_lines_of_string env contents) edits
+        List.map (Fixed_lines.make_fixed_lines_of_string env contents) edits
       in
       Alcotest.(check (string |> list |> option |> list))
         "fixed_lines" expected all_fixed_lines)
@@ -102,4 +114,4 @@ let create_make_fixed_lines_test { test_name; contents; fixes; expected } =
 let tests =
   Testo.categorize "autofix"
     (Testo.categorize "make_fixed_lines"
-       (List_.map create_make_fixed_lines_test make_fixed_lines_cases))
+       (List.map create_make_fixed_lines_test make_fixed_lines_cases))

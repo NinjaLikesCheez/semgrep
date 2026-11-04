@@ -1,3 +1,15 @@
+#
+# Copyright (c) 2024-2025 Semgrep Inc.
+#
+# This library is free software; you can redistribute it and/or
+# modify it under the terms of the GNU Lesser General Public License
+# version 2.1 as published by the Free Software Foundation.
+#
+# This library is distributed in the hope that it will be useful, but
+# WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the file
+# LICENSE for more details.
+#
 import pytest
 from tests.fixtures import RunSemgrep
 
@@ -28,4 +40,17 @@ def test_exit_code_with_strict(run_semgrep_in_tmp: RunSemgrep):
         output_format=OutputFormat.TEXT,
         strict=True,
         assert_exit_code=2,
+    )
+
+
+# it should not fail the whole scan for exn in a post processor (e.g., nosemgrep)
+@pytest.mark.kinda_slow
+def test_error_management_post_processor(run_semgrep_in_tmp: RunSemgrep):
+    stdout, stderr = run_semgrep_in_tmp(
+        config=f"rules/stuff_stmt.yaml",
+        target_name=f"error_management/r2c_nosemgrep_was_fatal.py",
+        options=["--verbose"],
+        output_format=OutputFormat.TEXT,
+        strict=False,
+        assert_exit_code=0,
     )

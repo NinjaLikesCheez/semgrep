@@ -1,3 +1,15 @@
+#
+# Copyright (c) 2023-2025 Semgrep Inc.
+#
+# This library is free software; you can redistribute it and/or
+# modify it under the terms of the GNU Lesser General Public License
+# version 2.1 as published by the Free Software Foundation.
+#
+# This library is distributed in the hope that it will be useful, but
+# WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the file
+# LICENSE for more details.
+#
 # Test aliengrep integration in Semgrep rules
 import pytest
 from tests.fixtures import RunSemgrep
@@ -23,8 +35,8 @@ from tests.fixtures import RunSemgrep
         ),
     ],
 )
-def test_aliengrep(run_semgrep_in_tmp: RunSemgrep, snapshot, rule, target):
-    snapshot.assert_match(
+def test_aliengrep(run_semgrep_in_tmp: RunSemgrep, posix_snapshot, rule, target):
+    posix_snapshot.assert_match(
         run_semgrep_in_tmp(rule, target_name=target).stdout,
         "results.json",
     )
@@ -37,8 +49,8 @@ def test_aliengrep(run_semgrep_in_tmp: RunSemgrep, snapshot, rule, target):
         ("rules/aliengrep/nosem-html.yaml", "aliengrep/nosem.html"),
     ],
 )
-def test_aliengrep_nosem(run_semgrep_in_tmp: RunSemgrep, snapshot, rule, target):
-    snapshot.assert_match(
+def test_aliengrep_nosem(run_semgrep_in_tmp: RunSemgrep, posix_snapshot, rule, target):
+    posix_snapshot.assert_match(
         run_semgrep_in_tmp(
             rule, target_name=target, options=["--no-rewrite-rule-ids"]
         ).stdout,

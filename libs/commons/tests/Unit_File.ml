@@ -1,4 +1,16 @@
-let t = Testo.create
+(*
+   Copyright (c) 2024-2025 Semgrep Inc.
+
+   This library is free software; you can redistribute it and/or
+   modify it under the terms of the GNU Lesser General Public License
+   version 2.1 as published by the Free Software Foundation.
+
+   This library is distributed in the hope that it will be useful, but
+   WITHOUT ANY WARRANTY; without even the implied warranty of
+   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the file
+   LICENSE for more details.
+*)
+let t = Testo.create ?skipped:Testutil.skip_on_windows
 
 (*****************************************************************************)
 (* Prelude *)
@@ -17,6 +29,13 @@ let with_string str f =
 (*****************************************************************************)
 (* The tests *)
 (*****************************************************************************)
+
+let test_with_open_in_missing () =
+  let bad_path = Fpath.v "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA" in
+  try UFile.with_open_in bad_path (fun _ic -> assert false) with
+  | Unix.Unix_error (Unix.ENOENT, _, _) ->
+      (* file didn't exist and should not have been created *)
+      assert (not (Sys_.file_exists (Fpath.to_string bad_path)))
 
 let with_test_files f =
   let open Testutil_files in
@@ -247,4 +266,5 @@ let tests =
       t "is_dir_or_lnk" test_is_dir_or_lnk;
       t "is_lnk_or_reg" test_is_lnk_or_reg;
       t "is_dir_or_lnk_or_reg" test_is_dir_or_lnk_or_reg;
+      t "missing input file" test_with_open_in_missing;
     ]

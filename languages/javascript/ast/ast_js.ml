@@ -92,7 +92,11 @@ type sc = Tok.t [@@deriving show]
 (* Name *)
 (* ------------------------------------------------------------------------- *)
 
-type a_ident = string wrap [@@deriving show]
+type a_ident = { str : string; tok : tok; fake : bool } [@@deriving show]
+
+let real_id str tok = { str; tok; fake = false }
+let fake_id str tok = { str; tok; fake = true }
+let to_real_id (str, tok) = { str; tok; fake = false }
 
 type special =
   (* Special values *)
@@ -209,12 +213,12 @@ and expr =
   | ArrAccess of expr * expr bracket
   (* ident is a Some when recursive lambda or assigned in module.exports *)
   | Fun of function_definition * a_ident option
-  | Apply of expr * a_arguments
+  | Apply of expr * type_ list bracket * a_arguments
   | New of tok * expr * a_arguments
   (* copy-paste of AST_generic.xml (but with different 'expr') *)
   | Xml of xml
   (* could unify with Apply, but need Lazy special then *)
-  | Conditional of expr * expr * expr
+  | Conditional of expr * tok (* '?' *) * expr * tok (* ':' *) * expr
   (* typescript: *)
   (* I'm not sure E : T is valid TS code actually; tree-sitter-ts allows it
    * but I can't find doc about it. Looks like the 'as' or <T> syntax
@@ -222,6 +226,8 @@ and expr =
    *)
   | Cast of expr * tok (* ':' *) * type_
   | TypeAssert of expr * tok (* 'as' or '<' *) * type_ (* X as T or <T> X *)
+  | Satisfies of expr * tok (* 'satisfies' *) * type_
+  | Instantiation of expr * type_ list bracket
   (* this is used mostly for unsupported typescript features *)
   | ExprTodo of a_todo_category * expr list
   | ParenExpr of tok * expr * tok
@@ -399,6 +405,7 @@ and keyword_attribute =
   (* only inside classes *)
   | Get
   | Set
+  | Accessor
 
 (*****************************************************************************)
 (* Definitions *)
@@ -624,9 +631,9 @@ let special_of_id_opt s =
 let idexp id = Id id
 
 let idexp_or_special id =
-  match special_of_id_opt (fst id) with
+  match special_of_id_opt id.str with
   | None -> idexp id
-  | Some special -> IdSpecial (special, snd id)
+  | Some special -> IdSpecial (special, id.tok)
 
 (* note that this should be avoided as much as possible for sgrep, because
  * what was before a simple sequence of stmts in the same block can suddently
@@ -643,7 +650,7 @@ let unsafe_stmt1 xs = stmt1_with Tok.unsafe_fake_bracket xs
 let basic_entity id = { name = id; attrs = [] }
 
 let mk_default_entity_def tok exp =
-  let n = (default_entity, tok) in
+  let n = real_id default_entity tok in
   (* TODO: look at exp and transform in FuncDef/ClassDef? *)
   let def =
     ( basic_entity n,
@@ -660,7 +667,7 @@ let var_pattern_to_var v_kind pat tok init_opt =
   | Id id, None -> (basic_entity id, { v_kind; v_init = None; v_type = None })
   | _ ->
       let s = AST_generic.special_multivardef_pattern in
-      let id = (s, tok) in
+      let id = fake_id s tok in
       let init =
         match init_opt with
         | Some init -> Assign (pat, tok, init)
@@ -675,9 +682,9 @@ let build_var kwd (id_or_pat, ty_opt, initopt) =
       (basic_entity id, { v_kind = kwd; v_init = initopt; v_type = ty_opt })
   | Either.Right pat -> var_pattern_to_var kwd pat (snd kwd) initopt
 
-let build_vars kwd vars = vars |> List_.map (build_var kwd)
-let vars_to_defs xs = xs |> List_.map (fun (ent, v) -> (ent, VarDef v))
-let vars_to_stmts xs = xs |> vars_to_defs |> List_.map (fun x -> DefStmt x)
+let build_vars kwd vars = vars |> List.map (build_var kwd)
+let vars_to_defs xs = xs |> List.map (fun (ent, v) -> (ent, VarDef v))
+let vars_to_stmts xs = xs |> vars_to_defs |> List.map (fun x -> DefStmt x)
 
 (*
    Left-handside patterns and function parameters happen to use the same
@@ -709,14 +716,14 @@ let parameter_to_pattern tok (param : parameter) : a_pattern =
 
 let mk_const_var id e =
   ( basic_entity id,
-    VarDef { v_kind = (Const, snd id); v_init = Some e; v_type = None } )
+    VarDef { v_kind = (Const, id.tok); v_init = Some e; v_type = None } )
 
 let add_decorators_to_declaration decorators declaration =
   let ent, defkind = declaration in
   ({ ent with attrs = ent.attrs @ decorators }, defkind)
 
 let add_decorators_to_declarations decorators declarations =
-  List_.map (add_decorators_to_declaration decorators) declarations
+  List.map (add_decorators_to_declaration decorators) declarations
 
 (*****************************************************************************)
 (* Helpers. TODO: move in Tok.ml instead *)

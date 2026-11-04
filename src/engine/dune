@@ -3,12 +3,14 @@
  (name semgrep_engine)
  (wrapped false)
  (libraries
-   pcre
+   base
+   collections
    alcotest
    calendar
 
    commons
-   tracing
+   telemetry
+   parallelism
    pfff-lang_GENERIC-analyze
 
    parser_regexp
@@ -29,5 +31,5 @@
    semgrep_reporting; for Test_engine.ml, we should split in tests/ separate dir
  )
  (inline_tests)
- (preprocess (pps ppx_deriving.show ppx_profiling ppx_inline_test tracing.ppx))
+ (preprocess (pps ppx_deriving.show ppx_profiling ppx_inline_test telemetry.ppx commons.ppx))
 )

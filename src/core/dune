@@ -6,6 +6,9 @@
  (name semgrep_core)
  (wrapped false)
  (libraries
+   base
+   collections
+
    ; standard libraries
    str
    uri
@@ -15,7 +18,8 @@
 
    ; in libs/
    commons
-   tracing
+   telemetry
+   parallelism
 
    semgrep_core_rule
    semgrep_core_target
@@ -29,6 +33,8 @@
      ppx_hash
      visitors.ppx
      ppx_sexp_conv
+     commons.ppx
+     ppx_telemetry
    )
  )
 )

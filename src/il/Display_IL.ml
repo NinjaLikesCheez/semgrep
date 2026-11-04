@@ -1,3 +1,15 @@
+(*
+   Copyright (c) 2021-2025 Semgrep Inc.
+
+   This library is free software; you can redistribute it and/or
+   modify it under the terms of the GNU Lesser General Public License
+   version 2.1 as published by the Free Software Foundation.
+
+   This library is distributed in the hope that it will be useful, but
+   WITHOUT ANY WARRANTY; without even the implied warranty of
+   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the file
+   LICENSE for more details.
+*)
 open IL
 module G = AST_generic
 
@@ -27,7 +39,7 @@ let string_of_offset offset =
 
 let string_of_offset_list offset =
   if offset <> [] then
-    "." ^ String.concat "." (List_.map string_of_offset offset)
+    "." ^ String.concat "." (List.map string_of_offset offset)
   else ""
 
 let string_of_lval { base; rev_offset } =
@@ -78,7 +90,7 @@ let string_of_argument arg =
       string_of_exp e
 
 let string_of_arguments args =
-  List_.map string_of_argument args |> String.concat ","
+  List.map string_of_argument args |> String.concat ","
 
 let short_string_of_node_kind nkind =
   match nkind with
@@ -93,11 +105,17 @@ let short_string_of_node_kind nkind =
   | NThrow _ -> "throw ...;"
   | NOther (Noop str) -> Common.spf "<noop: %s>" str
   | NOther _ -> "<other>"
+  | NNestedDef entity ->
+      let name_str =
+        match entity.name with
+        | EN name -> str_of_name name
+        | FixmeEntity _ -> "<fixme entity>"
+      in
+      "<def> " ^ name_str
   | NInstr x -> (
       match x.i with
       | Assign (lval, exp) -> string_of_lval lval ^ " = " ^ string_of_exp exp
-      | AssignAnon (lval, _) -> string_of_lval lval ^ " = " ^ "<lambda|class>"
-      | Call (lval_opt, exp, args) ->
+      | AssignCall (lval_opt, { c = Call (exp, args); _ }) ->
           let lval_str =
             match lval_opt with
             | None -> ""
@@ -105,10 +123,8 @@ let short_string_of_node_kind nkind =
           in
           "CALL " ^ lval_str ^ string_of_exp exp ^ "("
           ^ string_of_arguments args ^ ")"
-      | New (lval, ty, _cons, args) ->
-          Common.spf "%s = new %s(%s)" (string_of_lval lval) (string_of_type ty)
-            (string_of_arguments args)
-      | CallSpecial (lval_opt, (call_special, _tok), args) ->
+      | AssignCall
+          (lval_opt, { c = CallSpecial ((call_special, _tok), args); _ }) ->
           let lval_str =
             match lval_opt with
             | None -> ""
@@ -117,20 +133,41 @@ let short_string_of_node_kind nkind =
           Common.spf "<special>%s%s(%s)" lval_str
             (IL.show_call_special call_special)
             (string_of_arguments args)
+      | New (lval, ty, _cons, args) ->
+          Common.spf "%s = new %s(%s)" (string_of_lval lval) (string_of_type ty)
+            (string_of_arguments args)
       | FixmeInstr _ -> "<fix-me instr>")
+  | NMatch scrutinee -> Common.spf "match %s" (str_of_name scrutinee)
+  | NCase (_scrutinee, case) ->
+      Common.spf "with %s"
+        (match case with
+        | PatLiteral lit -> string_of_literal lit
+        | PatWildcard -> "_"
+        | PatVariable var -> str_of_name var
+        | PatConstructor (ctor, params) ->
+            fst ctor.ident ^ "("
+            ^ String.concat ", " (List.map str_of_name params)
+            ^ ")")
   | NTodo _ -> "<to-do stmt>"
 
-let at_exit_mark node str = if node.at_exit then str ^ " @exit" else str
+let short_string_of_node node =
+  let str = short_string_of_node_kind node.n in
+  if node.at_exit then str ^ " @exit" else str
+
+let pp_cfg f ?title (flow : cfg) : unit =
+  flow.graph
+  |> Ograph_call_dot_gv.pp_ograph_mutable_generic ?title
+       ~s_of_node:(fun (_nodei, node) ->
+         (short_string_of_node node, None, None))
+       f
 
 (* using internally graphviz dot and ghostview on X11 *)
-let display_cfg (caps : < Cap.exec ; Cap.tmp >) ?title (flow : cfg) : unit =
+let display_cfg ?title (flow : cfg) : unit =
   flow.graph
-  |> Ograph_call_dot_gv.print_ograph_mutable_generic
-       (caps :> < Cap.exec >)
-       ?title
+  |> Ograph_call_dot_gv.print_ograph_mutable_generic ?title
        ?output_file:
          (Option.map
-            (fun s -> Fpath.(CapTmp.get_temp_dir_name caps#tmp / (s ^ ".dot")))
+            (fun s -> Fpath.(UTmp.get_temp_dir_name () / (s ^ ".dot")))
             title)
        ~s_of_node:(fun (_nodei, node) ->
-         (short_string_of_node_kind node.n |> at_exit_mark node, None, None))
+         (short_string_of_node node, None, None))

@@ -1,10 +1,12 @@
 {
+  "engine_requested": "OSS",
   "errors": [],
   "paths": {
     "scanned": [
       "targets/aliengrep/html.mustache"
     ]
   },
+  "profiling_results": [],
   "results": [
     {
       "check_id": "rules.aliengrep.var-in-script-tag",
@@ -77,5 +79,6 @@
     }
   ],
   "skipped_rules": [],
+  "time": "<masked in tests>",
   "version": "0.42"
 }

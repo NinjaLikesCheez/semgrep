@@ -1,3 +1,15 @@
+#
+# Copyright (c) 2023-2025 Semgrep Inc.
+#
+# This library is free software; you can redistribute it and/or
+# modify it under the terms of the GNU Lesser General Public License
+# version 2.1 as published by the Free Software Foundation.
+#
+# This library is distributed in the hope that it will be useful, but
+# WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the file
+# LICENSE for more details.
+#
 """
 This module provides a series of helpful utilities for writing lockfile parsers.
 Why are all the type annotations strings?
@@ -39,14 +51,12 @@ from semdep.external.parsy import Parser
 from semdep.external.parsy import regex
 from semdep.external.parsy import string
 from semdep.external.parsy import success
-from semgrep.console import console
 from semgrep.semgrep_interfaces.semgrep_output_v1 import DependencyChild
 from semgrep.semgrep_interfaces.semgrep_output_v1 import DependencyParserError
 from semgrep.semgrep_interfaces.semgrep_output_v1 import Direct
 from semgrep.semgrep_interfaces.semgrep_output_v1 import FoundDependency
 from semgrep.semgrep_interfaces.semgrep_output_v1 import ScaParserName
 from semgrep.semgrep_interfaces.semgrep_output_v1 import Transitive
-from semgrep.semgrep_interfaces.semgrep_output_v1 import Transitivity
 from semgrep.semgrep_interfaces.semgrep_output_v1 import Unknown
 from semgrep.verbose_logging import getLogger
 
@@ -60,17 +70,48 @@ C = TypeVar("C")
 
 Pos = Tuple[int, int]
 
-SemgrepParser = Callable[
-    [Path, Optional[Path]],
-    Tuple[List[FoundDependency], List[DependencyParserError]],
-]
 
-LegacySemgrepParser = Callable[
+@dataclass
+class DependencyParser:
+    """This class is a callable wrapper around a lockfile and manifest parser
+    whose job is to catch all exceptions and turn them into an error value."""
+
+    parser: Callable[
+        [Path, Optional[Path]],
+        Tuple[List[FoundDependency], List[DependencyParserError]],
+    ]
+
+    def __call__(
+        self, *, lockfile_path: Path, manifest_path: Optional[Path]
+    ) -> Tuple[
+        List[FoundDependency], List[DependencyParserError | out.ScaResolutionError]
+    ]:
+        try:
+            # Covariant subtyping doesn't work in mypy :(
+            return self.parser(lockfile_path, manifest_path)  # type: ignore[return-value]
+        except Exception as e:
+            logger.error(
+                f"Failed to parse {lockfile_path} with exception {type(e).__name__}: {e}"
+            )
+            return (
+                [],
+                [
+                    out.ScaResolutionError(
+                        type_=out.ResolutionErrorKind(
+                            out.ParseDependenciesFailed(str(e))
+                        ),
+                        dependency_source_file=out.Fpath(str(lockfile_path)),
+                    )
+                ],
+            )
+
+
+LegacyDependencyParser = Callable[
     [Path, str, Optional[str]], Generator[FoundDependency, None, None]
 ]
 
 
-def to_parser(parser: LegacySemgrepParser, parser_type: ScaParserName) -> SemgrepParser:
+def to_parser(parser: LegacyDependencyParser) -> DependencyParser:
     """
     Converts a legacy parser to a new parser format.
     Legacy parsers return a generator of FoundDependency objects, while new parsers
@@ -80,23 +121,12 @@ def to_parser(parser: LegacySemgrepParser, parser_type: ScaParserName) -> Semgre
     def wrapped_parser(
         lockfile_path: Path, manifest_path: Optional[Path]
     ) -> Tuple[List[FoundDependency], List[DependencyParserError]]:
-        try:
-            lockfile_text = lockfile_path.read_text()
-            manifest_text = manifest_path.read_text() if manifest_path else None
-            dependencies = list(parser(lockfile_path, lockfile_text, manifest_text))
-            return dependencies, []
-        except Exception as e:
-            console.print(f"Failed to parse {lockfile_path} with exception {e}")
-            return (
-                [],
-                [
-                    DependencyParserError(
-                        out.Fpath(str(lockfile_path)), parser_type, str(e)
-                    )
-                ],
-            )
+        lockfile_text = lockfile_path.read_text()
+        manifest_text = manifest_path.read_text() if manifest_path else None
+        dependencies = list(parser(lockfile_path, lockfile_text, manifest_text))
+        return dependencies, []
 
-    return wrapped_parser
+    return DependencyParser(wrapped_parser)
 
 
 def not_any(*chars: str) -> Parser[str]:
@@ -154,7 +184,9 @@ def triple(p1: Parser[A], p2: Parser[B], p3: Parser[C]) -> Parser[tuple[A, B, C]
     return p1.bind(lambda a: p2.bind(lambda b: p3.bind(lambda c: success((a, b, c)))))
 
 
-def transitivity(manifest_deps: set[A] | None, dep_sources: list[A]) -> Transitivity:
+def transitivity(
+    manifest_deps: set[A] | None, dep_sources: list[A]
+) -> out.DependencyKind:
     """
     Computes the transitivity of a package, based on the set of dependencies from a manifest file
     [manifest_deps] can be None in the case where we did not find a manifest file
@@ -173,10 +205,10 @@ def transitivity(manifest_deps: set[A] | None, dep_sources: list[A]) -> Transiti
     if manifest_deps:
         for dep_source in dep_sources:
             if dep_source in manifest_deps:
-                return Transitivity(Direct())
-        return Transitivity(Transitive())
+                return out.DependencyKind(Direct())
+        return out.DependencyKind(Transitive())
     else:
-        return Transitivity(Unknown())
+        return out.DependencyKind(Unknown())
 
 
 def become(p1: Parser[A], p2: Parser[A]) -> None:
@@ -266,6 +298,10 @@ def filter_on_marked_lines(result: list[Any]) -> list[tuple]:
     return [x for x in result if isinstance(x, tuple)]
 
 
+class LockfileParseFailure(DependencyParserError):
+    """A lockfile could not be parsed at all (vs. a skipped-entry warning)."""
+
+
 @dataclass
 class DependencyFileToParse(Generic[A]):
     path: Path
@@ -276,11 +312,14 @@ class DependencyFileToParse(Generic[A]):
 
 def parse_dependency_file(
     file_to_parse: DependencyFileToParse[A] | None,
+    failure: type[DependencyParserError] = DependencyParserError,
 ) -> A | DependencyParserError | None:
     """
     Run [parser] on the text in [path]
 
     PARSER_NAME is used for error reporting to correctly identify which PARSER attempted to parse PATH
+
+    FAILURE is the error type returned when the file cannot be parsed; an empty file is not a failure
 
     Returns None if path does not exist
 
@@ -305,12 +344,12 @@ def parse_dependency_file(
             return file_to_parse.parser(text)
 
     except YAMLError as e:
-        return DependencyParserError(
+        return failure(
             out.Fpath(file_to_parse.path.name), file_to_parse.parser_name, str(e)
         )
     except RecursionError:
         reason = "Python recursion depth exceeded, try again with SEMGREP_PYTHON_RECURSION_LIMIT_INCREASE set higher than 500"
-        return DependencyParserError(
+        return failure(
             out.Fpath(str(file_to_parse.path)), file_to_parse.parser_name, reason
         )
     except ParseError as e:
@@ -323,7 +362,7 @@ def parse_dependency_file(
 
         if line < len(text_lines):
             offending_line = text_lines[line]
-            return DependencyParserError(
+            return failure(
                 out.Fpath(str(file_to_parse.path)),
                 file_to_parse.parser_name,
                 error_str,
@@ -335,12 +374,12 @@ def parse_dependency_file(
             reason = (
                 f"Parser failed at the beginning of {file_to_parse.path}.\n{error_str}"
             )
-            return DependencyParserError(
+            return failure(
                 out.Fpath(str(file_to_parse.path)), file_to_parse.parser_name, reason
             )
         else:
             reason = f"{error_str}\nInternal Error - line {line + 1} is past the end of {file_to_parse.path}?"
-            return DependencyParserError(
+            return failure(
                 out.Fpath(str(file_to_parse.path)),
                 file_to_parse.parser_name,
                 reason,
@@ -348,7 +387,7 @@ def parse_dependency_file(
                 col + 1,
             )
     except Exception as e:
-        return DependencyParserError(
+        return failure(
             out.Fpath(file_to_parse.path.name), file_to_parse.parser_name, str(e)
         )
 
@@ -362,7 +401,7 @@ def safe_parse_lockfile_and_manifest(
     """
     errors = []
     parsed_manifest = parse_dependency_file(manifest_to_parse)
-    parsed_lockfile = parse_dependency_file(lockfile_to_parse)
+    parsed_lockfile = parse_dependency_file(lockfile_to_parse, LockfileParseFailure)
     if isinstance(parsed_manifest, DependencyParserError):
         errors.append(parsed_manifest)
         parsed_manifest = None
@@ -380,7 +419,7 @@ class ParsedDependency:
     """
 
     line_number: int
-    transitivity: Transitivity
+    transitivity: out.DependencyKind
     children: list[DependencyChild]
     package: str
     version: str
@@ -439,6 +478,9 @@ class JSON:
 
     def as_int(self) -> int:
         return cast(int, self.value)
+
+    def is_null(self) -> bool:
+        return self.value is None
 
 
 # Utilities

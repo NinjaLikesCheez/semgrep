@@ -1,3 +1,15 @@
+(*
+   Copyright (c) 2024 Semgrep Inc.
+
+   This library is free software; you can redistribute it and/or
+   modify it under the terms of the GNU Lesser General Public License
+   version 2.1 as published by the Free Software Foundation.
+
+   This library is distributed in the hope that it will be useful, but
+   WITHOUT ANY WARRANTY; without even the implied warranty of
+   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the file
+   LICENSE for more details.
+*)
 open Rule
 
 (* currently used in Check_rule.ml metachecker *)
@@ -17,14 +29,14 @@ let visit_formula f (formula : formula) : unit =
         xs |> List.iter aux);
     formula.conditions
     |> List.iter (fun (_, cond) ->
-           match cond with
-           | CondNestedFormula (_, _, formula) -> aux formula
-           | CondEval _
-           | CondName _
-           | CondType _
-           | CondRegexp _
-           | CondAnalysis _ ->
-               ())
+        match cond with
+        | CondNestedFormula (_, _, formula) -> aux formula
+        | CondEval _
+        | CondName _
+        | CondType _
+        | CondRegexp _
+        | CondAnalysis _ ->
+            ())
   in
   aux formula
 

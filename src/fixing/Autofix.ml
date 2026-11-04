@@ -28,19 +28,6 @@ module Log = Log_fixing.Log
  * See also Textedit.ml for the generic library supporting text edits.
  *)
 
-(*****************************************************************************)
-(* Constants *)
-(*****************************************************************************)
-
-(* For matching things of the form \<num>.
-   See `regex_fix` below for why this is needed.
-*)
-let capture_group_regex = "\\\\([0-9]+)"
-
-(*****************************************************************************)
-(* Helpers *)
-(*****************************************************************************)
-
 (* When we produce a fix, we take some content and paste it into the
    place where the fix needs to go.
 
@@ -78,7 +65,7 @@ let align_nonfirst_lines_at_column ~start_column text =
     | [] -> []
     | first :: rest ->
         let padding = String.make start_column ' ' in
-        first :: List_.map (fun s -> padding ^ s) rest
+        first :: List.map (fun s -> padding ^ s) rest
   in
   String.concat "\n" replacement_lines
 
@@ -106,7 +93,7 @@ let parse_pattern lang pattern =
  * more flexible origin/source
  *)
 let parse_target lang text =
-  (* ext shouldn't matter, but could use Lang.ext_of_lang if needed *)
+  (* ext shouldn't matter, but could use Lang.exts_of_lang if needed *)
   (* nosemgrep: forbid-tmp *)
   UTmp.with_temp_file ~contents:text ~suffix:".check" (fun file ->
       try Ok (Parse_target.just_parse_with_lang lang file) with
@@ -120,20 +107,20 @@ let parse_target lang text =
  * option in this case might be to omit or downrank matches that rely on
  * unordered keyword matching, but that assumes that a better match does in fact
  * exist. Such a change would also have a larger impact on Semgrep as a whole.
- * *)
+ *)
 let transform_fix lang ast =
   match lang with
   | Lang.Python ->
       (* Due to unordered keyword argument matching (see m_list__m_argument),
-         * we can end up generating
-         * autofixes where keyword arguments are moved before positional
-         * arguments. In some languages (OCaml, for example) this doesn't change
-         * the semantics, but in Python this is actually syntactically invalid.
-         * So, to avoid generating invalid autofixes, we move the positional
-         * arguments in front of the keyword arguments.
-         *
-         * See the fix_ellipsis_metavar.py test case for an example of when this
-         * can happen. *)
+       * we can end up generating
+       * autofixes where keyword arguments are moved before positional
+       * arguments. In some languages (OCaml, for example) this doesn't change
+       * the semantics, but in Python this is actually syntactically invalid.
+       * So, to avoid generating invalid autofixes, we move the positional
+       * arguments in front of the keyword arguments.
+       *
+       * See the fix_ellipsis_metavar.py test case for an example of when this
+       * can happen. *)
       let mapper =
         object (_self : 'self)
           inherit [_] AST_generic.map as super
@@ -200,24 +187,24 @@ let validate_fix lang target_contents edit =
  *   in which it is used in the fix.
  * - Printing of the resulting fix AST fails (probably because there is simply a
  *   node that is unhandled).
- * *)
+ *)
 let ast_based_fix ~fix (start, end_) (pm : Core_match.t) : Textedit.t option =
   let fix_pattern = fix in
   let* lang = List.nth_opt pm.rule_id.langs 0 in
   let metavars = pm.env in
   let target_contents =
-    lazy (UFile.read_file pm.path.internal_path_to_content)
+    lazy_safe (UFile.read_file pm.path.internal_path_to_content)
   in
   let result =
     try
       (* Fixes are not exactly patterns, but they can contain metavariables that
        * should be substituted with the nodes to which they are bound in the match.
        * Because they can contain metavariables, we need to parse them as patterns.
-       * *)
+       *)
       let/ fix_pattern_ast =
         parse_pattern lang fix_pattern
         |> Result.map_error (fun e ->
-               spf "Failed to parse fix pattern:\n%s" (Exception.to_string e))
+            spf "Failed to parse fix pattern:\n%s" (Exception.to_string e))
         |> Result.join
       in
 
@@ -234,7 +221,7 @@ let ast_based_fix ~fix (start, end_) (pm : Core_match.t) : Textedit.t option =
        *
        * As we improve autofix, we may also want to perform other operations over
        * the fixed AST.
-       * *)
+       *)
       let/ fixed_pattern_ast =
         Autofix_metavar_replacement.replace_metavars metavars fix_pattern_ast
       in
@@ -265,7 +252,7 @@ let ast_based_fix ~fix (start, end_) (pm : Core_match.t) : Textedit.t option =
       in
 
       (* Perform sanity checks for the resulting fix. *)
-      validate_fix lang (Lazy.force target_contents) edit
+      validate_fix lang (Lazy_safe.force target_contents) edit
     with
     | Time_limit.Timeout _ as e -> Exception.catch_and_reraise e
     | e ->
@@ -277,14 +264,13 @@ let ast_based_fix ~fix (start, end_) (pm : Core_match.t) : Textedit.t option =
   match result with
   | Ok x -> Some x
   | Error err ->
-      let msg =
-        spf "Failed to render AST-based fix `%s`:\n%s" fix_pattern err
-      in
+      let msg = spf "Failed to render AST-based fix:\n%s" err in
       (* Print line-by-line so that each line is preceded by the logging header.
          Looks nicer and makes it easier to mask in e2e test output.
          TODO: make the Logs_ library do this by default. *)
       String.split_on_char '\n' msg
       |> List.iter (fun s -> Log.warn (fun m -> m "%s" s));
+      Log.debug (fun m -> m "Failed fix pattern: `%s`" fix_pattern);
       None
 
 let basic_fix ~(fix : string) (start, end_) (pm : Core_match.t) : Textedit.t =
@@ -303,52 +289,41 @@ let basic_fix ~(fix : string) (start, end_) (pm : Core_match.t) : Textedit.t =
 
 let regex_fix ~fix_regexp:Rule.{ regexp; count; replacement } (start, end_)
     (pm : Core_match.t) =
-  let rex = Pcre2_.regexp regexp in
+  let/ rex = Pcre2_.compile regexp |> Result.map_error Either.left in
   (* You need a minus one, to make it compatible with the inclusive Range.t *)
   let content =
     Range.content_at_range pm.path.internal_path_to_content
       Range.{ start; end_ = end_ - 1 }
   in
-  (* What is this for?
-     Before, when autofix was in the Python CLI, `fix-regex` had the semantics
-     of allowing backreferences to be substituted via the syntax '\1' for the
-     first backreference.
-     Unfortunately, the Pcre-ocaml library has no conception of this syntax. It
-     instead uses $1, $2, etc, for backreferences.
-     We don't want to break this existing behavior, however.
-     The fix will be that if someone gives us a replacement regex of the form
-     '\1', we will try to replace it instead with '$1', etc.
+  (* TODO: We could align text here, but the problem is that we need the
+     start column of the area being replaced.
+     The area being replaced in a regex fix is not necessarily that of the
+     entire match. So we would need to compute that.
   *)
-  let replaced_replacement =
-    let capture_group_rex = Pcre2_.regexp capture_group_regex in
-    (* Confusingly, this $1 in the template is separate from the literal
-       capture group it is replacing. It is simply a dollar sign in front of
-       the capture group's number, which is captured in the `capture_group_regex`
-       above.
-       This lets us essentially capture everything matched by \<num> with
-       $<num>.
-    *)
-    Pcre2_.replace ~rex:capture_group_rex ~template:"$$$1" replacement
+  (* Historical [count] semantics, inherited from iterating pcre-ocaml's
+     [replace_first]: each replacement re-scans the rewritten string from the
+     beginning, so a replacement which itself matches [regexp] is seen again
+     by the next iteration. *)
+  let replace ?limit content =
+    Pcre2_.replace ?limit rex ~template:replacement content
+    |> Result.map_error Either.right
   in
-  let replacement_text =
+  let rec replace_first_n n content =
+    if n =|= 0 then Ok content
+    else
+      let/ content = replace ~limit:1 content in
+      replace_first_n (n - 1) content
+  in
+  let/ replacement_text =
     match count with
-    | None -> Pcre2_.replace ~rex ~template:replaced_replacement content
-    | Some count ->
-        Common2.foldn
-          (fun content _i ->
-            Pcre2_.replace_first ~rex ~template:replaced_replacement content)
-          content count
-    (* TODO: We could align text here, but the problem is that we need the
-       start column of the area being replaced.
-       The area being replaced in a regex fix is not necessarily that of the
-       entire match. So we would need to compute that.
-    *)
+    | None -> replace content
+    | Some n -> replace_first_n n content
   in
   let edit =
     Textedit.
       { path = pm.path.internal_path_to_content; start; end_; replacement_text }
   in
-  edit
+  Ok edit
 
 (*****************************************************************************)
 (* Autofix selection logic *)
@@ -368,8 +343,8 @@ let render_fix (pm : Core_match.t) : Textedit.t option =
   let fix_regex = pm.rule_id.fix_regexp in
   let range =
     let start, end_ = pm.range_loc in
-    let _, _, end_charpos = Tok.end_pos_of_loc end_ in
-    (start.Tok.pos.bytepos, end_charpos)
+    let _, _, end_charpos = Loc.end_pos end_ in
+    (start.Loc.pos.bytepos, end_charpos)
   in
   match (fix, fix_regex) with
   | None, None -> None
@@ -377,7 +352,17 @@ let render_fix (pm : Core_match.t) : Textedit.t option =
       match ast_based_fix ~fix range pm with
       | None -> Some (basic_fix ~fix range pm)
       | Some fix -> Some fix)
-  | _, Some fix_regexp -> Some (regex_fix ~fix_regexp range pm)
+  | _, Some fix_regexp -> (
+      match regex_fix ~fix_regexp range pm with
+      | Ok x -> Some x
+      | Error (Left e) ->
+          Log.warn (fun m ->
+              m "Error while applying regex-fix: %a" Pcre2.pp_compile_error e);
+          None
+      | Error (Right e) ->
+          Log.warn (fun m ->
+              m "Error while applying regex-fix: %a" Pcre2.pp_match_error e);
+          None)
 
 (*****************************************************************************)
 (* Entry points *)
@@ -388,7 +373,7 @@ let produce_autofix (m : Core_result.processed_match) =
 
 let produce_autofixes (matches : Core_result.processed_match list) =
   (* TODO Simple function, inline at callsites? *)
-  List_.map produce_autofix matches
+  List.map produce_autofix matches
 
 (* This is used for testing only. This is why it raises an exception. *)
 let apply_fixes_to_file_exn path edits =
@@ -407,24 +392,24 @@ let apply_fixes ?(dryrun = false) (edits : Textedit.t list) : unit =
   (match modified_files with
   | _ :: _ ->
       Log.info (fun m ->
-          m "%smodified %s."
+          m "Autofix %smodified %s."
             (match failed_fixes with
             | [] -> "successfully "
             | _ -> "")
             (String_.unit_str (List.length modified_files) "file(s)"))
-  | [] -> Log.info (fun m -> m "no files modified."));
+  | [] -> Log.info (fun m -> m "No files modified by autofix."));
   match failed_fixes with
   | [] -> ()
   | _ ->
       Log.warn (fun m ->
-          m "failed to apply %i fix(es)." (List.length failed_fixes))
+          m "Autofix failed to apply %i fix(es)." (List.length failed_fixes))
 
 let apply_fixes_of_core_matches ?dryrun (matches : OutJ.core_match list) : unit
     =
   matches
-  |> List_.filter_map (fun (m : OutJ.core_match) ->
-         let* replacement_text = m.extra.fix in
-         let start = m.start.offset in
-         let end_ = m.end_.offset in
-         Some Textedit.{ path = m.path; start; end_; replacement_text })
+  |> List.filter_map (fun (m : OutJ.core_match) ->
+      let* replacement_text = m.extra.fix in
+      let start = m.start.offset in
+      let end_ = m.end_.offset in
+      Some Textedit.{ path = m.path; start; end_; replacement_text })
   |> apply_fixes ?dryrun

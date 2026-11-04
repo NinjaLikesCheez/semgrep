@@ -11,6 +11,7 @@
 
     foo.py with lockfile poetry.lock
    ❯❯❱ supply-chain-reachable-1
+          ❰❰ Blocking ❱❱
           found a reachable vulnerability from a dependency
 
             1┆ x = 2
@@ -32,21 +33,24 @@
   CONNECTION
   Initializing scan (deployment=org_name, scan_id=12345)
   Enabled products: Code, Supply Chain
+  Using git merge base detected from environment for diff scans: <MASKED>
+
 
 ┌─────────────┐
 │ Scan Status │
 └─────────────┘
-  Scanning 1 file tracked by git with 0 Code rules, 3 Supply Chain rules:
+  Scanning 1 file tracked by git with 3 Supply Chain rules:
 
 
   CODE RULES
-  Nothing to scan.
+  No code rules to run.
 
   SUPPLY CHAIN RULES
 
-  Ecosystem   Rules   Files   Lockfiles
- ─────────────────────────────────────────
-  Pypi            3       1   poetry.lock
+  Dependency Sources   Resolution Method   Ecosystem   Dependencies   Rules
+ ───────────────────────────────────────────────────────────────────────────
+  poetry.lock          Lockfile            Pypi        3                  3
+  yarn.lock            Skipped             Unknown     -                  -
 
 
   Analysis   Rules
@@ -65,17 +69,17 @@ Creating git worktree from '<MASKED>' to scan baseline.
 ┌─────────────┐
 │ Scan Status │
 └─────────────┘
-  Scanning 2 files tracked by git with 0 Code rules, 3 Supply Chain rules:
+  Scanning 2 files tracked by git with 3 Supply Chain rules:
 
 
   CODE RULES
-  Nothing to scan.
+  No code rules to run.
 
   SUPPLY CHAIN RULES
 
-  Ecosystem   Rules   Files   Lockfiles
- ─────────────────────────────────────────
-  Pypi            3       1   poetry.lock
+  Dependency Sources   Resolution Method   Ecosystem   Dependencies   Rules
+ ───────────────────────────────────────────────────────────────────────────
+  poetry.lock          Lockfile            Pypi        3                  3
 
 
   Analysis   Rules
@@ -89,11 +93,14 @@ Creating git worktree from '<MASKED>' to scan baseline.
 ┌──────────────┐
 │ Scan Summary │
 └──────────────┘
-Some files were skipped or only partially analyzed.
-  Scan was limited to files changed since baseline commit.
-
+✅ CI scan completed successfully.
+ • Findings: 1 (1 blocking)
+ • Rules run: 3
+ • Targets scanned: 2
+ • Parsed lines: ~100.0%
+ • Scan was limited to files changed since baseline commit.
+ • For a detailed list of skipped files and lines, run semgrep with the --verbose flag
 CI scan completed successfully.
-  Found 1 finding (1 blocking) from 3 rules.
   View results in Semgrep Cloud Platform:
     https://semgrep.dev/orgs/org_name/findings?repo=local_scan/checkout_project_name&ref=some/branch-name
     https://semgrep.dev/orgs/org_name/supply-chain/vulnerabilities?repo=local_scan/checkout_project_name&ref=some/branch-name

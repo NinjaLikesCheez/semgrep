@@ -1,3 +1,15 @@
+(*
+   Copyright (c) 2021-2025 Semgrep Inc.
+
+   This library is free software; you can redistribute it and/or
+   modify it under the terms of the GNU Lesser General Public License
+   version 2.1 as published by the Free Software Foundation.
+
+   This library is distributed in the hope that it will be useful, but
+   WITHOUT ANY WARRANTY; without even the implied warranty of
+   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the file
+   LICENSE for more details.
+*)
 open AST_generic
 module H = AST_generic_helpers
 
@@ -53,7 +65,7 @@ let test_il_generic ~parse_program file =
   in
   v#visit_program () ast
 
-let test_cfg_il (caps : < Cap.exec ; Cap.tmp >) ~parse_program file =
+let test_cfg_il ~parse_program file =
   let ast = parse_program file in
   let lang = Lang.lang_of_filename_exn file in
   Naming_AST.resolve lang ast;
@@ -61,7 +73,7 @@ let test_cfg_il (caps : < Cap.exec ; Cap.tmp >) ~parse_program file =
   let i = ref 0 in
   Visit_function_defs.visit
     (fun ent fdef ->
-      let IL.{ params = _; cfg; lambdas = _ } =
+      let Fun_CFG.{ params = _; fdef = _; cfg; lambdas = _ } =
         CFG_build.cfg_of_gfdef lang fdef
       in
       Display_IL.display_cfg
@@ -75,7 +87,7 @@ let test_cfg_il (caps : < Cap.exec ; Cap.tmp >) ~parse_program file =
               let name = "func" ^ Int.to_string !i in
               incr i;
               name)
-        caps cfg)
+        cfg)
     ast
 
 module F2 = IL
@@ -85,7 +97,7 @@ module DataflowY = Dataflow_core.Make (struct
   type edge = F2.edge
   type flow = (node, edge) CFG.t
 
-  let short_string_of_node n = Display_IL.short_string_of_node_kind n.F2.n
+  let short_string_of_node n = Display_IL.short_string_of_node n
 end)
 
 let test_dfg_svalue ~parse_program file =
@@ -109,7 +121,7 @@ let test_dfg_svalue ~parse_program file =
   in
   v#visit_program () ast
 
-let actions (caps : < Cap.exec ; Cap.tmp >) ~parse_program =
+let actions ~parse_program =
   [
     ( "-typing_generic",
       " <file>",
@@ -123,7 +135,7 @@ let actions (caps : < Cap.exec ; Cap.tmp >) ~parse_program =
       Arg_.mk_action_1_conv Fpath.v (test_il_generic ~parse_program) );
     ( "-cfg_il",
       " <file>",
-      Arg_.mk_action_1_conv Fpath.v (test_cfg_il caps ~parse_program) );
+      Arg_.mk_action_1_conv Fpath.v (test_cfg_il ~parse_program) );
     ( "-dfg_svalue",
       " <file>",
       Arg_.mk_action_1_conv Fpath.v (test_dfg_svalue ~parse_program) );

@@ -1,4 +1,16 @@
 (*
+   Copyright (c) 2023-2025 Semgrep Inc.
+
+   This library is free software; you can redistribute it and/or
+   modify it under the terms of the GNU Lesser General Public License
+   version 2.1 as published by the Free Software Foundation.
+
+   This library is distributed in the hope that it will be useful, but
+   WITHOUT ANY WARRANTY; without even the implied warranty of
+   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the file
+   LICENSE for more details.
+*)
+(*
    Abstract type for a file path within a project.
 
    This avoids issues of Unix-style vs. Windows-style paths; All
@@ -9,7 +21,7 @@
 *)
 
 (* All project paths are *absolute* and *normalized* *)
-type t [@@deriving show]
+type t [@@deriving show, eq]
 
 (*
    Returns an absolute, normalized path relative to the project root.
@@ -64,7 +76,7 @@ val to_fpath : ?root:Fpath.t -> t -> Fpath.t
 
 (* Convert to the string-based representation for regexp-matching purposes.
    The resulting path uses '/' as a separator and starts with a '/'.
-   Do not use function this for other purposes regexp matching.
+   Do not use this function for other purposes than regexp matching.
    - for testing and logging, use 'to_string_for_tests';
    - for conversion to system paths, use 'to_fpath'.
 *)
@@ -81,6 +93,18 @@ val segments : t -> string list
 (* Same as 'segments' but remove the leading empty segment corresponding
    to the leading '/'. *)
 val relative_segments : t -> string list
+
+(* The final segment of the path. For a directory path (ending in '/'), this
+   is the empty string. *)
+val last_segment : t -> string
+
+(* Does [path] denote a directory, i.e. end with a trailing slash? *)
+val is_dir_path : t -> bool
+
+(* For a directory path '/a/b/', the final non-empty segment ('b'). Returns
+   [""] when the path is not a directory path or has no non-empty segment
+   before the trailing slash. *)
+val dir_segment : t -> string
 
 (* Append a segment to a path.
    ".." and "." are not supported by this operation.
@@ -99,7 +123,10 @@ val append_fpath : t -> Fpath.t -> t
 
 (* Create a ppath from a relative fpath.
    Raises Invalid_argument if the input is not a relative path. *)
-val of_relative_fpath : Fpath.t -> t
+val of_relative_fpath_exn : Fpath.t -> t
+
+(* Safe alternative to of_relative_fpath_exn. *)
+val fake_from_fpath_DEPRECATED : Fpath.t -> t
 
 (* Express a ppath relatively to another. The result is relative fpath.
    It can't be a ppath because ppaths can't be relative to one another.
@@ -114,7 +141,7 @@ val relativize : root:t -> t -> Fpath.t
 
 (* Imitate File.Operators in libs/commons/ *)
 module Operators : sig
-  (* Same as append *)
+  (* Same as [add_seg] *)
   val ( / ) : t -> string -> t
 end
 
@@ -129,3 +156,7 @@ val of_string_for_tests : string -> t
    path in the file system.
 *)
 val to_string_for_tests : t -> string
+
+(* For ATD serialization using 'string wrap' *)
+val wrap : string -> t
+val unwrap : t -> string

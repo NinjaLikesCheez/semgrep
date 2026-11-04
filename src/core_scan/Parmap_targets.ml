@@ -1,6 +1,6 @@
-(* Yoann Padioleau
+(* Yoann Padioleau, Austin Theriault
  *
- * Copyright (C) 2022-2024 Semgrep Inc.
+ * Copyright (C) 2022-2025 Semgrep Inc.
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public License
@@ -31,21 +31,24 @@ open Fpath_.Operators
 
 let sort_targets_by_decreasing_size (targets : Target.t list) : Target.t list =
   targets
+  (* This is so we can filter out targets that don't exist, for instance. *)
+  |> List.filter_map (fun target ->
+      match UFile.filesize (Target.internal_path target) with
+      | Ok size -> Some (target, size)
+      | Error (code, _func, info) ->
+          Logs.err (fun m ->
+              m
+                "sort_targets_by_decreasing_size: unexpected error when \
+                 reading %s: %s (code %s)"
+                !!(Target.internal_path target)
+                info (Unix.error_message code));
+          None)
   |> List_.sort_by_key
-       (fun target -> UFile.filesize (Target.internal_path target))
+       (fun (_target, size) -> size)
        (* Flip the comparison so we get descending,
         * instead of ascending, order *)
        (Fun.flip Int.compare)
-
-let sort_code_targets_by_decreasing_size (targets : Target.regular list) :
-    Target.regular list =
-  targets
-  |> List_.sort_by_key
-       (fun (target : Target.regular) ->
-         UFile.filesize target.path.internal_path_to_content)
-       (* Flip the comparison so we get descending,
-        * instead of ascending, order *)
-       (Fun.flip Int.compare)
+  |> List.map fst
 
 let core_error_of_path_exc (internal_path : Fpath.t) (e : Exception.t) :
     Core_error.t =
@@ -83,24 +86,51 @@ let core_error_of_path_exc (internal_path : Fpath.t) (e : Exception.t) :
    :)
 *)
 
-let init job =
+let init _job =
+  (* With the OCaml 5 upgrade we started sporadically seeing strange Parmap
+   * errors again when tracing is enabled. This remains somewhat mysterious.
+   * Disable tracing in child processes for now. Fortunately OCaml 5 gives us
+   * more options for a couple pieces of this unfortunate area so hopefully we
+   * will be able to replace some of the problematic components soon.
+   *
+   * TODO Re-enable tracing (and update initialize below!) *)
+  (*
   (* Set a global attribute to the job number so we know when we look at
      traces/logs/metrics which job it came from! *)
   Tracing.add_global_attribute Trace_data.Attributes.job (`Int job);
   (* Restart tracing as it is paused before forking below in both
      map_targets___* funcs *)
   (* NOTE: this only restarts tracing in the child *)
-  Tracing.restart_tracing ()
+  Tracing.restart_otel ()
+  *)
+  ()
 
 let finalize () =
   (* Stop tracing to ensure traces are flushed *)
   (* NOTE: this only stops tracing in the child *)
-  Tracing.stop_tracing ~exit_active_spans:false ()
+  (* TODO See note in init *)
+  (*
+  Tracing.stop_otel ()
+  *)
+  ()
 
 (* Run jobs in parallel, using number of cores specified with -j *)
-let map_targets__run_in_forked_process_do_not_modify_globals caps (ncores : int)
+let map_targets__run_in_forked_process_do_not_modify_globals ~(num_jobs : int)
     (f : Target.t -> 'a) (targets : Target.t list) :
     ('a, Target.t * Core_error.t) result list =
+  (* Parmap uses fork() which is not supported on non-Unix platforms
+     (Windows) *)
+  let num_jobs =
+    if num_jobs > 1 && not Sys.unix then (
+      Logs.warn (fun m ->
+          m
+            "Requested %i jobs, but only 1 job is currently supported on \
+             Windows. Forcing configuration to 1 job."
+            num_jobs);
+      1)
+    else num_jobs
+  in
+
   (*
      Sorting the targets by decreasing size is based on the assumption
      that larger targets will take more time to process. Starting with
@@ -109,7 +139,7 @@ let map_targets__run_in_forked_process_do_not_modify_globals caps (ncores : int)
      This is a kind of greedy algorithm, which is in general not optimal
      but hopefully good enough in practice.
 
-     This is needed only when ncores > 1, but to reduce discrepancy between
+     This is needed only when num_jobs > 1, but to reduce discrepancy between
      the two modes, we always sort the target queue in the same way.
   *)
   let targets = sort_targets_by_decreasing_size targets in
@@ -123,19 +153,19 @@ let map_targets__run_in_forked_process_do_not_modify_globals caps (ncores : int)
   in
 
   (* old:
-   *    if ncores <= 1 then List_.map (fun x -> Ok (f x)) targets else ( ... )
+   *    if num_jobs <= 1 then List.map (fun x -> Ok (f x)) targets else ( ... )
    * But this was wrong because 'f' can throw exns and so we would
-   * get a different semantic when ncores > 1 where we capture exns hence
+   * get a different semantic when num_jobs > 1 where we capture exns hence
    * the use of wrap_result below.
    *)
-  if ncores <= 1 then
-    targets |> List_.map (fun x -> Parmap_.wrap_result f ~exception_handler x)
+  if num_jobs <= 1 then
+    targets |> List.map (fun x -> Parmap_.wrap_result f ~exception_handler x)
   else (
     (*
-       Parmap creates ncores children processes which listen for
+       Parmap creates num_jobs children processes which listen for
        chunks of input. When a chunk size is specified, parmap feeds
-       the ncores processes in small chunks of the specified size
-       instead of just dividing the input list into exactly ncores chunks.
+       the num_jobs processes in small chunks of the specified size
+       instead of just dividing the input list into exactly num_jobs chunks.
 
        Since our jobs are relatively big compared to the serialization
        and communication overhead, setting the chunk size to 1 works
@@ -157,37 +187,10 @@ let map_targets__run_in_forked_process_do_not_modify_globals caps (ncores : int)
        let init _ = Logging.add_PID_tag () in
     *)
     Logs.debug (fun m ->
-        m "running parmap with %d cores on %d targets" ncores
+        m "running parmap with %d cores on %d targets" num_jobs
           (List.length targets));
     (* We must pause tracing here as forking with tracing on causes segfaults.
        See comments on this function in Tracing.ml *)
-    Tracing.with_tracing_paused (fun () ->
-        Parmap_.parmap caps ~init ~finalize ~ncores ~chunksize:1
-          ~exception_handler f targets))
-
-(* remove duplication? But we now use this function below at a few places like
- * in Deep_scan_phases and it would be uglier to wrap with [Target.Regular]
- * and then unwrap in [f].
- *)
-let map_regular_targets__run_in_forked_process_do_not_modify_globals caps
-    (ncores : int) (f : Target.regular -> 'a) (targets : Target.regular list) :
-    ('a, Core_error.t) result list =
-  let targets = sort_code_targets_by_decreasing_size targets in
-  (* Default to core_error here. Maybe we should instead pass this as a param? *)
-  let exception_handler
-      ({ path = { internal_path_to_content; _ }; _ } : Target.regular)
-      (e : Exception.t) : Core_error.t =
-    core_error_of_path_exc internal_path_to_content e
-  in
-  if ncores <= 1 then
-    targets |> List_.map (fun x -> Parmap_.wrap_result f ~exception_handler x)
-  else (
-    Parmap_.disable_core_pinning ();
-    Logs.debug (fun m ->
-        m "running parmap with %d cores on %d targets" ncores
-          (List.length targets));
-    (* We must pause tracing here as forking with tracing on causes segfaults.
-       See comments on this function in Tracing.ml *)
-    Tracing.with_tracing_paused (fun () ->
-        Parmap_.parmap caps ~init ~finalize ~ncores ~chunksize:1
-          ~exception_handler f targets))
+    Telemetry.with_otel_paused (fun () ->
+        Parmap_.parmap ~init ~finalize ~num_jobs ~chunksize:1 ~exception_handler
+          f targets))

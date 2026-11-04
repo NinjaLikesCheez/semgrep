@@ -1,4 +1,16 @@
 (*
+   Copyright (c) 2022-2024 Semgrep Inc.
+
+   This library is free software; you can redistribute it and/or
+   modify it under the terms of the GNU Lesser General Public License
+   version 2.1 as published by the Free Software Foundation.
+
+   This library is distributed in the hope that it will be useful, but
+   WITHOUT ANY WARRANTY; without even the implied warranty of
+   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the file
+   LICENSE for more details.
+*)
+(*
    Predefined character classes.
 
    Uses the definitions of PCRE unless otherwise noted.
@@ -24,7 +36,7 @@ let rec of_list chars : char_class =
   | [ last ] -> Singleton last
   | x :: chars -> Union (Singleton x, of_list chars)
 
-let of_list_pos chars : char_class = List_.map snd chars |> of_list
+let of_list_pos chars : char_class = List.map snd chars |> of_list
 
 (*
    Each byte of the list becomes a unicode code point in the set.

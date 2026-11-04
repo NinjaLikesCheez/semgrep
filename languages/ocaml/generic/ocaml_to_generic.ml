@@ -30,7 +30,7 @@ module H = AST_generic_helpers
 (*****************************************************************************)
 let id x = x
 let option = Option.map
-let list = List_.map
+let list = List.map
 let string = id
 let bool = id
 
@@ -73,13 +73,13 @@ let mk_var_or_func tlet params tret body =
 let defs_of_bindings tlet attrs xs =
   xs
   |> list (function
-       | Either.Left (ent, params, tret, body, lattrs) ->
-           let ent = add_attrs ent (attrs @ lattrs) in
-           G.DefStmt (ent, mk_var_or_func tlet params tret body) |> G.s
-       | Either.Right (pat, e) ->
-           (* TODO no attrs *)
-           let exp = G.LetPattern (pat, e) |> G.e in
-           G.exprstmt exp)
+    | Either.Left (ent, params, tret, body, lattrs) ->
+        let ent = add_attrs ent (attrs @ lattrs) in
+        G.DefStmt (ent, mk_var_or_func tlet params tret body) |> G.s
+    | Either.Right (pat, e) ->
+        (* TODO no attrs *)
+        let exp = G.LetPattern (pat, e) |> G.e in
+        G.exprstmt exp)
 
 (*****************************************************************************)
 (* Entry point *)
@@ -167,7 +167,7 @@ and stmt e : G.stmt =
       let catches =
         v2
         |> list (fun (pat, e) ->
-               (fake "catch", G.CatchPattern pat, G.exprstmt e))
+            (fake "catch", G.CatchPattern pat, G.exprstmt e))
       in
       G.Try (t, v1, catches, None, None) |> G.s
   | While (t, v1, v2) ->
@@ -186,7 +186,7 @@ and stmt e : G.stmt =
         G.AssignOp (n, (nextop, tok), G.L (G.Int (Some 1L, tok)) |> G.e) |> G.e
       in
       let cond =
-        G.Call (G.IdSpecial (G.Op condop, tok) |> G.e, fb [ G.Arg n; G.Arg v4 ])
+        G.Call (G.Special (G.Op condop, tok) |> G.e, fb [ G.Arg n; G.Arg v4 ])
         |> G.e
       in
       let header =
@@ -307,7 +307,7 @@ and expr e =
       let v1 = wrap string v1 and v2 = expr v2 in
       G.Call (G.N (G.Id (v1, G.empty_id_info ())) |> G.e, fb [ G.Arg v2 ])
       |> G.e
-  (* todo? convert some v2 in IdSpecial Op? *)
+  (* todo? convert some v2 in Special Op? *)
   | Infix (v1, v2, v3) ->
       let v1 = expr v1 and v3 = expr v3 in
       G.Call
@@ -370,6 +370,10 @@ and expr e =
       let v3 = expr v3 in
       let defs = defs_of_bindings tlet [] v2 in
       let st = G.Block (fb (defs @ [ G.exprstmt v3 ])) |> G.s in
+      (* Fix: explicitly set the range on the Block statement to include the
+       * 'let' token and the body expression. Without this, the range starts
+       * from the first binding (missing "let "), which breaks autofix. *)
+      H.set_s_range_with_anys [ G.Tk tlet; G.E v3 ] st;
       let x = G.stmt_to_expr st in
       x.G.e |> G.e
   | Fun (t, v1, v2) ->
@@ -667,11 +671,11 @@ and attribute x =
   | NamedAttr (t1, (dotted, xs), t2) ->
       let args =
         xs
-        |> List_.filter_map (function
-             | { i = TopExpr e; iattrs = [] } ->
-                 let e = expr e in
-                 Some (G.Arg e)
-             | _ -> None)
+        |> List.filter_map (function
+          | { i = TopExpr e; iattrs = [] } ->
+              let e = expr e in
+              Some (G.Arg e)
+          | _ -> None)
       in
       let name = H.name_of_ids dotted in
       G.NamedAttr (t1, name, (t2, args, t2))
@@ -713,21 +717,21 @@ and item { i; iattrs } =
   | Class (c_tok, xs) ->
       xs
       |> list (fun x ->
-             let def = class_binding c_tok x in
-             G.DefStmt def |> G.s)
+          let def = class_binding c_tok x in
+          G.DefStmt def |> G.s)
   | TopExpr e ->
       let e = expr e in
       [ G.exprstmt e ]
   | Type (_t, v1) ->
       let xs = list type_declaration v1 in
       xs
-      |> List_.map (function
-           | Either.Left (ent, def) ->
-               (* add attrs to all mutual type decls *)
-               let ent = add_attrs ent attrs in
-               G.DefStmt (ent, G.TypeDef def) |> G.s
-           | Either.Right categ ->
-               G.OtherStmt (G.OS_Todo, [ G.TodoK categ ]) |> G.s)
+      |> List.map (function
+        | Either.Left (ent, def) ->
+            (* add attrs to all mutual type decls *)
+            let ent = add_attrs ent attrs in
+            G.DefStmt (ent, G.TypeDef def) |> G.s
+        | Either.Right categ ->
+            G.OtherStmt (G.OS_Todo, [ G.TodoK categ ]) |> G.s)
   | Exception (_t, v1, v2) ->
       let v1 = ident v1 and v2 = list type_ v2 in
       let ent = G.basic_entity v1 ~attrs in
@@ -765,8 +769,8 @@ and item { i; iattrs } =
         G.OtherStmt
           ( G.OS_Todo,
             [ G.TodoK t ]
-            @ List_.map (fun x -> G.S x) xs
-            @ List_.map (fun x -> G.At x) attrs )
+            @ List.map (fun x -> G.S x) xs
+            @ List.map (fun x -> G.At x) attrs )
         |> G.s;
       ]
 

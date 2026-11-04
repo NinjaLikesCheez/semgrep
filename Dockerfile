@@ -2,7 +2,7 @@
 # Overview
 ###############################################################################
 # Dockerfile to build the semgrep/semgrep:canary docker image
-# (see .github/workflows/{build-test-docker,push-docker}.jsonnet).
+# (see .github/workflows/build-test-docker.jsonnet).
 #
 # First, we build a fully *static* 'semgrep-core' binary on Alpine. This
 # binary does not even depend on Glibc because Alpine uses Musl instead
@@ -26,34 +26,39 @@
 # to interactively explore the docker image before that failing point.
 
 ###############################################################################
-# Step0: collect files needed to build semgrep-core
+# Step0: copy the source files
 ###############################################################################
+# We do this in a separate stage to maximize docker cache hits, as the cache is
+# invalidated when copied files change. So doing this allows us only to use the
+# cache if an unrelated file such as a workflow or readme changes.
+#
+# I.e. if we don't touch the core ml files, then we don't need to rebuild the core
+# or rerun the ocaml tests. This saves us a ton of time in CI
+#
+# See:  https://docs.docker.com/build/cache/optimize/#keep-the-context-small
 
-# The semgrep git repository contains the source code to multiple build artifacts
-# (pysemgrep, semgrep-core, etc...). In order to maximize Docker cache
-# hits (and keep the build fast), we only copy over the folders needed to build
-# semgrep-core. This is done in a multi-stage build so that the final COPY
-# happens in a single layer.
+# NOTE!!!: do not add files here unless they are necessary for building the core
+# ONLY! cli and test files should be added at later stages
+#
+# coupling: if you add a file here, you probably want to add it in
+# semgrep.nix and the pro dockerfile
+FROM ghcr.io/astral-sh/uv:0.13.4 as uv
 
-FROM busybox:stable as semgrep-core-files
-WORKDIR /src/semgrep
+FROM scratch AS build-files
+WORKDIR /src
+COPY dune dune-project ./
+COPY cli/src/semgrep/semgrep_interfaces/ ./cli/src/semgrep/semgrep_interfaces/
+COPY interfaces ./interfaces
+COPY languages ./languages
+COPY libs ./libs
+COPY src ./src
 
-# copy over the entire semgrep repository
-COPY . .
-
-# remove files and folders that aren't necessary for the semgrep-core build
-# coupling: see the (dirs ...) directive in the toplevel dune file for the list
-# of directories containing OCaml code and which should not be added below
-RUN rm -rf cli .github .circleci Dockerfile
-
-# we *do* need the cli's semgrep_interfaces folder, however
-COPY cli/src/semgrep/semgrep_interfaces cli/src/semgrep/semgrep_interfaces
 
 ###############################################################################
 # Step1: build semgrep-core
 ###############################################################################
 
-# We're now using a simple alpine:3.19 image in the FROM below.
+# We're now using a simple alpine:3.xx image in the FROM below.
 # TL;DR this used to be too slow but our use of https://depot.dev to accelerate
 # our docker build made this a viable and simpler option.
 #
@@ -96,10 +101,14 @@ COPY cli/src/semgrep/semgrep_interfaces cli/src/semgrep/semgrep_interfaces
 #    add a package or we wanted to switch to a different OCaml version.
 #    Being able to control everything from a single Dockerfile is simpler.
 
-FROM alpine:3.19 as semgrep-core-container
+FROM alpine:3.23 AS semgrep-core-container
+
 
 # Install opam and basic build tools
-RUN apk add --no-cache bash build-base git make opam
+# https://github.com/ocaml/opam/issues/5186
+# Why we don't have --no-cache here
+# hadolint ignore=DL3019
+RUN apk update && apk add bash build-base git make rsync opam
 
 # coupling: if you modify the OCaml version there, you probably also need
 # to modify:
@@ -107,34 +116,61 @@ RUN apk add --no-cache bash build-base git make opam
 # - scripts/{osx-setup-for-release,setup-m1-builder}.sh
 # - doc/SEMGREP_CORE_CONTRIBUTING.md
 # - https://github.com/Homebrew/homebrew-core/blob/master/Formula/semgrep.rb
-#TODO: switch to 5.2.0 at some point
-RUN opam init --disable-sandboxing -v && opam switch create 4.14.0 -v
-
 # Install semgrep-core build dependencies
 WORKDIR /src/semgrep
-# Just copy enough so that the `make install-xxx` below can work
-COPY --from=semgrep-core-files /src/semgrep/Makefile ./Makefile
-COPY --from=semgrep-core-files /src/semgrep/scripts ./scripts
-COPY --from=semgrep-core-files /src/semgrep/semgrep.opam ./semgrep.opam
-COPY --from=semgrep-core-files /src/semgrep/libs/ocaml-tree-sitter-core/tree-sitter.opam ./libs/ocaml-tree-sitter-core/tree-sitter.opam
-COPY --from=semgrep-core-files /src/semgrep/dev ./dev
 
-# note that we do not run 'make install-deps-for-semgrep-core' here because it
-# configures and builds ocaml-tree-sitter-core too; here we are
-# just concerned about installing external packages to maximize docker caching.
-RUN make install-deps-ALPINE-for-semgrep-core &&\
-    make install-opam-deps
+# Copy just the Makefile (and its include) first so that initializing opam and
+# creating the switch stay in their own docker cache layers, independent of the
+# opam files, lockfiles, and sources copied below. Creating the switch (which
+# builds the compiler) is one of the most expensive steps of the build.
+COPY Makefile cygwin-env.mk tree-sitter-config.mk tree-sitter-config.sh ./
+
+# Initialize opam with our pinned opam-repository (containers can't use the
+# bubblewrap sandbox), then create the switch and install our fork of the
+# compiler ('make switch' runs 'make pin-ocaml-fork').
+RUN make opam-init OPAM_INIT_FLAGS=--disable-sandboxing
+RUN make switch
+
+# Copy just what is needed for make install-deps below to work to maximize
+# docker cache hit as building and installing all the opam packages
+# is what takes the most time in the docker build.
+#
+# coupling: if you change this you probably want to change this in semgrep-pro
+COPY semgrep.opam ./
+COPY dev/required.opam dev/
+COPY scripts/build-static-libcurl.sh scripts/
+COPY scripts/validate-compiler-sha.sh scripts/
+COPY scripts/pick-lockfile.sh scripts/
+COPY opam-lockfiles/ ./opam-lockfiles
+COPY libs/ocaml-tree-sitter-semgrep/core libs/ocaml-tree-sitter-semgrep/core
+COPY cli/src/semgrep/semgrep_interfaces cli/src/semgrep/semgrep_interfaces
+COPY dune-project ./
+
+RUN make install-deps
+
+# List the dependencies we've installed and their versions
+RUN opam list
+
+# Copy over the core files needed for compilation
+COPY --from=build-files /src .
+# Docker struggles to copy symlinks, so let's just make it
+RUN ln -s _build/install/default/bin bin
+
+# Baked into semgrep-core as Git_info.commit (shown by -version). The
+# build context has no .git, so the binary cannot derive the SHA itself.
+# Declared here (after install-deps) so it does not re-key that layer.
+ARG VCS_REF_HEAD_REVISION
+ENV SEMGREP_GIT_COMMIT=${VCS_REF_HEAD_REVISION}
 
 # Compile (and minimal test) semgrep-core
-COPY --from=semgrep-core-files /src/semgrep ./
+RUN opam exec -- make core
 
-# Let's build just semgrep-core
-#alt: use 'opam exec -- ...' instead of eval
-RUN make install-deps-for-semgrep-core &&\
-    eval "$(opam env)" &&\
-    make minimal-build &&\
-    # Sanity check
-    /src/semgrep/_build/default/src/main/Main.exe -version
+# Sanity check
+RUN ./bin/semgrep-core -version
+RUN ./scripts/validate-compiler-sha.sh bin/semgrep-core
+
+# Install pyro-caml for profiling
+RUN opam exec -- make install-pyro-caml
 
 ###############################################################################
 # Step2: Combine the Python wrapper (pysemgrep) and semgrep-core binary
@@ -144,13 +180,15 @@ RUN make install-deps-for-semgrep-core &&\
 # Start from scratch with a fresh Alpine image. We used to use
 # `python:3.11-alpine` but want to avoid shipping a bunch of unneeded Python
 # packages in our production image. Instead we'll install exactly what we need.
-#
-# TODO: Update beyond Alpine 3.19 to pick up Python versions newer than 3.11
 
 #coupling: the 'semgrep-oss' name is used in 'make build-docker'
-FROM alpine:3.19 AS semgrep-oss
+#coupling: if you change this alpine version it might be good to change the
+# previous stage to the same version, and to change the alpine version in the workflows
+FROM alpine:3.23 AS semgrep-oss
 
 WORKDIR /pysemgrep
+
+COPY scripts/validate-system-ca.py /tmp/validate-system-ca.py
 
 # Update to the latest packages for the base image. This allows to get CVE
 # fixes ASAP, without waiting for new builds of the base image.
@@ -191,8 +229,11 @@ RUN apk upgrade --no-cache && \
 # - curl: useful to connect to some webhooks
 # - python3: to run pysemgrep
 # - py3-setuptools: necessary runtime dependency for opentelemetry
+	'ca-certificates>=20261020-r0' \
+	'ca-certificates-bundle>=20261020-r0' \
 	git git-lfs openssh \
 	bash jq curl python3 py3-setuptools
+RUN python3 /tmp/validate-system-ca.py && rm /tmp/validate-system-ca.py
 
 # We just need the Python code in cli/.
 # The semgrep-core stuff would be copied from the other container
@@ -223,12 +264,16 @@ RUN apk add --no-cache --virtual=.build-deps build-base make py3-pip && \
 
 # Get semgrep-core from step1
 COPY --from=semgrep-core-container /src/semgrep/_build/default/src/main/Main.exe /usr/local/bin/semgrep-core
-
+# Get pyro-caml from step1
+COPY --from=semgrep-core-container /root/.opam/5.4.0/bin/pyro-caml /usr/bin/pyro-caml
 # We don't need the python source anymore; 'pip install ...' above
 # installed them under /usr/local/lib/python3.xx/site-packages/semgrep/
 RUN ln -s semgrep-core /usr/local/bin/osemgrep && rm -rf /pysemgrep
 
-
+###############################################################################
+# Step2 bis: setup the docker image
+###############################################################################
+# In theory we could do this in a different container
 
 # Let the user know how their container was built
 COPY Dockerfile /Dockerfile
@@ -279,6 +324,11 @@ RUN printf "[safe]\n	directory = /src"  > ~semgrep/.gitconfig && \
 # will show the help text, but
 #   docker run -it semgrep/semgrep /bin/bash
 # will let users bring up a bash session.
+#
+# This stage intentionally stays as root so `docker run -v ${PWD}:/src ...`
+# works against host-owned bind mounts; the `nonroot` stage below is what
+# ships to users who want a non-root image.
+# nosemgrep: dockerfile.security.missing-user.missing-user
 CMD ["semgrep", "--help"]
 LABEL maintainer="support@semgrep.com"
 
@@ -298,10 +348,18 @@ FROM semgrep-oss AS semgrep-cli
 # locally, set the SEMGREP_APP_TOKEN environment variable and then run:
 #
 # $ docker build --secret id=SEMGREP_APP_TOKEN ...
-RUN --mount=type=secret,id=SEMGREP_APP_TOKEN SEMGREP_APP_TOKEN=$(cat /run/secrets/SEMGREP_APP_TOKEN) semgrep install-semgrep-pro --debug
-
-# Clear out any detritus from the pro install (especially credentials)
-RUN rm -rf /root/.semgrep
+#
+# The install and the credentials cleanup must run in the same RUN so the
+# token-bearing ~/.semgrep/settings.yml never lands in a committed layer.
+RUN --mount=type=secret,id=SEMGREP_APP_TOKEN \
+    rc=0; \
+    if [ -f /run/secrets/SEMGREP_APP_TOKEN ]; then \
+        SEMGREP_APP_TOKEN=$(cat /run/secrets/SEMGREP_APP_TOKEN) semgrep install-semgrep-pro --debug || rc=$?; \
+    else \
+        echo "SEMGREP_APP_TOKEN secret not set, skipping semgrep-pro install" >&2; \
+    fi; \
+    rm -rf /root/.semgrep; \
+    exit ${rc}
 
 # This was the final step! This is what we ship to users!
 
@@ -339,7 +397,9 @@ USER semgrep
 # don't need to use this.
 
 #coupling: 'semgrep-wheel' is used in build-test-manylinux-aarch64.jsonnet
+#TODO: we should switch to alpine 3.23 for consistency with the other stages
 FROM python:3.11-alpine AS semgrep-wheel
+COPY --from=uv /uv /uvx /bin/
 
 WORKDIR /semgrep
 
@@ -348,6 +408,9 @@ WORKDIR /semgrep
 #  - libffi-dev is needed for installing Python dependencies in
 #    scripts/build-wheels.sh on arm64
 RUN apk add --no-cache build-base zip bash libffi-dev
+
+# Copy in the README, which the wheels include
+COPY README.md ./README.md
 
 # Copy in the CLI
 COPY cli ./cli
@@ -358,21 +421,41 @@ COPY --from=semgrep-core-container /src/semgrep/_build/default/src/main/Main.exe
 # Copy in scripts folder
 COPY scripts/ ./scripts/
 
-# Build the source distribution and binary wheel, validate that the wheel
-# installs correctly. We're only checking the musllinux wheel because this is
-# an Alpine container. It should not be a problem because the content of the
-# wheels are identical.
-RUN scripts/build-wheels.sh && scripts/validate-wheel.sh cli/dist/*musllinux*.whl
+# Build the source distribution and binary wheel.
+RUN scripts/build-wheels.sh
 
-###############################################################################
-# Other target: performance testing
-###############################################################################
+FROM scratch AS semgrep-wheel-binaries
 
-# Build target that exposes the performance benchmark tests in perf/ for
-# use in running performance benchmarks from a test build container, e.g., on PRs
-#coupling: the 'performance-tests' name is used in tests.jsonnet
-FROM semgrep-cli AS performance-tests
-COPY perf /semgrep/perf
-RUN apk add --no-cache make
-WORKDIR /semgrep/perf
-ENTRYPOINT ["make"]
+COPY --from=semgrep-wheel /semgrep/cli/dist/*musllinux*.whl /
+
+FROM semgrep-core-container AS semgrep-core-test
+
+# Git repo is need for tests
+RUN git init
+
+
+# Copy over files needed for the core tests
+COPY cli/tests/default/e2e/targets/ls ./cli/tests/default/e2e/targets/ls
+COPY scripts/run-core-test ./scripts/run-core-test
+COPY scripts/make-symlinks ./scripts/make-symlinks
+COPY tests ./tests
+#Docker struggles to copy symlinks, so let's just make it
+RUN ln -s _build/default/src/tests/test.exe test
+
+RUN opam exec -- make build-core-test
+
+CMD ["opam", "exec", "--", "make", "test"]
+
+# Let's actually use latest so we know immediately if we're broken on latest
+#hadolint ignore=DL3007
+FROM ubuntu:latest AS semgrep-wheel-test
+COPY --from=semgrep-wheel-binaries / /wheels
+
+RUN apt-get update \
+    && apt-get install --no-install-recommends -y python3-pip \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN pip install --break-system-packages --no-cache-dir /wheels/*.whl
+RUN semgrep --version
+#hadolint ignore=SC2016,DL4006
+RUN echo '1==1' | semgrep -l python -e '$X == $X' -

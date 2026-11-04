@@ -1,10 +1,12 @@
 {
+  "engine_requested": "OSS",
   "errors": [],
   "paths": {
     "scanned": [
       "targets/autofix/java-string-wrap.java"
     ]
   },
+  "profiling_results": [],
   "results": [
     {
       "check_id": "rules.autofix.wrap-strings",
@@ -62,5 +64,6 @@
     }
   ],
   "skipped_rules": [],
+  "time": "<masked in tests>",
   "version": "0.42"
 }

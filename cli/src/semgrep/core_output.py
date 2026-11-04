@@ -1,3 +1,15 @@
+#
+# Copyright (c) 2021-2025 Semgrep Inc.
+#
+# This library is free software; you can redistribute it and/or
+# modify it under the terms of the GNU Lesser General Public License
+# version 2.1 as published by the Free Software Foundation.
+#
+# This library is distributed in the hope that it will be useful, but
+# WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the file
+# LICENSE for more details.
+#
 """
 This file encapsulates classes necessary in parsing semgrep-core
 json output into a typed object.
@@ -88,13 +100,12 @@ def core_error_to_semgrep_error(err: out.CoreError) -> SemgrepCoreError:
 
 
 def core_matches_to_rule_matches(
-    rules: List[Rule], res: out.CoreOutput
+    rules: List[Rule], res: out.CoreOutput, fips_mode: bool
 ) -> Dict[Rule, List[RuleMatch]]:
     """
-    Convert core_match objects into RuleMatch objects that the rest of the codebase
-    interacts with.
-
-    For now assumes that all matches encapsulated by this object are from the same rule
+    Converts `CoreMatch`s into `RuleMatch`es that the rest of the codebase
+    interacts with, taking into account whether we are running in a
+    FIPS-controlled environment.
     """
     rule_table = {rule.id: rule for rule in rules}
 
@@ -108,23 +119,15 @@ def core_matches_to_rule_matches(
             metadata = copy.deepcopy(metadata)
             metadata.update(match.extra.metadata.value)
 
-        if match.extra.fix is not None:
-            fix = match.extra.fix
-        else:
-            fix = None
-
         return RuleMatch(
             match=match,
-            extra=match.extra.to_json(),
             message=message,
             metadata=metadata,
             severity=match.extra.severity if match.extra.severity else rule.severity,
-            fix=fix,
+            fix=match.extra.fix,
+            fips_mode=fips_mode,
         )
 
-    # TODO: Dict[out.RuleId, RuleMatches]
-    # We used to deduplicate by `cli_unique_key` here, but now no longer need to,
-    # because it is deduplicated in semgrep-core as core_unique_key!
     findings: Dict[Rule, RuleMatches] = {rule: RuleMatches(rule) for rule in rules}
     for match in res.results:
         rule_match = convert_to_rule_match(match)
@@ -133,5 +136,5 @@ def core_matches_to_rule_matches(
 
     # Sort results so as to guarantee the same results across different
     # runs. Results may arrive in a different order due to parallelism
-    # (-j option).
+    # (-j option)
     return {rule: sorted(matches) for rule, matches in findings.items()}

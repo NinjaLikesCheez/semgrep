@@ -4,6 +4,7 @@
 
 === stdout - plain
 {
+  "engine_requested": "OSS",
   "errors": [],
   "paths": {
     "scanned": [
@@ -11,6 +12,7 @@
       "targets/dependency_aware/pnpm-workspaces/pnpm-lock.yaml"
     ]
   },
+  "profiling_results": [],
   "results": [
     {
       "check_id": "rules.dependency_aware.js-pnpm-sca",
@@ -76,7 +78,7 @@
       "end": {
         "col": 1,
         "line": 120,
-        "offset": 1
+        "offset": 0
       },
       "extra": {
         "engine_kind": "OSS",
@@ -113,11 +115,12 @@
       "start": {
         "col": 1,
         "line": 120,
-        "offset": 1
+        "offset": 0
       }
     }
   ],
   "skipped_rules": [],
+  "time": "<masked in tests>",
   "version": "0.42"
 }
 === end of stdout - plain
@@ -128,17 +131,17 @@
 ┌─────────────┐
 │ Scan Status │
 └─────────────┘
-  Scanning 2 files tracked by git with 0 Code rules, 2 Supply Chain rules:
+  Scanning 2 files tracked by git with 2 Supply Chain rules:
 
 
   CODE RULES
-  Nothing to scan.
+  No code rules to run.
 
   SUPPLY CHAIN RULES
 
-  Ecosystem   Rules   Files   Lockfiles
- ─────────────────────────────────────────────────────────────────────────────────────
-  Npm             2       1   targets/dependency_aware/pnpm-workspaces/pnpm-lock.yaml
+  Dependency Sources                                        Resolution Method   Ecosystem   Dependencies   Rules
+ ────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  targets/dependency_aware/pnpm-workspaces/pnpm-lock.yaml   Lockfile            Npm         10                 2
 
 
   Analysis   Rules
@@ -150,7 +153,12 @@
 ┌──────────────┐
 │ Scan Summary │
 └──────────────┘
-
+✅ Scan completed successfully.
+ • Findings: 2 (1 blocking)
+ • Rules run: 2
+ • Targets scanned: 2
+ • Parsed lines: ~100.0%
+ • No ignore information available
 Ran 2 rules on 2 files: 2 findings.
 
 === end of stderr - plain

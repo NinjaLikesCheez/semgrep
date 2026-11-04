@@ -1,3 +1,15 @@
+(*
+   Copyright (c) 2022-2025 Semgrep Inc.
+
+   This library is free software; you can redistribute it and/or
+   modify it under the terms of the GNU Lesser General Public License
+   version 2.1 as published by the Free Software Foundation.
+
+   This library is distributed in the hope that it will be useful, but
+   WITHOUT ANY WARRANTY; without even the implied warranty of
+   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the file
+   LICENSE for more details.
+*)
 let unit_str ?(pad = false) count str =
   let str = if count <> 1 then str ^ "s" else if pad then str ^ " " else str in
   Printf.sprintf "%d %s" count str
@@ -28,13 +40,49 @@ let safe_sub str virtual_start virtual_sublen =
   (* It should be safe now *)
   String.sub str real_start real_sublen
 
-let show ?(max_len = 200) str =
+let show ?(max_len = 200) ?(keep_end = false) str =
   let len = String.length str in
   if len > max_len then
-    Printf.sprintf "%S (%i bytes)"
-      (safe_sub str 0 max_len ^ "...")
-      (String.length str)
+    if keep_end then
+      Printf.sprintf "(%i bytes) %S" (String.length str)
+        ("..." ^ safe_sub str (len - max_len) len)
+    else
+      Printf.sprintf "%S (%i bytes)"
+        (safe_sub str 0 max_len ^ "...")
+        (String.length str)
   else Printf.sprintf "%S" str
+
+(* Adapted from Testo Style.truncate_text: https://github.com/semgrep/testo/blob/c1d8c15007f29f37a4c781516676cf8721133e74/util/lib/Style.ml#L82-L118 *)
+let show_ends ?(max_len = 200) str =
+  let orig_len = String.length str in
+  let max_len = max 0 max_len in
+  let truncated =
+    if orig_len <= max_len then str
+    else
+      (* Let's keep the beginning and the end of the text since they're
+          more likely to contain useful information than the middle.
+
+          We don't care about breaking multibyte characters.
+          UTF-8 decoders are expected to recover from broken multibyte
+          sequences. *)
+      let head_len = max_len / 2 in
+      let tail_len = max_len - head_len in
+      if head_len <= 0 || tail_len <= 0 then str
+      else
+        let mid_len = orig_len - head_len - tail_len in
+        let head = safe_sub str 0 head_len in
+        let tail = safe_sub str (head_len + mid_len) tail_len in
+        let mid =
+          Printf.sprintf "\n###### [hidden: %d bytes] ######\n" mid_len
+        in
+        let warning =
+          Printf.sprintf
+            "###### Warning: bytes %d-%d below were omitted ######\n" head_len
+            (head_len + mid_len - 1)
+        in
+        String.concat "" [ warning; head; mid; tail ]
+  in
+  Printf.sprintf "%S" truncated
 
 let trim_cr s =
   let len = String.length s in
@@ -81,7 +129,7 @@ let lines_of_range (start_offset, end_offset) str =
       String.sub str start_line_offset (end_line_offset - start_line_offset)
     in
     let lines = String.split_on_char '\n' substr in
-    List_.map trim_cr lines
+    List.map trim_cr lines
 
 let is_capitalized s =
   String.length s <> 0
@@ -97,3 +145,7 @@ let truncate_with_message max_len fmt s =
     let trunc_s = Str.first_chars s max_len in
     fmt trunc_s truncated_length
   else s
+
+let take_last ~max_len s =
+  let len = String.length s in
+  if len > max_len then "..." ^ safe_sub s (len - max_len) max_len else s

@@ -11,6 +11,7 @@
 
     poetry.lock
    ❯❯❱ supply-chain1
+          ❰❰ Blocking ❱❱
           found a dependency
 
            18┆ name = "python-dateutil"
@@ -36,25 +37,38 @@
 ┌─────────────┐
 │ Scan Status │
 └─────────────┘
-  Scanning 4 files tracked by git with 0 Code rules, 1 Supply Chain rule:
+  Scanning 4 files tracked by git with 1 Supply Chain rule:
 
 
   CODE RULES
-  Nothing to scan.
+  No code rules to run.
 
   SUPPLY CHAIN RULES
-  Scanning 1 file.
+
+  Dependency Sources   Resolution Method   Ecosystem   Dependencies   Rules
+ ───────────────────────────────────────────────────────────────────────────
+  poetry.lock          Lockfile            Pypi        3                  1
+  yarn.lock            Lockfile            Npm         1                  0
+
+
+  Analysis   Rules
+ ──────────────────
+  Basic          1
+
   Uploading scan results
   Finalizing scan
 
 ┌──────────────┐
 │ Scan Summary │
 └──────────────┘
-Some files were skipped or only partially analyzed.
-  Scan was limited to files tracked by git.
-
+✅ CI scan completed successfully.
+ • Findings: 1 (1 blocking)
+ • Rules run: 1
+ • Targets scanned: 2
+ • Parsed lines: ~100.0%
+ • Scan was limited to files tracked by git
+ • For a detailed list of skipped files and lines, run semgrep with the --verbose flag
 CI scan completed successfully.
-  Found 1 finding (1 blocking) from 1 rule.
   View results in Semgrep Cloud Platform:
     https://semgrep.dev/orgs/org_name/findings?repo=local_scan/checkout_project_name&ref=some/branch-name
     https://semgrep.dev/orgs/org_name/supply-chain/vulnerabilities?repo=local_scan/checkout_project_name&ref=some/branch-name

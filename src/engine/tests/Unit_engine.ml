@@ -1,3 +1,15 @@
+(*
+   Copyright (c) 2022-2025 Semgrep Inc.
+
+   This library is free software; you can redistribute it and/or
+   modify it under the terms of the GNU Lesser General Public License
+   version 2.1 as published by the Free Software Foundation.
+
+   This library is distributed in the hope that it will be useful, but
+   WITHOUT ANY WARRANTY; without even the implied warranty of
+   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the file
+   LICENSE for more details.
+*)
 open Common
 open Fpath_.Operators
 module R = Rule
@@ -76,9 +88,10 @@ let full_lang_info =
     (Lang.Clojure, "clojure", ".clj");
     (Lang.Xml, "xml", ".xml");
     (Lang.Dart, "dart", ".dart");
-    (Lang.Ql, "ql", ".ql");
     (Lang.Move_on_sui, "move_on_sui", ".move");
     (Lang.Move_on_aptos, "move_on_aptos", ".move");
+    (Lang.Fga, "fga", ".fga");
+    (Lang.Objc, "objc", ".m");
   ]
 
 (*****************************************************************************)
@@ -104,15 +117,12 @@ let full_lang_info =
 *)
 let pack_tests_for_lang
     ~(lang_test_fn :
-       polyglot_pattern_path:Fpath.t ->
-       Fpath.t list ->
-       Language.t ->
-       Testo.t list) ~test_pattern_path ~polyglot_pattern_path lang dir ext =
+       polyglot_pattern_path:Fpath.t -> Fpath.t list -> Lang.t -> Testo.t list)
+    ~test_pattern_path ~polyglot_pattern_path lang dir ext =
   Testo.categorize
     (spf "%s" (Lang.show lang))
     (let dir = test_pattern_path / dir in
-     let files = Common2.glob (spf "%s/*%s" !!dir ext) |> Fpath_.of_strings in
-
+     let files = Common2.glob Fpath.((dir / "*") + ext) in
      lang_test_fn ~polyglot_pattern_path files lang)
 
 (*****************************************************************************)
@@ -245,6 +255,8 @@ let language_exceptions =
     (Lang.Jsonnet, [ "dots_stmts"; "deep_exprstmt"; "dots_nested_stmts" ]);
     (* TODO *)
     (Lang.Clojure, [ "deep_exprstmt"; "dots_nested_stmts" ]);
+    (* good boy *)
+    (Lang.Dart, []);
   ]
 
 (* TODO: infer dir and ext from lang using Lang helper functions *)
@@ -261,22 +273,21 @@ let make_maturity_tests ?(lang_exn = language_exceptions) lang dir ext maturity
      (* sanity check exns *)
      exns
      |> List.iter (fun base ->
-            let path = dir / (base ^ ext) in
-            if Sys.file_exists !!path then
-              failwith
-                (spf "%s actually exist! remove it from exceptions" !!path));
-     let features = Common2.minus_set features exns in
+         let path = dir / (base ^ ext) in
+         if Sys_.Fpath.exists path then
+           failwith (spf "%s actually exist! remove it from exceptions" !!path));
+     let features = List.filter (fun x -> not (List.mem x exns)) features in
      features
-     |> List_.map (fun base ->
-            Testo.create ~tags:(Test_tags.tags_of_lang lang) base (fun () ->
-                let path = dir / (base ^ ext) in
-                (* if it's a does-not-apply (NA) case, consider adding it
-                 * to language_exceptions above
-                 *)
-                if not (Sys.file_exists !!path) then
-                  failwith
-                    (spf "missing test file %s for maturity %s" !!path
-                       (show_maturity_level maturity)))))
+     |> List.map (fun base ->
+         Testo.create ~tags:(Test_tags.tags_of_lang lang) base (fun () ->
+             let path = dir / (base ^ ext) in
+             (* if it's a does-not-apply (NA) case, consider adding it
+              * to language_exceptions above
+              *)
+             if not (Sys_.Fpath.exists path) then
+               failwith
+                 (spf "missing test file %s for maturity %s" !!path
+                    (show_maturity_level maturity)))))
 
 let maturity_tests () =
   (* coupling: https://semgrep.dev/docs/language-support/ *)
@@ -293,6 +304,7 @@ let maturity_tests () =
       make_maturity_tests Lang.Ruby "ruby" ".rb" GA;
       make_maturity_tests Lang.Ts "ts" ".ts" GA;
       make_maturity_tests Lang.Scala "scala" ".scala" GA;
+      make_maturity_tests Lang.Dart "dart" ".dart" GA;
       (* Beta *)
       make_maturity_tests Lang.Hack "hack" ".hack" Beta;
       make_maturity_tests Lang.Kotlin "kotlin" ".kt" Beta;
@@ -318,7 +330,7 @@ let maturity_tests () =
       make_maturity_tests Lang.Jsonnet "jsonnet" ".jsonnet" Experimental;
       make_maturity_tests Lang.Clojure "clojure" ".clj" Experimental
       (* Not even experimental yet *)
-      (* HTML, XML, Dart *);
+      (* HTML, XML *);
     ]
 
 (*****************************************************************************)
@@ -366,11 +378,8 @@ let match_pattern ~lang ~hook ~file ~pattern ~fix =
         failwith
           (spf "fail to parse %s (exn = %s)" !!file (Common.exn_to_s exn))
   in
-  let equiv = [] in
-  Match_patterns.check ~hook
-    (Rule_options.default, equiv)
-    [ rule ]
-    (file, File file, lang, ast)
+  Match_patterns.check ~hook Rule_options.default [ rule ]
+    (file, Unfilterable_target_file file, lang, ast)
 
 (*
    For each input file with the language's extension, locate a pattern file
@@ -380,37 +389,37 @@ let match_pattern ~lang ~hook ~file ~pattern ~fix =
 *)
 let regression_tests_for_lang ~polyglot_pattern_path files lang =
   files
-  |> List_.map (fun file ->
-         Testo.create ~tags:(Test_tags.tags_of_lang lang) (Fpath.basename file)
-           (fun () ->
-             let sgrep_file =
-               match
-                 Test_utils.related_file_of_target ~polyglot_pattern_path
-                   ~ext:"sgrep" file
-               with
-               | Ok file -> file
-               | Error msg -> failwith msg
-             in
-             let pattern = UFile.read_file sgrep_file in
+  |> List.map (fun file ->
+      Testo.create ~tags:(Test_tags.tags_of_lang lang) (Fpath.basename file)
+        (fun () ->
+          let sgrep_file =
+            match
+              Test_utils.related_file_of_target ~polyglot_pattern_path
+                ~ext:"sgrep" file
+            with
+            | Ok file -> file
+            | Error msg -> failwith msg
+          in
+          let pattern = UFile.read_file sgrep_file in
 
-             (* old: semgrep-core used to support user-defined
-                * equivalences, but the feature has been now deprecated.
-                *
-                * (* Python == is not the same than !(==) *)
-                * if lang <> Lang.Python then
-                *   Parse_equivalences.parse
-                *     (Filename.concat data_path "basic_equivalences.yml")
-                * else []
-             *)
-             let matches = ref [] in
-             match_pattern ~lang
-               ~hook:(fun pm -> Stack_.push (TCM.location_of_pm pm) matches)
-               ~file ~pattern ~fix:NoFix
-             |> ignore;
-             let actual = !matches in
-             let expected = TCM.expected_error_lines_of_files [ file ] in
-             TCM.compare_actual_to_expected_for_alcotest ~to_location:Fun.id
-               actual expected))
+          (* old: semgrep-core used to support user-defined
+           * equivalences, but the feature has been now deprecated.
+           *
+           * (* Python == is not the same than !(==) *)
+           * if lang <> Lang.Python then
+           *   Parse_equivalences.parse
+           *     (Filename.concat data_path "basic_equivalences.yml")
+           * else []
+           *)
+          let matches = ref [] in
+          match_pattern ~lang
+            ~hook:(fun pm -> Stack_.push (TCM.location_of_pm pm) matches)
+            ~file ~pattern ~fix:NoFix
+          |> ignore;
+          let actual = !matches in
+          let expected = TCM.expected_error_lines_of_files [ file ] in
+          TCM.compare_actual_to_expected_for_alcotest ~to_location:Fun.id actual
+            expected))
 
 (* used in Unit_pro_languages.ml *)
 let make_lang_regression_tests ~test_pattern_path ~polyglot_pattern_path
@@ -418,9 +427,9 @@ let make_lang_regression_tests ~test_pattern_path ~polyglot_pattern_path
   (* TODO: infer dir and ext from lang using Lang helper functions *)
   let lang_tests =
     lang_data
-    |> List_.map (fun (lang, dir, ext) ->
-           pack_tests_for_lang ~lang_test_fn:regression_tests_for_lang
-             ~test_pattern_path ~polyglot_pattern_path lang dir ext)
+    |> List.map (fun (lang, dir, ext) ->
+        pack_tests_for_lang ~lang_test_fn:regression_tests_for_lang
+          ~test_pattern_path ~polyglot_pattern_path lang dir ext)
   in
   Testo.categorize_suites "sgrep patterns" lang_tests
 
@@ -428,25 +437,24 @@ let lang_regression_tests ~polyglot_pattern_path =
   let test_pattern_path = tests_path_patterns in
   let regular_tests =
     full_lang_info
-    |> List_.map (fun (lang, dir, ext) ->
-           pack_tests_for_lang ~lang_test_fn:regression_tests_for_lang
-             ~test_pattern_path ~polyglot_pattern_path lang dir ext)
+    |> List.map (fun (lang, dir, ext) ->
+        pack_tests_for_lang ~lang_test_fn:regression_tests_for_lang
+          ~test_pattern_path ~polyglot_pattern_path lang dir ext)
   in
   let irregular_tests =
     [
       Testo.categorize "Typescript on Javascript (no JSX)"
         (let dir = test_pattern_path / "js" in
-         let files = Common2.glob (spf "%s/*.js" !!dir) in
+         let files = Common2.glob (dir / "*.js") in
          let files =
-           List_.exclude (fun s -> s =~ ".*xml" || s =~ ".*jsx") files
-           |> Fpath_.of_strings
+           List_.exclude (fun s -> !!s =~ ".*xml" || !!s =~ ".*jsx") files
          in
 
          let lang = Lang.Ts in
          regression_tests_for_lang ~polyglot_pattern_path files lang);
       Testo.categorize "C++ on C tests"
         (let dir = test_pattern_path / "c" in
-         let files = Common2.glob (spf "%s/*.c" !!dir) |> Fpath_.of_strings in
+         let files = Common2.glob (dir / "*.c") in
 
          let lang = Lang.Cpp in
          regression_tests_for_lang ~polyglot_pattern_path files lang);
@@ -460,70 +468,69 @@ let lang_regression_tests ~polyglot_pattern_path =
 
 let autofix_tests_for_lang ~polyglot_pattern_path files lang =
   files
-  |> List_.map (fun file ->
-         Testo.create ~tags:(Test_tags.tags_of_lang lang) (Fpath.basename file)
-           (fun () ->
-             let sgrep_file =
-               match
-                 Test_utils.related_file_of_target ~polyglot_pattern_path
-                   ~ext:"sgrep" file
-               with
-               | Ok file -> file
-               | Error msg -> failwith msg
-             in
-             let pattern = UFile.read_file sgrep_file in
-             let fix =
-               match
-                 Test_utils.related_file_of_target ~polyglot_pattern_path
-                   ~ext:"fix" file
-               with
-               | Ok fix_file -> Fix (UFile.read_file fix_file)
-               | Error _ -> (
-                   (* A poor man's configuration format.
+  |> List.map (fun file ->
+      Testo.create ~tags:(Test_tags.tags_of_lang lang) (Fpath.basename file)
+        (fun () ->
+          let sgrep_file =
+            match
+              Test_utils.related_file_of_target ~polyglot_pattern_path
+                ~ext:"sgrep" file
+            with
+            | Ok file -> file
+            | Error msg -> failwith msg
+          in
+          let pattern = UFile.read_file sgrep_file in
+          let fix =
+            match
+              Test_utils.related_file_of_target ~polyglot_pattern_path
+                ~ext:"fix" file
+            with
+            | Ok fix_file -> Fix (UFile.read_file fix_file)
+            | Error _ -> (
+                (* A poor man's configuration format.
                       This can either be two lines, the regex to match
                       and the replacement content (one line),
                       or 3+ lines, the regex to match, the number of matches
                       to replace, and the replacement text (possibly multiline)
                    *)
-                   match
-                     Test_utils.related_file_of_target ~polyglot_pattern_path
-                       ~ext:"fix-regex" file
-                   with
-                   | Ok fix_regex_file -> (
-                       match UFile.cat fix_regex_file with
-                       | [ l1; l2 ] -> FixRegex (l1, None, l2)
-                       | l1 :: l2 :: l3 :: rest ->
-                           FixRegex
-                             ( l1,
-                               Some (int_of_string l2),
-                               String.concat "\n" (l3 :: rest) )
-                       | _ ->
-                           failwith
-                             (Common.spf
-                                "found fix-regex file %s with invalid number \
-                                 of lines"
-                                (Fpath.to_string fix_regex_file)))
-                   | Error _ ->
-                       failwith
-                         (Common.spf "no fix file found for autofix test %s"
-                            (Fpath.to_string file)))
-             in
+                match
+                  Test_utils.related_file_of_target ~polyglot_pattern_path
+                    ~ext:"fix-regex" file
+                with
+                | Ok fix_regex_file -> (
+                    match UFile.cat fix_regex_file with
+                    | [ l1; l2 ] -> FixRegex (l1, None, l2)
+                    | l1 :: l2 :: l3 :: rest ->
+                        FixRegex
+                          ( l1,
+                            Some (int_of_string l2),
+                            String.concat "\n" (l3 :: rest) )
+                    | _ ->
+                        failwith
+                          (Common.spf
+                             "found fix-regex file %s with invalid number of \
+                              lines"
+                             (Fpath.to_string fix_regex_file)))
+                | Error _ ->
+                    failwith
+                      (Common.spf "no fix file found for autofix test %s"
+                         (Fpath.to_string file)))
+          in
 
-             let matches =
-               match_pattern ~lang ~hook:(fun _ -> ()) ~file ~pattern ~fix
-             in
-             match fix with
-             | NoFix -> ()
-             | _ ->
-                 Test_utils.compare_fixes ~polyglot_pattern_path ~file matches))
+          let matches =
+            match_pattern ~lang ~hook:(fun _ -> ()) ~file ~pattern ~fix
+          in
+          match fix with
+          | NoFix -> ()
+          | _ -> Test_utils.compare_fixes ~polyglot_pattern_path ~file matches))
 
 let lang_autofix_tests ~polyglot_pattern_path =
   let test_pattern_path = tests_path_autofix in
   let lang_tests =
     full_lang_info
-    |> List_.map (fun (lang, dir, ext) ->
-           pack_tests_for_lang ~lang_test_fn:autofix_tests_for_lang
-             ~test_pattern_path ~polyglot_pattern_path lang dir ext)
+    |> List.map (fun (lang, dir, ext) ->
+        pack_tests_for_lang ~lang_test_fn:autofix_tests_for_lang
+          ~test_pattern_path ~polyglot_pattern_path lang dir ext)
   in
   Testo.categorize_suites "autofix" lang_tests
 
@@ -535,53 +542,55 @@ let eval_regression_tests () =
   [
     t "Eval_generic" (fun () ->
         let dir = tests_path / "eval" in
-        let files = Common2.glob (spf "%s/*.json" !!dir) in
+        let files = Common2.glob (dir / "*.json") in
         files
         |> List.iter (fun file ->
-               let env, code = Eval_generic.parse_json file in
-               let res = Eval_generic.eval env code in
-               Alcotest.(check bool)
-                 (spf "%s should evaluate to true" file)
-                 true
-                 (Eval_generic.Bool true =*= res)));
+            let env, code = Eval_generic.parse_json !!file in
+            let res = Eval_generic.eval env code in
+            Alcotest.(check bool)
+              (spf "%s should evaluate to true" !!file)
+              true
+              (Eval_generic.Bool true =*= res)));
   ]
 
 (*****************************************************************************)
 (* Analyze_rule (filter irrelevant rules) tests *)
 (*****************************************************************************)
 
-let test_irrelevant_rule rule_file target_file =
-  let cache = Some (Hashtbl.create 101) in
+let test_irrelevant_rule_intrafile rule_file target_file =
   (* TODO: fail more gracefully for invalid rules? *)
   let rules = Parse_rule.parse rule_file |> Result.get_ok in
   rules
   |> List.iter (fun rule ->
-         match Analyze_rule.regexp_prefilter_of_rule ~cache rule with
-         | None ->
-             Alcotest.fail
-               (spf "Rule %s: no regex prefilter formula"
-                  (Rule_ID.to_string (fst rule.id)))
-         | Some (f, func) ->
-             let content = UFile.read_file target_file in
-             let s = Semgrep_prefilter_j.string_of_formula f in
-             if func content then
-               Alcotest.fail
-                 (spf "Rule %s considered relevant by regex prefilter: %s"
-                    (Rule_ID.to_string (fst rule.id))
-                    s))
+      match Prefiltering.File.of_rule ~interfile:false rule with
+      | None ->
+          Alcotest.fail
+            (spf "Rule %s: no regex prefilter formula"
+               (Rule_ID.to_string (fst rule.id)))
+      | Some prefilter ->
+          let content = UFile.read_file target_file in
+          let s =
+            Prefiltering.Semgrep_prefilter_j.string_of_formula
+              (Prefiltering.File.to_semgrep_formula prefilter)
+          in
+          if Prefiltering.File.check prefilter content then
+            Alcotest.fail
+              (spf "Rule %s considered relevant by regex prefilter: %s"
+                 (Rule_ID.to_string (fst rule.id))
+                 s))
 
 let test_irrelevant_rule_file target_file =
   t (Fpath.basename target_file) (fun () ->
       let rules_file =
         let d, b, _e = Filename_.dbe_of_filename !!target_file in
         let candidate1 = Filename_.filename_of_dbe (d, b, "yaml") in
-        if Sys.file_exists candidate1 then Fpath.v candidate1
+        if Sys_.file_exists candidate1 then Fpath.v candidate1
         else
           failwith
             (spf "could not find target file for irrelevant rule %s"
                !!target_file)
       in
-      test_irrelevant_rule rules_file target_file)
+      test_irrelevant_rule_intrafile rules_file target_file)
 
 (* These tests test that semgrep with filter_irrelevant_rules correctly
    does not run files when they lack necessary strings.
@@ -590,18 +599,192 @@ let test_irrelevant_rule_file target_file =
    any files, place the rule/target pair in the rules folder but annotate
    in a comment that the test targets filter_irrelevant_rules to help
    future debuggers. *)
-let filter_irrelevant_rules_tests () =
+let filter_irrelevant_rules_tests =
   Testo.categorize "filter irrelevant rules"
     (let dir = tests_path / "irrelevant_rules" in
      let target_files =
-       Common2.glob (spf "%s/*" !!dir)
-       |> Fpath_.of_strings
+       Common2.glob (dir / "*")
        |> File_type.files_of_dirs_or_files (function
-            | File_type.Config File_type.Yaml -> false
-            | _ -> true (* TODO include .test.yaml*))
+         | File_type.Config File_type.Yaml -> false
+         | _ -> true (* TODO include .test.yaml*))
      in
      target_files
-     |> List_.map (fun target_file -> test_irrelevant_rule_file target_file))
+     |> List.map (fun target_file -> test_irrelevant_rule_file target_file))
+
+(*****************************************************************************)
+(* Regexp prefilter extraction tests *)
+(*****************************************************************************)
+
+(* Tests that we can extract literal string prefilters from regexes, which we
+   do for regex-only (LRegex) rules. See Prefiltering.Regexp_prefilter. *)
+let regexp_prefilter_tests =
+  let module F = Prefiltering.Formula in
+  let module P = Prefiltering.Predicate in
+  let check re (expected : P.t F.t option) =
+    t (spf "extract prefilter from /%s/" re) (fun () ->
+        let got = Prefiltering.Regexp_prefilter.required_substrings re in
+        let eq =
+          match (got, expected) with
+          | None, None -> true
+          | Some g, Some e -> F.equal P.equal g e
+          | Some _, None
+          | None, Some _ ->
+              false
+        in
+        if not eq then
+          let show = function
+            | None -> "None"
+            | Some f -> F.show P.pp f
+          in
+          Alcotest.failf "for /%s/: expected %s but got %s" re (show expected)
+            (show got))
+  in
+  let str s = F.pred (P.String { needle = s; case_sensitive = true }) in
+  let istr s = F.pred (P.String { needle = s; case_sensitive = false }) in
+  Testo.categorize "regexp prefilter extraction"
+    [
+      (* The motivating case: an AWS-style key. Any match must contain one of
+         the fixed prefixes, so we get a disjunction of literal substrings. *)
+      check {|(?<KEY>\b((AKIA|ABIA|ACCA)[0-9A-Z]{16})\b)|}
+        (F.or_ [ str "AKIA"; str "ABIA"; str "ACCA" ]);
+      (* Literals on both sides of a variable-length gap are both required. *)
+      check {|foo\d+bar|} (F.and_ [ str "foo"; str "bar" ]);
+      (* A plain (parenthesized) literal collapses to a single substring. *)
+      check {|(foobar)|} (Some (str "foobar"));
+      (* An alternation with an unconstrained branch (here [.]) yields no
+         useful condition, so we fall back to the full regex (None). *)
+      check {|foo|.|} None;
+      (* Runs shorter than the minimum useful length are dropped. *)
+      check {|a.b|} None;
+      (* Case-insensitive scope: literals become case-insensitive predicates. *)
+      check {|(?i:abuseipdb|key)|} (F.or_ [ istr "abuseipdb"; istr "key" ]);
+      check {|(?i)AKIA[0-9]{16}|} (Some (istr "AKIA"));
+      (* Mixed scope: a case-insensitive run and a case-sensitive run are kept
+         separate, never merged. *)
+      check {|(?i:foo)BARBAZ|} (F.and_ [ istr "foo"; str "BARBAZ" ]);
+      (* Soundness guard: [Parser_regexp] mis-parses a bracket expression
+         containing whitespace (here [ =:]) into literal characters, which do
+         not reflect PCRE semantics; we must not extract from it. *)
+      check {|prefix[ =:]+suffix|} None;
+      (* A fixed repeat count is expanded into the full literal. *)
+      check {|(ab){3}|} (Some (str "ababab"));
+      (* ... and merges with its neighbors, up to the expansion cap (8). *)
+      check {|d(ab){8}c|} (Some (str "dababababababababc"));
+      (* Soundness guard: a repeat count above the expansion cap (8) is
+         materialized with only 8 copies, so the result must be claimed as a
+         prefix and a suffix rather than the exact match; requiring e.g.
+         "d(ab)^8c" as one contiguous substring would wrongly skip files
+         matching d(ab){10}c. *)
+      check {|d(ab){10}c|}
+        (F.and_ [ str "dabababababababab"; str "ababababababababc" ]);
+      (* When the prefix and suffix runs coincide, require them only once. *)
+      check {|(ab){9}|} (Some (str "abababababababab"));
+      (* A (?i) directive applies to all following alternation branches. *)
+      check {|(?i)foo|bar|} (F.or_ [ istr "foo"; istr "bar" ]);
+      (* A mid-sequence (?i) does not parse ([Parser_regexp] only supports
+         directives where PCRE scoping is unambiguous), so we extract
+         nothing rather than risk wrong case-sensitivity. *)
+      check {|abc(?i)def|} None;
+      (* Escaped punctuation is a literal... *)
+      check {|foo\.bar|} (Some (str "foo.bar"));
+      (* A trailing literal '-' in a character class must not derail the
+         literals around it (a lexer bug used to make the class swallow the
+         rest of the pattern, losing ".auth0.com" here). *)
+      check {|(?<DOMAIN>([a-zA-Z0-9][a-zA-Z0-9._-]*\.auth0\.com))|}
+        (Some (str ".auth0.com"));
+      (* ... but escapes the lexer decodes as letters or to the wrong byte
+         (here \N, which in PCRE matches any non-newline character, and \cI,
+         a control character) must not become required literals. *)
+      check {|abc\Ndef|} (F.and_ [ str "abc"; str "def" ]);
+      check {|abc\cIdef|} (F.and_ [ str "abc"; str "def" ]);
+    ]
+
+let utf8_regex_prefilter_tests =
+  let module P = Prefiltering.Predicate in
+  let predicate = P.Regex (Pcre2_.compile_exn "TOKEN") in
+  Testo.categorize "UTF-8 regex prefilter"
+    [
+      t "valid content can skip repeated UTF-8 checks" (fun () ->
+          let content = "TOKEN ☃" in
+          let utf8_valid = lazy_safe (String.is_valid_utf_8 content) in
+          Alcotest.(check bool) "valid UTF-8" true (Lazy_safe.force utf8_valid);
+          Alcotest.(check bool)
+            "match" true
+            (P.eval ~utf8_valid predicate content));
+      t "invalid content retains conservative error handling" (fun () ->
+          let content = "TOKEN \xff" in
+          let utf8_valid = lazy_safe (String.is_valid_utf_8 content) in
+          Alcotest.(check bool)
+            "invalid UTF-8" false
+            (Lazy_safe.force utf8_valid);
+          Alcotest.(check bool)
+            "allow rule on PCRE2 error" true
+            (P.eval ~utf8_valid predicate content));
+      t "known invalid content has no regex matches" (fun () ->
+          let content = "TOKEN \xff" in
+          let regex = Pcre2_.compile_exn "TOKEN" in
+          let matches =
+            Xpattern_match_regexp.regexp_matcher ~utf8_valid:false content
+              (Fpath.v "unused") regex
+          in
+          Alcotest.(check int) "matches" 0 (List.length matches));
+    ]
+
+let file_prefilter_memo_tests =
+  let module F = Prefiltering.Formula in
+  let module P = Prefiltering.Predicate in
+  Testo.categorize "file prefilter memoization"
+    [
+      t "caller-supplied regexes retain their compile options" (fun () ->
+          let make options =
+            let re = Pcre2_.compile_exn ~options "token" in
+            Prefiltering.File.of_formula (F.pred (P.Regex re))
+          in
+          let sensitive = make [] in
+          let caseless = make [ `CASELESS ] in
+          let results =
+            Prefiltering.File.check_many [ sensitive; caseless ] "TOKEN"
+          in
+          Alcotest.(check (list bool))
+            "different results" [ false; true ] results);
+    ]
+
+(*****************************************************************************)
+(* Prefilter conjunct ranking tests *)
+(*****************************************************************************)
+
+(* Tests that [Formula.sort_by_cost] reorders And/Or children so that cheap
+   (string) predicates are evaluated before expensive (regex) ones, stably. *)
+let prefilter_ranking_tests =
+  let module F = Prefiltering.Formula in
+  let module P = Prefiltering.Predicate in
+  let str s = F.pred (P.String { needle = s; case_sensitive = true }) in
+  let re s = F.pred (P.Regex (Pcre2_.compile_exn ~options:[ `MULTILINE ] s)) in
+  let and_ xs = Option.get (F.and_ xs) in
+  let or_ xs = Option.get (F.or_ xs) in
+  let check name formula expected =
+    t name (fun () ->
+        let got = F.sort_by_cost ~cost:P.eval_cost formula in
+        if not (F.equal P.equal got expected) then
+          Alcotest.failf "expected %s but got %s" (F.show P.pp expected)
+            (F.show P.pp got))
+  in
+  Testo.categorize "prefilter conjunct ranking"
+    [
+      (* Strings are cheaper than regexes, so they move to the front. *)
+      check "regex after string"
+        (and_ [ re "a.*b"; str "foo" ])
+        (and_ [ str "foo"; re "a.*b" ]);
+      (* The sort is stable: same-cost predicates keep their order. *)
+      check "stable within cost tiers"
+        (and_ [ str "a"; re "x+"; str "b"; re "y+" ])
+        (and_ [ str "a"; str "b"; re "x+"; re "y+" ]);
+      (* Subtrees rank by their most expensive predicate, and nested And/Or
+         are sorted too. *)
+      check "nested subtrees"
+        (or_ [ and_ [ re "p.*q"; str "bar" ]; str "baz" ])
+        (or_ [ str "baz"; and_ [ str "bar"; re "p.*q" ] ]);
+    ]
 
 (*****************************************************************************)
 (* Tainting tests *)
@@ -625,9 +808,9 @@ let tainting_test (lang : Lang.t) (rules_file : Fpath.t) (file : Fpath.t) =
   let rules =
     rules
     |> List.filter (fun r ->
-           match r.Rule.target_analyzer with
-           | Analyzer.L (x, xs) -> List.mem lang (x :: xs)
-           | _ -> false)
+        match r.Rule.target_analyzer with
+        | Analyzer.L (x, xs) -> List.mem lang (x :: xs)
+        | _ -> false)
   in
   let search_rules, taint_rules, extract_rules, join_rules =
     Rule.partition_rules rules
@@ -640,40 +823,46 @@ let tainting_test (lang : Lang.t) (rules_file : Fpath.t) (file : Fpath.t) =
   let matches =
     taint_rules
     |> List.concat_map (fun rule ->
-           let xtarget : Xtarget.t =
-             {
-               path = { origin = File file; internal_path_to_content = file };
-               analyzer = Analyzer.L (lang, []);
-               lazy_content = lazy (UFile.read_file file);
-               lazy_ast_and_errors = lazy (ast, []);
-             }
-           in
-           let results =
-             Match_tainting_mode.check_rules ~matches_hook:Fun.id
-               ~per_rule_boilerplate_fn:(fun _rule f -> f ())
-               [ rule ] xconf xtarget
-           in
-           match results with
-           | [ res ] -> res.matches
-           (* By construction, `check_rules` should only return the same number of results as rules it
+        let lazy_content = lazy_safe (UFile.read_file file) in
+        let xtarget : Xtarget.t =
+          {
+            path =
+              {
+                origin = Unfilterable_target_file file;
+                internal_path_to_content = file;
+              };
+            analyzer = Analyzer.L (lang, []);
+            lazy_content;
+            lazy_utf8_valid = Lazy_safe.map String.is_valid_utf_8 lazy_content;
+            lazy_ast_and_errors = lazy_safe (ast, []);
+          }
+        in
+        let results, _errors =
+          Match_tainting_mode.check_rules () ~matches_hook:Fun.id
+            ~per_rule_boilerplate_fn:(fun _rule f -> f ())
+            [ rule ] xconf xtarget
+        in
+        match results with
+        | [ res ] -> res.matches
+        (* By construction, `check_rules` should only return the same number of results as rules it
               was initially given.
               So this case is impossible.
            *)
-           | []
-           | _ :: _ :: _ ->
-               raise Impossible)
+        | []
+        | _ :: _ :: _ ->
+            raise Impossible)
   in
   let actual =
     matches
-    |> List_.map (fun (m : PM.t) ->
-           E.
-             {
-               rule_id = Some m.rule_id.id;
-               typ = Out.SemgrepMatchFound;
-               loc = Some (fst m.range_loc);
-               msg = m.rule_id.message;
-               details = None;
-             })
+    |> List.map (fun (m : PM.t) ->
+        E.
+          {
+            rule_id = Some m.rule_id.id;
+            typ = Out.SemgrepMatchFound;
+            loc = Some (fst m.range_loc);
+            msg = m.rule_id.message;
+            details = None;
+          })
   in
   let regexp = ".*\\b\\(ruleid\\|todook\\):.*" in
   let expected = TCM.expected_error_lines_of_files ~regexp [ file ] in
@@ -682,18 +871,17 @@ let tainting_test (lang : Lang.t) (rules_file : Fpath.t) (file : Fpath.t) =
 
 let tainting_tests_for_lang files lang =
   files
-  |> List_.map (fun file ->
-         Testo.create ~tags:(Test_tags.tags_of_lang lang) (Fpath.basename file)
-           (fun () ->
-             let rules_file =
-               let d, b, _e = Filename_.dbe_of_filename !!file in
-               let candidate1 = Filename_.filename_of_dbe (d, b, "yaml") in
-               if Sys.file_exists candidate1 then Fpath.v candidate1
-               else
-                 failwith
-                   (spf "could not find tainting rules file for %s" !!file)
-             in
-             tainting_test lang rules_file file))
+  |> List.map (fun file ->
+      Testo.create ~tags:(Test_tags.tags_of_lang lang) (Fpath.basename file)
+        (fun () ->
+          let rules_file =
+            let d, b, _e = Filename_.dbe_of_filename !!file in
+            let candidate1 = Filename_.filename_of_dbe (d, b, "yaml") in
+            if Sys_.file_exists candidate1 then Fpath.v candidate1
+            else
+              failwith (spf "could not find tainting rules file for %s" !!file)
+          in
+          tainting_test lang rules_file file))
 
 (* DEPRECATED: this is redundant because we now have 'make rules-test'
  * which calls 'osemgrep-pro test --pro tests/tainting_rules'
@@ -704,55 +892,57 @@ let lang_tainting_tests () =
     [
       Testo.categorize "tainting Go"
         (let dir = taint_tests_path / "go" in
-         let files = Common2.glob (spf "%s/*.go" !!dir) |> Fpath_.of_strings in
+         let files = Common2.glob (dir / "*.go") in
 
          let lang = Lang.Go in
          tainting_tests_for_lang files lang);
       Testo.categorize "tainting PHP"
         (let dir = taint_tests_path / "php" in
-         let files = Common2.glob (spf "%s/*.php" !!dir) |> Fpath_.of_strings in
+         let files = Common2.glob (dir / "*.php") in
 
          let lang = Lang.Php in
          tainting_tests_for_lang files lang);
       Testo.categorize "tainting Python"
         (let dir = taint_tests_path / "python" in
-         let files = Common2.glob (spf "%s/*.py" !!dir) |> Fpath_.of_strings in
+         let files = Common2.glob (dir / "*.py") in
 
          let lang = Lang.Python in
          tainting_tests_for_lang files lang);
       Testo.categorize "tainting Java"
         (let dir = taint_tests_path / "java" in
-         let files =
-           Common2.glob (spf "%s/*.java" !!dir) |> Fpath_.of_strings
-         in
+         let files = Common2.glob (dir / "*.java") in
 
          let lang = Lang.Java in
          tainting_tests_for_lang files lang);
       Testo.categorize "tainting Javascript"
         (let dir = taint_tests_path / "js" in
-         let files = Common2.glob (spf "%s/*.js" !!dir) |> Fpath_.of_strings in
+         let files = Common2.glob (dir / "*.js") in
 
          let lang = Lang.Js in
          tainting_tests_for_lang files lang);
       Testo.categorize "tainting Ruby"
         (let dir = taint_tests_path / "ruby" in
-         let files = Common2.glob (spf "%s/*.rb" !!dir) |> Fpath_.of_strings in
+         let files = Common2.glob (dir / "*.rb") in
 
          let lang = Lang.Ruby in
          tainting_tests_for_lang files lang);
       Testo.categorize "tainting Typescript"
         (let dir = taint_tests_path / "ts" in
-         let files = Common2.glob (spf "%s/*.ts" !!dir) |> Fpath_.of_strings in
+         let files = Common2.glob (dir / "*.ts") in
 
          let lang = Lang.Ts in
          tainting_tests_for_lang files lang);
       Testo.categorize "tainting Scala"
         (let dir = taint_tests_path / "scala" in
-         let files =
-           Common2.glob (spf "%s/*.scala" !!dir) |> Fpath_.of_strings
-         in
+         let files = Common2.glob (dir / "*.scala") in
 
          let lang = Lang.Scala in
+         tainting_tests_for_lang files lang);
+      Testo.categorize "tainting Dart"
+        (let dir = taint_tests_path / "dart" in
+         let files = Common2.glob (dir / "*.dart") in
+
+         let lang = Lang.Dart in
          tainting_tests_for_lang files lang);
     ]
 
@@ -763,7 +953,7 @@ let lang_tainting_tests () =
 (* DEPRECATED: this is redundant because we now have 'make rules-test'
  * which calls 'osemgrep-pro test --pro tests/rules tests/rules_v2'
  *)
-let full_rule_regression_tests () =
+let full_rule_regression_tests =
   let path = tests_path / "rules" in
   let tests1 = Test_engine.make_tests ~prepend_lang:true [ path ] in
   let path = tests_path / "rules_v2" in
@@ -771,18 +961,18 @@ let full_rule_regression_tests () =
   let tests = tests1 @ tests2 in
   let groups =
     tests
-    |> List_.map (fun (test : Testo.t) ->
-           let group =
-             match String.split_on_char ' ' test.name with
-             | lang :: _ -> lang
-             | _ -> test.name
-           in
-           (group, test))
+    |> List.map (fun (test : Testo.t) ->
+        let group =
+          match String.split_on_char ' ' test.name with
+          | lang :: _ -> lang
+          | _ -> test.name
+        in
+        (group, test))
     |> Assoc.group_assoc_bykey_eff
   in
 
   Testo.categorize_suites "full rule"
-    (groups |> List_.map (fun (group, tests) -> Testo.categorize group tests))
+    (groups |> List.map (fun (group, tests) -> Testo.categorize group tests))
 
 (* TODO: For now we only have taint maturity tests for Beta, there are no
  * specific tests for GA.
@@ -795,24 +985,9 @@ let full_rule_regression_tests () =
  * DEPRECATED: this is redundant because we now have 'make rules-test'
  * which calls 'osemgrep-pro test --pro tests/taint_maturity'
  *)
-let full_rule_taint_maturity_tests () =
+let full_rule_taint_maturity_tests =
   let path = tests_path / "taint_maturity" in
   Testo.categorize "taint maturity" (Test_engine.make_tests [ path ])
-
-(*
-   Special exclusions for Semgrep JS
-*)
-let mark_todo_js (test : Testo.t) =
-  match test.name with
-  | s
-    when (* The target file has an unsupported .erb extension, making it excluded
-            correctly by the OCaml test suite but not by the JS test suite
-            (or something close to this). *)
-         s =~ ".*/ruby/rails/security/brakeman/check-reverse-tabnabbing.yaml"
-         || (* Not sure why this fails *)
-         s =~ ".*/ruby/lang/security/divide-by-zero.yaml" ->
-      Testo.update test ~tags:(Test_tags.todo_js :: test.tags)
-  | _ -> test
 
 (* quite similar to full_rule_regression_tests but prefer to pack_tests
  * with "semgrep-rules repo Java", so one can just run the Java tests
@@ -825,21 +1000,28 @@ let mark_todo_js (test : Testo.t) =
  * DEPRECATED: this is redundant because we now have 'make rules-test'
  * which calls 'osemgrep-pro test --pro tests/semgrep-rules'
  *)
-let semgrep_rules_repo_tests () : Testo.t list =
+let semgrep_rules_repo_tests : Testo.t list =
   let path = tests_path / "semgrep-rules" in
-  let tests = Test_engine.make_tests [ path ] in
+  let expectations_file = tests_path / "rule-expectations.json" in
+  let expectations =
+    if Sys_.file_exists (Fpath.to_string expectations_file) then
+      match Test_expectations.load expectations_file with
+      | Ok expectations -> expectations
+      | Error (`Msg message) -> failwith message
+    else Test_expectations.empty
+  in
+  let tests = Test_engine.make_tests ~expectations [ path ] in
   let groups =
     tests
-    |> List_.filter_map (fun (test : Testo.t) ->
-           let test = mark_todo_js test in
-           let group_opt =
-             match test.name with
-             (* note that there is no need to filter rules without targets; This
-              * is now handled in Test_engine.make_tests which will generate
-              * an XFAIL Testo test for those.
-              *)
-             | s
-               when (* TODO: we're skipping those rules because e.g. for bidy.yml
+    |> List.filter_map (fun (test : Testo.t) ->
+        let group_opt =
+          match Fpath.v test.name with
+          (* note that there is no need to filter rules without targets; This
+           * is now handled in Test_engine.make_tests which will generate
+           * an XFAIL Testo test for those.
+           *)
+          | s
+            when (* TODO: we're skipping those rules because e.g. for bidy.yml
                        we're using a languages: [bash,c, ..., python] and a
                        bidy.py target file which cause Test_engine.make_test to
                        parse bidy.py with a bash parser (the first one in the
@@ -848,81 +1030,158 @@ let semgrep_rules_repo_tests () : Testo.t list =
                        the file to decide which language to use instead of what
                        is in the rule
                     *)
-                    s =~ ".*/unicode/security/bidi.yml"
-                    || s =~ ".*/dockerfile/security/dockerd-socket-mount.yaml"
-                    (* Elixir requires Pro *)
-                    || s =~ ".*/elixir/lang/.*"
-                    (* Apex requires Pro *)
-                    || s =~ ".*/apex/lang/.*"
-                       (* but the following are generic rules ... *)
-                       && s
-                          <> "tests/semgrep-rules/apex/lang/best-practice/ncino/tests/UseAssertClass.yaml"
-                       && s
-                          <> "tests/semgrep-rules/apex/lang/performance/ncino/operationsInLoops/AvoidNativeDmlInLoops.yaml"
-                       && s
-                          <> "tests/semgrep-rules/apex/lang/performance/ncino/operationsInLoops/AvoidSoqlInLoops.yaml"
-                       && s
-                          <> "tests/semgrep-rules/apex/lang/performance/ncino/operationsInLoops/AvoidSoslInLoops.yaml"
-                       && s
-                          <> "tests/semgrep-rules/apex/lang/performance/ncino/operationsInLoops/AvoidOperationsWithLimitsInLoops.yaml"
-                       && s
-                          <> "tests/semgrep-rules/apex/lang/security/ncino/dml/ApexCSRFStaticConstructor.yaml"
-                    (* ?? *)
-                    || s =~ ".*/yaml/semgrep/consistency/.*" ->
-                 Some "XFAIL"
-             (* not rule files *)
-             | s when s =~ ".*.test.yml" -> None
-             (* not languages tests *)
-             | s when s =~ ".*/semgrep-rules/stats/" -> None
-             (* ok let's keep all the other one with the appropriate group name *)
-             | s when s =~ ".*/semgrep-rules/\\([a-zA-Z]+\\)/.*" ->
-                 (* This is confusing because it looks like a programming
+                 s =/~ ".*/unicode/security/bidi.yml"
+                 || s =/~ ".*/dockerfile/security/dockerd-socket-mount.yaml"
+                 (* Elixir requires Pro *)
+                 || s =/~ ".*/elixir/lang/.*"
+                 (* Apex requires Pro *)
+                 || s =/~ ".*/apex/lang/.*"
+                    (* but the following are generic rules ... *)
+                    && not @@ Fpath.Set.mem s @@ Fpath.Set.of_list
+                       @@ List.map Fpath.v
+                       @@ [
+                            "tests/semgrep-rules/apex/lang/best-practice/ncino/tests/UseAssertClass.yaml";
+                            "tests/semgrep-rules/apex/lang/performance/ncino/operationsInLoops/AvoidNativeDmlInLoops.yaml";
+                            "tests/semgrep-rules/apex/lang/performance/ncino/operationsInLoops/AvoidSoqlInLoops.yaml";
+                            "tests/semgrep-rules/apex/lang/performance/ncino/operationsInLoops/AvoidSoslInLoops.yaml";
+                            "tests/semgrep-rules/apex/lang/performance/ncino/operationsInLoops/AvoidOperationsWithLimitsInLoops.yaml";
+                            "tests/semgrep-rules/apex/lang/security/ncino/dml/ApexCSRFStaticConstructor.yaml";
+                          ]
+                 (* ?? *)
+                 || s =/~ ".*/yaml/semgrep/consistency/.*" ->
+              Some "XFAIL"
+          (* not rule files *)
+          | s when s =/~ ".*.test.yml" -> None
+          (* not languages tests *)
+          | s when s =/~ ".*/semgrep-rules/stats/" -> None
+          (* ok let's keep all the other one with the appropriate group name *)
+          | s when s =/~ ".*/semgrep-rules/\\([a-zA-Z]+\\)/.*" ->
+              (* This is confusing because it looks like a programming
                     language from Lang.t but there's no guarantee that
                     it's a valid one.
                     TODO: don't capitalize? leave a slash? *)
-                 let s = Common.matched1 test.name in
-                 Some (String.capitalize_ascii s)
-             (* this skips the semgrep-rules/.github entries *)
-             | _ ->
-                 Logs.info (fun m -> m "skipping %s" test.name);
-                 None
-           in
-           group_opt |> Option.map (fun groupname -> (groupname, test)))
+              let s = Common.matched1 test.name in
+              Some (String.capitalize_ascii s)
+          (* this skips the semgrep-rules/.github entries *)
+          | _ ->
+              Logs.debug (fun m -> m "skipping %s" test.name);
+              None
+        in
+        group_opt |> Option.map (fun groupname -> (groupname, test)))
     |> Assoc.group_assoc_bykey_eff
   in
 
   Testo.categorize_suites "semgrep-rules repo"
     (groups
-    |> List_.map (fun (group, tests) ->
-           tests
-           |> List_.map (fun (test : Testo.t) ->
-                  match group with
-                  | "XFAIL" ->
-                      (* TODO: populate the excuse below with the exact reason
+    |> List.map (fun (group, tests) ->
+        tests
+        |> List.map (fun (test : Testo.t) ->
+            match group with
+            | "XFAIL" ->
+                (* TODO: populate the excuse below with the exact reason
                          found in the comments above *)
-                      Testo.update test
-                        ~expected_outcome:
-                          (Should_fail
-                             "excluded semgrep-rule (see OCaml source file for \
-                              details)")
-                  | _ -> test)
-           |> Testo.categorize group))
+                Testo.update test
+                  ~expected_outcome:
+                    (Should_fail
+                       "excluded semgrep-rule (see OCaml source file for \
+                        details)")
+            | _ -> test)
+        |> Testo.categorize group))
 
 (*****************************************************************************)
 (* All tests *)
 (*****************************************************************************)
 
-let tests () =
+let external_expectations_tests =
+  let run ~source ~engine ~path ~lines ~passes () =
+    let module F = Testutil_files in
+    let rules =
+      {|rules:
+  - id: first
+    languages: [python]
+    message: first
+    severity: WARNING
+    pattern: danger(...)
+  - id: second
+    languages: [python]
+    message: second
+    severity: WARNING
+    pattern: sink(...)
+|}
+    in
+    let overrides =
+      Printf.sprintf {|[{"path":%S,"rule_id":"first","engine":%S,"lines":%s}]|}
+        path engine lines
+    in
+    F.with_tempfiles ~chdir:true
+      [
+        F.Dir
+          ("rules", [ F.File ("test.yaml", rules); F.File ("test.py", source) ]);
+        F.Dir ("expectations", [ F.File ("overrides.json", overrides) ]);
+      ]
+      (fun _ ->
+        let expectations =
+          match
+            Test_expectations.load (Fpath.v "expectations/overrides.json")
+          with
+          | Ok expectations -> expectations
+          | Error (`Msg message) -> failwith message
+        in
+        let tests =
+          Test_engine.make_tests ~expectations
+            ~fail_callback:(fun _ message -> failwith message)
+            [ Fpath.v "rules" ]
+        in
+        let passed =
+          try
+            List.iter (fun (test : Testo.t) -> test.func ()) tests;
+            true
+          with
+          | Failure _ -> false
+        in
+        Alcotest.(check bool) "rule expectations" passes passed)
+  in
+  let baseline = "# ruleid: first\ndanger()\n# ruleid: second\nsink()\n" in
+  let changed =
+    "# ruleid: first\nsafe()\ndanger()\n# ruleid: second\nsink()\n"
+  in
+  let removed = "# ruleid: first\nsafe()\n# ruleid: second\nsink()\n" in
+  let test name ?(source = changed) ?(engine = "OSS")
+      ?(path = "../rules/test.py") ~lines ~passes () =
+    t name (run ~source ~engine ~path ~lines ~passes)
+  in
+  Testo.categorize "external rule expectations"
+    [
+      test "changed findings" ~lines:"[3]" ~passes:true ();
+      test "removed findings" ~source:removed ~lines:"[]" ~passes:true ();
+      test "wrong findings fail" ~lines:"[2]" ~passes:false ();
+      test "rule IDs remain isolated"
+        ~source:"# ruleid: second\ndanger(sink())\n" ~lines:"[]" ~passes:false
+        ();
+      test "other rules still fail" ~source:"# ruleid: second\nsafe()\n"
+        ~lines:"[]" ~passes:false ();
+      test "engines remain isolated" ~source:baseline ~engine:"Pro" ~lines:"[]"
+        ~passes:true ();
+      test "targets remain isolated" ~source:baseline ~path:"../rules/other.py"
+        ~lines:"[]" ~passes:true ();
+    ]
+
+let tests =
   List_.flatten
     [
       (* full testing for many languages *)
       lang_regression_tests ~polyglot_pattern_path;
       lang_autofix_tests ~polyglot_pattern_path;
       eval_regression_tests ();
-      filter_irrelevant_rules_tests ();
+      filter_irrelevant_rules_tests;
+      regexp_prefilter_tests;
+      utf8_regex_prefilter_tests;
+      file_prefilter_memo_tests;
+      prefilter_ranking_tests;
       lang_tainting_tests ();
       maturity_tests ();
-      full_rule_taint_maturity_tests ();
-      full_rule_regression_tests ();
-      semgrep_rules_repo_tests ();
+      full_rule_taint_maturity_tests;
+      full_rule_regression_tests;
+      semgrep_rules_repo_tests;
+      external_expectations_tests;
     ]

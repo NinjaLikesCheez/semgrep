@@ -4,6 +4,9 @@
   (name gitignore)
   (wrapped false)
   (libraries
+    base
+    collections
+    commons
     glob
     profiling
     paths

@@ -1,3 +1,15 @@
+(*
+   Copyright (c) 2023-2025 Semgrep Inc.
+
+   This library is free software; you can redistribute it and/or
+   modify it under the terms of the GNU Lesser General Public License
+   version 2.1 as published by the Free Software Foundation.
+
+   This library is distributed in the hope that it will be useful, but
+   WITHOUT ANY WARRANTY; without even the implied warranty of
+   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the file
+   LICENSE for more details.
+*)
 (* This module is here to help using the 'string wrap <ocaml module=Xxx>'
  * feature of atdgen.
  * See https://atd.readthedocs.io/en/stable/atdgen-reference.html#using-a-custom-wrapper
@@ -6,7 +18,7 @@
 open Common
 
 module Fpath = struct
-  type t = Fpath.t [@@deriving show, eq]
+  type t = Fpath.t [@@deriving eq, ord, show]
 
   let unwrap = Fpath.to_string
   let wrap = Fpath.v
@@ -15,14 +27,14 @@ module Fpath = struct
 end
 
 module Uri = struct
-  type t = Uri.t [@@deriving show]
+  type t = Uri.t [@@deriving eq, ord, show]
 
   let unwrap = Uri.to_string
   let wrap = Uri.of_string
 end
 
 module Uuidm = struct
-  type t = Uuidm.t [@@deriving show]
+  type t = Uuidm.t [@@deriving eq, ord, show]
 
   let unwrap = Uuidm.to_string
 
@@ -33,21 +45,31 @@ module Uuidm = struct
 end
 
 module Sha1 = struct
-  type t = Digestif.SHA1.t
+  type t = Digestif.SHA1.t [@@deriving eq, show]
+
+  let compare a b =
+    String.compare
+      (Digestif.SHA1.to_raw_string a)
+      (Digestif.SHA1.to_raw_string b)
 
   let unwrap = Digestif.SHA1.to_hex
   let wrap = Digestif.SHA1.of_hex
 end
 
 module Sha256 = struct
-  type t = Digestif.SHA256.t
+  type t = Digestif.SHA256.t [@@deriving eq, show]
+
+  let compare a b =
+    String.compare
+      (Digestif.SHA256.to_raw_string a)
+      (Digestif.SHA256.to_raw_string b)
 
   let unwrap = Digestif.SHA256.to_hex
   let wrap = Digestif.SHA256.of_hex
 end
 
 module Datetime = struct
-  type t = Timedesc.Timestamp.t
+  type t = Timedesc.Timestamp.t [@@deriving eq, ord]
 
   let unwrap tm : string = Timedesc.Timestamp.to_rfc3339 tm
 

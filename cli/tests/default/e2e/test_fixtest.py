@@ -1,3 +1,15 @@
+#
+# Copyright (c) 2022-2025 Semgrep Inc.
+#
+# This library is free software; you can redistribute it and/or
+# modify it under the terms of the GNU Lesser General Public License
+# version 2.1 as published by the Free Software Foundation.
+#
+# This library is distributed in the hope that it will be useful, but
+# WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the file
+# LICENSE for more details.
+#
 # Testing the fixtest feature.
 # See https://semgrep.dev/docs/writing-rules/testing-rules/#testing-autofix
 #
@@ -10,6 +22,7 @@
 import re
 
 import pytest
+from tests.conftest import skip_on_windows
 from tests.fixtures import RunSemgrep
 
 from semgrep.constants import OutputFormat
@@ -18,7 +31,7 @@ from semgrep.constants import OutputFormat
 # It should report passing fixtests in the text output.
 # TODO: rename test_passed_text_output
 @pytest.mark.kinda_slow
-def test_fixtest_test1_no_json(run_semgrep_in_tmp: RunSemgrep, snapshot):
+def test_fixtest_test1_no_json(run_semgrep_in_tmp: RunSemgrep, posix_snapshot):
     results, _ = run_semgrep_in_tmp(
         "rules/fixtest/basic_fix.yaml",
         target_name="fixtest/test1.py",
@@ -26,7 +39,7 @@ def test_fixtest_test1_no_json(run_semgrep_in_tmp: RunSemgrep, snapshot):
         output_format=OutputFormat.TEXT,
     )
 
-    snapshot.assert_match(
+    posix_snapshot.assert_match(
         results,
         "output.txt",
     )
@@ -35,20 +48,20 @@ def test_fixtest_test1_no_json(run_semgrep_in_tmp: RunSemgrep, snapshot):
 # It should report passing fixtests in the JSON output.
 # TODO: rename test_passed_json_output
 @pytest.mark.kinda_slow
-def test_fixtest_test1_json(run_semgrep_in_tmp: RunSemgrep, snapshot):
+def test_fixtest_test1_json(run_semgrep_in_tmp: RunSemgrep, posix_snapshot):
     stdout, _ = run_semgrep_in_tmp(
         "rules/fixtest/basic_fix.yaml",
         target_name="fixtest/test1.py",
         options=["--test"],
         output_format=OutputFormat.JSON,
     )
-    snapshot.assert_match(stdout, "test-results.json")
+    posix_snapshot.assert_match(stdout, "test-results.json")
 
 
 # It should report no tests for fixes was found in the text output.
 # TODO: rename test_no_fixtest_text_output
 @pytest.mark.kinda_slow
-def test_fixtest_test2_no_json(run_semgrep_in_tmp: RunSemgrep, snapshot):
+def test_fixtest_test2_no_json(run_semgrep_in_tmp: RunSemgrep, posix_snapshot):
     results, _ = run_semgrep_in_tmp(
         "rules/fixtest/basic_fix.yaml",
         target_name="fixtest/test2.py",
@@ -56,7 +69,7 @@ def test_fixtest_test2_no_json(run_semgrep_in_tmp: RunSemgrep, snapshot):
         output_format=OutputFormat.TEXT,
     )
 
-    snapshot.assert_match(
+    posix_snapshot.assert_match(
         results,
         "output.txt",
     )
@@ -65,21 +78,22 @@ def test_fixtest_test2_no_json(run_semgrep_in_tmp: RunSemgrep, snapshot):
 # It should report config_missing_fixtests in the JSON output.
 # TODO: rename test_missing_fixtest_json_output aka test_config_missing_fixtests
 @pytest.mark.kinda_slow
-def test_fixtest_test2_json(run_semgrep_in_tmp: RunSemgrep, snapshot):
+def test_fixtest_test2_json(run_semgrep_in_tmp: RunSemgrep, posix_snapshot):
     stdout, _ = run_semgrep_in_tmp(
         "rules/fixtest/basic_fix.yaml",
         target_name="fixtest/test2.py",
         options=["--test"],
         output_format=OutputFormat.JSON,
     )
-    snapshot.assert_match(stdout, "test-results.json")
+    posix_snapshot.assert_match(stdout, "test-results.json")
 
 
 # It should show a diff when a fixtest does not pass in the text output.
 # TODO: rename test_fixtest_not_passed_show_diff
 @pytest.mark.kinda_slow
 @pytest.mark.osemfail
-def test_fixtest_test3_no_json(run_semgrep_in_tmp: RunSemgrep, snapshot):
+@skip_on_windows  # fix backslashes in output
+def test_fixtest_test3_no_json(run_semgrep_in_tmp: RunSemgrep, posix_snapshot):
     results, _ = run_semgrep_in_tmp(
         "rules/fixtest/other_fix.yaml",
         target_name="fixtest/test3.py",
@@ -88,7 +102,7 @@ def test_fixtest_test3_no_json(run_semgrep_in_tmp: RunSemgrep, snapshot):
         assert_exit_code=1,
     )
 
-    snapshot.assert_match(
+    posix_snapshot.assert_match(
         results,
         "output.txt",
     )
@@ -97,7 +111,7 @@ def test_fixtest_test3_no_json(run_semgrep_in_tmp: RunSemgrep, snapshot):
 # It should report '"passed": false' for a bad fixtest in the JSON output.
 # TODO: rename test_fixtest_not_passed_json_output
 @pytest.mark.kinda_slow
-def test_fixtest_test3_json(run_semgrep_in_tmp: RunSemgrep, snapshot):
+def test_fixtest_test3_json(run_semgrep_in_tmp: RunSemgrep, posix_snapshot):
     stdout, _ = run_semgrep_in_tmp(
         "rules/fixtest/other_fix.yaml",
         target_name="fixtest/test3.py",
@@ -105,14 +119,15 @@ def test_fixtest_test3_json(run_semgrep_in_tmp: RunSemgrep, snapshot):
         output_format=OutputFormat.JSON,
         assert_exit_code=1,
     )
-    snapshot.assert_match(stdout, "test-results.json")
+    posix_snapshot.assert_match(stdout, "test-results.json")
 
 
 # It should report failing match and failing fixtest in the text output.
 # TODO: rename test_fixtest_not_matched_text_output
 @pytest.mark.kinda_slow
 @pytest.mark.osemfail
-def test_fixtest_test4_no_json(run_semgrep_in_tmp: RunSemgrep, snapshot):
+@skip_on_windows  # fix backslashes in output
+def test_fixtest_test4_no_json(run_semgrep_in_tmp: RunSemgrep, posix_snapshot):
     results = run_semgrep_in_tmp(
         "rules/fixtest/other_pattern.yaml",
         target_name="fixtest/test4.py",
@@ -121,7 +136,7 @@ def test_fixtest_test4_no_json(run_semgrep_in_tmp: RunSemgrep, snapshot):
         assert_exit_code=1,
         use_click_runner=True,  # TODO: does not seem related to mocking but still fail with False
     )
-    snapshot.assert_match(
+    posix_snapshot.assert_match(
         results.as_snapshot(
             mask=[re.compile(r"test file path: (.+?)/fixtest/test4.py")]
         ),
@@ -133,7 +148,8 @@ def test_fixtest_test4_no_json(run_semgrep_in_tmp: RunSemgrep, snapshot):
 # TODO: rename test_fixtest_not_matched_json_output
 @pytest.mark.kinda_slow
 @pytest.mark.osemfail
-def test_fixtest_test4_json(run_semgrep_in_tmp: RunSemgrep, snapshot):
+@skip_on_windows  # fix backslashes in output
+def test_fixtest_test4_json(run_semgrep_in_tmp: RunSemgrep, posix_snapshot):
     results = run_semgrep_in_tmp(
         "rules/fixtest/other_pattern.yaml",
         target_name="fixtest/test4.py",
@@ -142,7 +158,7 @@ def test_fixtest_test4_json(run_semgrep_in_tmp: RunSemgrep, snapshot):
         assert_exit_code=1,
         use_click_runner=True,  # TODO: does not seem related to mocking but still fail with False
     )
-    snapshot.assert_match(
+    posix_snapshot.assert_match(
         results.as_snapshot(
             mask=[re.compile(r"test file path: (.+?)/fixtest/test4.py")]
         ),
@@ -156,7 +172,7 @@ def test_fixtest_test4_json(run_semgrep_in_tmp: RunSemgrep, snapshot):
 # with an inexistent file
 @pytest.mark.kinda_slow
 @pytest.mark.osemfail
-def test_fixtest_test5_no_json(run_semgrep_in_tmp: RunSemgrep, snapshot):
+def test_fixtest_test5_no_json(run_semgrep_in_tmp: RunSemgrep, posix_snapshot):
     results, _ = run_semgrep_in_tmp(
         "rules/fixtest/basic_fix.yaml",
         target_name="fixtest/inexistent.py",
@@ -164,7 +180,7 @@ def test_fixtest_test5_no_json(run_semgrep_in_tmp: RunSemgrep, snapshot):
         output_format=OutputFormat.TEXT,
     )
 
-    snapshot.assert_match(
+    posix_snapshot.assert_match(
         results,
         "output.txt",
     )
@@ -175,28 +191,28 @@ def test_fixtest_test5_no_json(run_semgrep_in_tmp: RunSemgrep, snapshot):
 # TODO: rename test_no_test_or_fixtest_found_json_output
 @pytest.mark.kinda_slow
 @pytest.mark.osemfail
-def test_fixtest_test5_json(run_semgrep_in_tmp: RunSemgrep, snapshot):
+def test_fixtest_test5_json(run_semgrep_in_tmp: RunSemgrep, posix_snapshot):
     stdout, _ = run_semgrep_in_tmp(
         "rules/fixtest/basic_fix.yaml",
         target_name="fixtest/inexistent.py",
         options=["--test"],
         output_format=OutputFormat.JSON,
     )
-    snapshot.assert_match(stdout, "test-results.json")
+    posix_snapshot.assert_match(stdout, "test-results.json")
 
 
 # It should report config_missing_fixtest for rules containing a fix-regex:
 # at whatever position (not just the first rule), and without an associated
 # target.fixed.ext file.
 @pytest.mark.kinda_slow
-def test_missing_fixtest_fix_regex(run_semgrep_in_tmp: RunSemgrep, snapshot):
+def test_missing_fixtest_fix_regex(run_semgrep_in_tmp: RunSemgrep, posix_snapshot):
     stdout, _ = run_semgrep_in_tmp(
         "rules/fixtest/basic_fix_regex.yaml",
         target_name="fixtest/no_associated_fixed.py",
         options=["--test"],
         output_format=OutputFormat.JSON,
     )
-    snapshot.assert_match(stdout, "test-results.json")
+    posix_snapshot.assert_match(stdout, "test-results.json")
 
 
 # It should not add the trailing newlines from a fix: replacement string
@@ -206,11 +222,11 @@ def test_missing_fixtest_fix_regex(run_semgrep_in_tmp: RunSemgrep, snapshot):
 # is parsing the fix pattern and then pretty print back the transformed
 # pattern, so newlines do not matter.
 @pytest.mark.kinda_slow
-def test_fix_trailing_newline(run_semgrep_in_tmp: RunSemgrep, snapshot):
+def test_fix_trailing_newline(run_semgrep_in_tmp: RunSemgrep, posix_snapshot):
     stdout, _ = run_semgrep_in_tmp(
         "rules/fixtest/fix_trailing_newline.yaml",
         target_name="fixtest/basic.go",
         options=["--test"],
         output_format=OutputFormat.JSON,
     )
-    snapshot.assert_match(stdout, "test-results.json")
+    posix_snapshot.assert_match(stdout, "test-results.json")

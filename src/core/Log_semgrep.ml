@@ -1,3 +1,15 @@
+(*
+   Copyright (c) 2024-2025 Semgrep Inc.
+
+   This library is free software; you can redistribute it and/or
+   modify it under the terms of the GNU Lesser General Public License
+   version 2.1 as published by the Free Software Foundation.
+
+   This library is distributed in the hope that it will be useful, but
+   WITHOUT ANY WARRANTY; without even the implied warranty of
+   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the file
+   LICENSE for more details.
+*)
 let src = Logs.Src.create "semgrep"
 
 module Log = (val Logs.src_log src : Logs.LOG)
@@ -24,13 +36,13 @@ For more information, See
 https://www.notion.so/semgrep/Logging-in-semgrep-semgrep-core-osemgrep-67c9046fa53744728d9d725a5a244f64
 |}
 
-(* Small wrapper around Logs_.setup() (itself a wrapper around Logs.set_xxx)
- * TODO: add some --semgrep-log-xxx flags in osemgrep CLI for the envvars so
- * they can be set also with CLI flags and will be part of the man page.
- *)
-let setup ?log_to_file ?(log_to_otel = false) ?require_one_of_these_tags
-    ~force_color ~level () =
-  UConsole.setup ~highlight_setting:(if force_color then On else Auto) ();
+(*
+   TODO: add some --semgrep-log-xxx flags in osemgrep CLI for the envvars so
+   they can be set also with CLI flags and will be part of the man page.
+*)
+let with_setup ?log_to_file ?(log_to_otel = false) ?require_one_of_these_tags
+    ?(quiet_log_setup = false) ?(color = Console.Auto) ~level func =
+  UConsole.with_setup color @@ fun () ->
   (* We override the default use of LOG_XXX env var in Logs_.setup() with
    * SEMGREP_LOG_XXX env vars because Gitlab was reporting perf problems due
    * to all the logging produced by Semgrep. Indeed, Gitlab CI itself is running
@@ -48,7 +60,8 @@ let setup ?log_to_file ?(log_to_otel = false) ?require_one_of_these_tags
   (* currently only additional reporter is otel. Only set to true when --trace
      is passed *)
   let additional_reporters =
-    if log_to_otel then Some [ Tracing.otel_reporter ] else None
+    if log_to_otel then [ Logging.(attach_otel_reporter ?attributes:None) ]
+    else []
   in
   (* If we're going to log to otel, let's by default log info since that's
      incredibly useful for debugging. When we see logs from otel, we may not
@@ -73,13 +86,17 @@ let setup ?log_to_file ?(log_to_otel = false) ?require_one_of_these_tags
         Some Logs.Info
     | _ -> level
   in
-  Logs_.setup ?log_to_file ?require_one_of_these_tags ?additional_reporters
+  Logs_.with_setup ~highlight_setting:color ?log_to_file
+    ?require_one_of_these_tags ~additional_reporters
     ~read_level_from_env_vars:
       [ "PYTEST_SEMGREP_LOG_LEVEL"; "SEMGREP_LOG_LEVEL" ]
     ~read_srcs_from_env_vars:[ "PYTEST_SEMGREP_LOG_SRCS"; "SEMGREP_LOG_SRCS" ]
     ~read_tags_from_env_vars:[ "PYTEST_SEMGREP_LOG_TAGS"; "SEMGREP_LOG_TAGS" ]
-    ~level ();
-  Logs.debug (fun m -> m "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!");
-  Logs.debug (fun m -> m "%s" help_msg);
-  Logs.debug (fun m -> m "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!");
-  ()
+    ~quiet_log_setup ~level (fun () ->
+      if not quiet_log_setup then (
+        Logs.debug (fun m ->
+            m "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!");
+        Logs.debug (fun m -> m "%s" help_msg);
+        Logs.debug (fun m ->
+            m "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"));
+      func ())

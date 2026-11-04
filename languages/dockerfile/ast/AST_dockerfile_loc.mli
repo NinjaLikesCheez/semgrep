@@ -1,3 +1,15 @@
+(*
+   Copyright (c) 2023-2024 Semgrep Inc.
+
+   This library is free software; you can redistribute it and/or
+   modify it under the terms of the GNU Lesser General Public License
+   version 2.1 as published by the Free Software Foundation.
+
+   This library is distributed in the hope that it will be useful, but
+   WITHOUT ANY WARRANTY; without even the implied warranty of
+   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the file
+   LICENSE for more details.
+*)
 (* Location extraction for different AST_dockerfile constructs
 
    All functions end either in '_loc' or '_tok'.
@@ -15,6 +27,7 @@ val image_spec_loc : AST_dockerfile.image_spec -> Tok_range.t
 val env_pair_loc : AST_dockerfile.env_pair -> Tok_range.t
 val label_pair_loc : AST_dockerfile.label_pair -> Tok_range.t
 val expose_port_loc : AST_dockerfile.expose_port -> Tok_range.t
+val shell_fragment_loc : AST_dockerfile.shell_fragment -> Tok_range.t
 val str_or_ellipsis_loc : AST_dockerfile.str_or_ellipsis -> Tok_range.t
 val array_or_paths_loc : AST_dockerfile.array_or_paths -> Tok_range.t
 val healthcheck_loc : AST_dockerfile.healthcheck -> Tok_range.t

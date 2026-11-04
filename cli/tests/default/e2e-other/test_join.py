@@ -1,3 +1,15 @@
+#
+# Copyright (c) 2021-2025 Semgrep Inc.
+#
+# This library is free software; you can redistribute it and/or
+# modify it under the terms of the GNU Lesser General Public License
+# version 2.1 as published by the Free Software Foundation.
+#
+# This library is distributed in the hope that it will be useful, but
+# WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the file
+# LICENSE for more details.
+#
 import pytest
 from tests.fixtures import RunSemgrep
 
@@ -29,9 +41,9 @@ from tests.fixtures import RunSemgrep
     ],
 )
 @pytest.mark.osemfail
-def test_basic(run_semgrep_in_tmp: RunSemgrep, snapshot, rule, target):
+def test_basic(run_semgrep_on_copied_files: RunSemgrep, snapshot, rule, target):
     snapshot.assert_match(
-        run_semgrep_in_tmp(
+        run_semgrep_on_copied_files(
             rule,
             target_name=target,
             # we now need to be logged in to access metavariables
@@ -77,8 +89,10 @@ def test_basic(run_semgrep_in_tmp: RunSemgrep, snapshot, rule, target):
     ],
 )
 @pytest.mark.osemfail
-def test_recursive(run_semgrep_in_tmp: RunSemgrep, snapshot, rule, target):
+def test_recursive(run_semgrep_on_copied_files: RunSemgrep, snapshot, rule, target):
     snapshot.assert_match(
-        run_semgrep_in_tmp(rule, target_name=target, is_logged_in_weak=True).stdout,
+        run_semgrep_on_copied_files(
+            rule, target_name=target, is_logged_in_weak=True
+        ).stdout,
         "results.json",
     )

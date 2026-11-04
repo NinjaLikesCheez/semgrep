@@ -1,3 +1,15 @@
+(*
+   Copyright (c) 2023-2025 Semgrep Inc.
+
+   This library is free software; you can redistribute it and/or
+   modify it under the terms of the GNU Lesser General Public License
+   version 2.1 as published by the Free Software Foundation.
+
+   This library is distributed in the hope that it will be useful, but
+   WITHOUT ANY WARRANTY; without even the implied warranty of
+   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the file
+   LICENSE for more details.
+*)
 (* Returns possibly the inferred type of the expression, as well as an ident
  * option that can then be used to query LSP to get the type of the ident. *)
 val type_of_expr :
@@ -20,5 +32,5 @@ val guess_type_of_dotaccess :
   Lang.t -> (string * 'a Type.type_argument list) option -> string -> 'a Type.t
 
 (* pro-scan hook *)
-val pro_hook_type_of_expr :
+val hook_type_of_expr :
   (Lang.t -> AST_generic.expr -> AST_generic.name Type.t option) option Hook.t

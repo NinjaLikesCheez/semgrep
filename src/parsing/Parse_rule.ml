@@ -38,17 +38,23 @@ let ( >>= ) = Result.bind
  * See also the JSON schema for a rule in rule_schema_v1.yaml (and
  * also now in rule_schema_v2.atd for the v2 syntax).
  *
- * history: we used to parse a semgrep rule by simply using the basic API of
- * the OCaml 'yaml' library. This API allows converting a yaml file into
- * a simple and compact JSON.t value.
- * However, this JSON.t value did not contain any location information, which
- * made it hard to report errors in a YAML rule. This is why we switched
- * to the low-level API of the 'yaml' library that returns a stream
- * of tokens with location information. We actually used first that low-level
- * API to return the generic AST of a yaml file, to add support for
- * YAML in semgrep (allowing semgrep rules on any YAML files).
- * See the Yaml_to_generic.parse_rule function. We then (ab)used this function
- * to also parse a semgrep rule (which is a yaml file) in this file.
+ * history:
+ *  - we used to parse a semgrep rule by simply using the basic API of
+ *    the OCaml 'yaml' library. This API allows converting a yaml file into
+ *    a simple and compact JSON.t value.
+ *    However, this JSON.t value did not contain any location information, which
+ *    made it hard to report errors in a YAML rule.
+ *  - This is why we switched to the low-level API of the 'yaml' library that
+ *    returns a stream of tokens with location information. We actually used
+ *    first that low-level API to return the generic AST of a yaml file, to add
+ *    support for YAML in semgrep (allowing semgrep rules on any YAML files).
+ *    See the Yaml_to_generic.parse_rule function.
+ *  - We then (ab)used this function to also parse a semgrep rule (which is a
+ *    yaml file) in this file.
+ *
+ * Should we use the new AST_yaml.ml instead of parsing using the
+ * AST_generic? NO! The advantage of using AST_generic is that it works also
+ * for parsing jsonnet rules! or JSON rules!
  *)
 
 (*****************************************************************************)
@@ -97,7 +103,7 @@ let parse_languages ~id (options : Rule_options_t.t) langs :
   | xs -> (
       let rule_id, _ = id in
       let/ langs =
-        xs |> List_.map (parse_language ~id:rule_id) |> Base.Result.all
+        xs |> List.map (parse_language ~id:rule_id) |> Base.Result.all
       in
       match langs with
       | [] -> error rule_id (snd id) "we need at least one language"
@@ -134,41 +140,54 @@ let parse_fix_regex (env : env) (key : key) fields =
   let/ count = take_opt fix_regex_dict env parse_int_strict "count" in
   Ok Rule.{ regexp; count; replacement }
 
-let parse_equivalences env key value =
-  let parse_equivalence env equiv =
-    match equiv.G.e with
-    | G.Container
-        ( Dict,
-          ( _,
-            [
-              {
-                e =
-                  Container
-                    ( Tuple,
-                      ( _,
-                        [
-                          { e = L (String (_, ("equivalence", t), _)); _ };
-                          value;
-                        ],
-                        _ ) );
-                _;
-              };
-            ],
-            _ ) ) ->
-        parse_string env ("equivalence", t) value
-    | _ ->
-        error_at_expr env.id equiv
-          "Expected `equivalence: $X` for each equivalences list item"
+(*
+   paths.include and paths.exclude globs are applied on normalized
+   file paths relative to the project root (Ppath.t).
+
+   Patterns are matched according the Semgrepignore specification which
+   obeys the Gitignore specification.
+
+   coupling: legacy_rule_filtering: true for now, will become false after a
+   deprecation period. See the variable of the same name in pysemgrep
+   (target_manager.py) where this behavior is duplicated.
+*)
+let make_glob ~rule_name ~is_include source_pattern : Rule.glob =
+  let source = Glob.Match.string_loc ~source_kind:None source_pattern in
+  let legacy_rule_filtering = true in
+  let { compiled_pattern; is_affected_by_middle_slash_option; _ } :
+      Parse_gitignore.parse_pattern_result =
+    (* This takes care of modifying the pattern depending on whether
+       it is anchored or not. For example, 'a/b' is treated as
+       anchored due to a slash in the middle which is a weird thing
+       in the Gitignore specification we need to honor. *)
+    Parse_gitignore.parse_pattern ~source
+      ~middle_slash_anchors_left:(not legacy_rule_filtering)
+      ~left_anchor:Glob.Pattern.root_pattern ~right_anchored:false
+      source_pattern
   in
-  parse_list env key parse_equivalence value
+  let res : Rule.glob = { source_pattern; compiled_pattern } in
+  if legacy_rule_filtering && is_affected_by_middle_slash_option then
+    Log.warn (fun m ->
+        let include_or_exclude = if is_include then "include" else "exclude" in
+        m
+          "Rule %s contains an %s pattern %s' that will soon be interpreted as \
+           '/%s' to comply with the Semgrepignore v2 and Gitignore \
+           specifications. To make this pattern permanently unanchored, edit \
+           rule %s and change it to '**/%s'. To confirm the anchored behavior \
+           and avoid this warning, change it to '/%s'."
+          rule_name include_or_exclude source_pattern source_pattern rule_name
+          source_pattern source_pattern);
+  Log.debug (fun m -> m "glob pattern found in rule: %s" (Rule.show_glob res));
+  res
 
 let parse_paths env key value =
   let/ paths_dict = parse_dict env key value in
   (* TODO: should imitate parse_string_wrap_list *)
-  let parse_glob_list env (key : key) e =
+  let rule_name = Rule_ID.show env.id in
+  let parse_glob_list ~is_include env (key : key) e =
     let extract_string env = function
-      | { G.e = G.L (String (_, (value, _), _)); _ } -> (
-          try Ok (value, Glob.Parse.parse_string value) with
+      | { G.e = G.L (String (_, (source_pattern, _), _)); _ } -> (
+          try Ok (make_glob ~rule_name ~is_include source_pattern) with
           | Glob.Lexer.Syntax_error _ ->
               error_at_key env.id key ("Invalid glob for " ^ fst key))
       | _ ->
@@ -177,12 +196,16 @@ let parse_paths env key value =
     in
     parse_list env key extract_string e
   in
-  let/ inc_opt = take_opt paths_dict env parse_glob_list "include" in
-  let/ exc_opt = take_opt paths_dict env parse_glob_list "exclude" in
+  let/ inc_opt =
+    take_opt paths_dict env (parse_glob_list ~is_include:true) "include"
+  in
+  let/ exc_opt =
+    take_opt paths_dict env (parse_glob_list ~is_include:false) "exclude"
+  in
   (* alt: we could use H.warn_if_remaining_unparsed_fields() but better to
    * raise an error for now to be compatible with pysemgrep.
    *)
-  if Hashtbl.length paths_dict.h > 0 then
+  if Base.Hashtbl.length paths_dict.h > 0 then
     error_at_key env.id key
       "Additional properties are not allowed (only 'include' and 'exclude' are \
        supported)"
@@ -212,6 +235,9 @@ let parse_options rule_id (key : key) value =
 (* Parsers for taint *)
 (*****************************************************************************)
 
+let mk_taint_spec_id env prefix =
+  prefix ^ String.concat ":" env.path ^ ":" ^ Rule_ID.to_string env.id
+
 let parse_by_side_effect env (key : key) x =
   match x.G.e with
   | G.L (String (_, ("true", _), _)) -> Ok R.Yes
@@ -235,10 +261,10 @@ let requires_expr_to_precondition env key e =
           ("Invalid `requires' expression, metavariables cannot be used as \
             labels: " ^ str)
     | G.N (G.Id ((str, _), _)) -> Ok (R.PLabel str)
-    | G.Call ({ e = G.IdSpecial (G.Op G.Not, _); _ }, (_, [ Arg e1 ], _)) ->
+    | G.Call ({ e = G.Special (G.Op G.Not, _); _ }, (_, [ Arg e1 ], _)) ->
         let/ precond = expr_to_precondition e1 in
         Ok (R.PNot precond)
-    | G.Call ({ e = G.IdSpecial (G.Op op, _); _ }, (_, args, _)) -> (
+    | G.Call ({ e = G.Special (G.Op op, _); _ }, (_, args, _)) -> (
         let/ precond = args_to_precondition args in
         match (op, precond) with
         | G.And, xs -> Ok (R.PAnd xs)
@@ -266,7 +292,7 @@ let parse_taint_requires env key x =
 (* TODO: can add a case where these take in only a single string *)
 let parse_taint_source ~(is_old : bool) env (key : key) (value : G.expr) :
     (Rule.taint_source, Rule_error.t) result =
-  let source_id = "source:" ^ String.concat ":" env.path in
+  let source_id = mk_taint_spec_id env "source:" in
   let parse_from_dict dict f =
     let/ source_exact =
       take_opt dict env parse_bool "exact"
@@ -285,7 +311,8 @@ let parse_taint_source ~(is_old : bool) env (key : key) (value : G.expr) :
       |> Result.map (Option.value ~default:R.default_source_label)
     in
     let/ source_requires = take_opt dict env parse_taint_requires "requires" in
-    let/ source_formula = f env dict in
+    let/ raw_source_formula = f env dict in
+    let source_formula = R.Formula raw_source_formula in
     Ok
       {
         R.source_id;
@@ -305,7 +332,7 @@ let parse_taint_source ~(is_old : bool) env (key : key) (value : G.expr) :
     match source with
     | Left value ->
         let/ formula = Parse_rule_formula.parse_rule_xpattern env value in
-        let source_formula = R.f (R.P formula) in
+        let source_formula = R.Formula (R.f (R.P formula)) in
         Ok
           {
             Rule.source_id;
@@ -321,7 +348,7 @@ let parse_taint_source ~(is_old : bool) env (key : key) (value : G.expr) :
 
 let parse_taint_propagator ~(is_old : bool) env (key : key) (value : G.expr) :
     (Rule.taint_propagator, Rule_error.t) result =
-  let propagator_id = "propagator:" ^ String.concat ":" env.path in
+  let propagator_id = mk_taint_spec_id env "propagator:" in
   let f =
     if is_old then Parse_rule_formula.parse_formula_old_from_dict
     else Parse_rule_formula.parse_formula_from_dict
@@ -360,7 +387,7 @@ let parse_taint_propagator ~(is_old : bool) env (key : key) (value : G.expr) :
   parse_from_dict dict f
 
 let parse_taint_sanitizer ~(is_old : bool) env (key : key) (value : G.expr) =
-  let sanitizer_id = "sanitizer:" ^ String.concat ":" env.path in
+  let sanitizer_id = mk_taint_spec_id env "sanitizer:" in
   let parse_from_dict dict f =
     let/ sanitizer_exact =
       take_opt dict env parse_bool "exact"
@@ -375,7 +402,8 @@ let parse_taint_sanitizer ~(is_old : bool) env (key : key) (value : G.expr) =
         (if is_old then "not_conflicting" else "not-conflicting")
       |> Result.map (Option.value ~default:false)
     in
-    let/ sanitizer_formula = f env dict in
+    let/ raw_sanitizer_formula = f env dict in
+    let sanitizer_formula = R.Formula raw_sanitizer_formula in
     Ok
       Rule.
         {
@@ -394,7 +422,7 @@ let parse_taint_sanitizer ~(is_old : bool) env (key : key) (value : G.expr) =
     match sanitizer with
     | Left value ->
         let/ xpattern = Parse_rule_formula.parse_rule_xpattern env value in
-        let sanitizer_formula = R.P xpattern |> R.f in
+        let sanitizer_formula = R.Formula (R.P xpattern |> R.f) in
         Ok
           {
             sanitizer_id;
@@ -406,11 +434,66 @@ let parse_taint_sanitizer ~(is_old : bool) env (key : key) (value : G.expr) =
     | Right dict ->
         parse_from_dict dict Parse_rule_formula.parse_formula_from_dict
 
+let parse_taint_sink_mvar_requires env key x =
+  let parse_item env x : (MV.mvar R.wrap * R.precondition_with_range, _) result
+      =
+    match x.G.e with
+    | G.Container
+        ( Dict,
+          ( _l,
+            [
+              {
+                e =
+                  G.Container
+                    ( G.Tuple,
+                      ( _,
+                        [
+                          {
+                            e =
+                              (* When running `semgrep-core` directly this gets parsed as a literal,
+                                 but when running via "pysemgrep" this gets parsed as an id... so we
+                                 accept both forms. *)
+                              ( L (String (_, (mvar, tok), _))
+                              | N (Id ((mvar, tok), _)) );
+                            _;
+                          };
+                          rhs;
+                        ],
+                        _ ) );
+                _;
+              };
+            ],
+            _r ) ) ->
+        if not (Mvar.is_metavar_name mvar) then
+          error_at_expr env.id x (spf "`%s' is not a valid metavariable" mvar)
+        else
+          let/ requires = parse_taint_requires env key rhs in
+          Ok ((mvar, tok), requires)
+    | __else__ ->
+        error_at_expr env.id x
+          "Invalid `requires:' item in sink specification, expected <$MVAR>: \
+           <precondition>"
+  in
+  parse_list env key parse_item x
+
 let parse_taint_sink ~(is_old : bool) env (key : key) (value : G.expr) :
     (Rule.taint_sink, Rule_error.t) result =
-  let sink_id = "sink:" ^ String.concat ":" env.path in
+  let sink_id = mk_taint_spec_id env "sink:" in
   let parse_from_dict dict f =
-    let/ sink_requires = take_opt dict env parse_taint_requires "requires" in
+    let/ sink_requires =
+      match dict_take_opt dict "requires" with
+      | None -> Ok None
+      | Some (key, value) -> (
+          match parse_string env key value with
+          | Ok _ ->
+              parse_taint_requires env key value
+              |> Result.map (fun precond -> Some (Rule.UniReq precond))
+          | Error _ ->
+              (* If not a string, then we assume it must be a "multi-requires". *)
+              parse_taint_sink_mvar_requires env key value
+              |> Result.map (fun mvars_w_preconds ->
+                  Some (Rule.MultiReq mvars_w_preconds)))
+    in
     let/ sink_at_exit =
       take_opt dict env parse_bool "at-exit"
       |> Result.map (Option.value ~default:false)
@@ -419,8 +502,9 @@ let parse_taint_sink ~(is_old : bool) env (key : key) (value : G.expr) :
       take_opt dict env parse_bool "exact"
       |> Result.map (Option.value ~default:true)
     in
-    let/ sink_formula = f env dict in
-    let sink_has_focus = Rule.is_formula_with_focus sink_formula in
+    let/ raw_sink_formula = f env dict in
+    let sink_has_focus = Rule.is_formula_with_focus raw_sink_formula in
+    let sink_formula = Rule.Formula raw_sink_formula in
     Ok
       Rule.
         {
@@ -440,8 +524,9 @@ let parse_taint_sink ~(is_old : bool) env (key : key) (value : G.expr) :
     match sink with
     | Left value ->
         let/ xpattern = Parse_rule_formula.parse_rule_xpattern env value in
-        let sink_formula = R.P xpattern |> R.f in
-        let sink_has_focus = Rule.is_formula_with_focus sink_formula in
+        let raw_sink_formula = R.P xpattern |> R.f in
+        let sink_has_focus = Rule.is_formula_with_focus raw_sink_formula in
+        let sink_formula = Rule.Formula raw_sink_formula in
         Ok
           Rule.
             {
@@ -483,17 +568,17 @@ let parse_taint_pattern env key (value : G.expr) =
   in
   Ok
     (`Taint
-      Rule.
-        {
-          sources;
-          propagators =
-            (* optlist_to_list *)
-            (match propagators_opt with
-            | None -> []
-            | Some (_, xs) -> xs);
-          sanitizers = sanitizers_opt;
-          sinks;
-        })
+       Rule.
+         {
+           sources;
+           propagators =
+             (* optlist_to_list *)
+             (match propagators_opt with
+             | None -> []
+             | Some (_, xs) -> xs);
+           sanitizers = sanitizers_opt;
+           sinks;
+         })
 
 (*****************************************************************************)
 (* Parsers for extract mode *)
@@ -551,7 +636,7 @@ let parse_rules_to_run_with_extract env key value =
   let/ inc_opt = parse_rule_ids ruleids_dict env "include" in
   let/ exc_opt = parse_rule_ids ruleids_dict env "exclude" in
   (* to be compatible with pysemgrep *)
-  if Hashtbl.length ruleids_dict.h > 0 then
+  if Base.Hashtbl.length ruleids_dict.h > 0 then
     error_at_key env.id key
       "Additional properties are not allowed (only 'include' and 'exclude' are \
        supported)"
@@ -615,17 +700,17 @@ let parse_taint_fields env rule_dict =
       in
       Ok
         (`Taint
-          Rule.
-            {
-              sources;
-              propagators =
-                (* optlist_to_list *)
-                (match propagators_opt with
-                | None -> []
-                | Some (_, xs) -> xs);
-              sanitizers = sanitizers_opt;
-              sinks;
-            })
+           Rule.
+             {
+               sources;
+               propagators =
+                 (* optlist_to_list *)
+                 (match propagators_opt with
+                 | None -> []
+                 | Some (_, xs) -> xs);
+               sanitizers = sanitizers_opt;
+               sinks;
+             })
 
 (*****************************************************************************)
 (* Parsers for step mode *)
@@ -655,7 +740,7 @@ let parse_step_fields env key (value : G.expr) : (R.step, Rule_error.t) result =
 
   (* TODO: factorize with parse_mode *)
   let/ mode_opt = take_opt rd env parse_string_wrap "mode" in
-  let has_taint_key = Option.is_some (Hashtbl.find_opt rd.h "taint") in
+  let has_taint_key = Option.is_some (Base.Hashtbl.find rd.h "taint") in
   let/ step_mode =
     match (mode_opt, has_taint_key) with
     | None, false
@@ -675,9 +760,78 @@ let parse_step_fields env key (value : G.expr) : (R.step, Rule_error.t) result =
 let parse_steps env key (value : G.expr) : (R.step list, Rule_error.t) result =
   let parse_step step = parse_step_fields env key step in
   match value.G.e with
-  | G.Container (Array, (_, xs, _)) ->
-      List_.map parse_step xs |> Base.Result.all
+  | G.Container (Array, (_, xs, _)) -> List.map parse_step xs |> Base.Result.all
   | _ -> error_at_key env.id key ("Expected a list for " ^ fst key)
+
+(*****************************************************************************)
+(* Parsers for join mode *)
+(*****************************************************************************)
+let parse_rename env key (value : G.expr) : (Rule.rename, Rule_error.t) result =
+  let/ rd = parse_dict env key value in
+  let/ from_ = take_key rd env parse_string "from" in
+  let/ to_ = take_key rd env parse_string "to" in
+  if Base.Hashtbl.length rd.h > 0 then
+    error_at_key env.id key
+      "Additional properties are not allowed in 'renames' (only 'from' and \
+       'to')"
+  else Ok Rule.{ from_; to_ }
+
+let parse_join_ref env key (value : G.expr) :
+    (Rule.join_ref, Rule_error.t) result =
+  let/ rd = parse_dict env key value in
+  let/ rule = take_key rd env parse_string "rule" in
+  let/ as_ = take_opt rd env parse_string "as" in
+  let/ renames =
+    take_opt rd env
+      (fun env key v ->
+        parse_list env key (fun env' -> parse_rename env' key) v)
+      "renames"
+    |> Result.map (Option.value ~default:[])
+  in
+  if Base.Hashtbl.length rd.h > 0 then
+    error_at_key env.id key
+      "Additional properties are not allowed in 'refs' items (only 'rule', \
+       'as', and 'renames')"
+  else Ok Rule.{ rule; as_; renames }
+
+let parse_join env key (value : G.expr) : (Rule.join, Rule_error.t) result =
+  let/ rd = parse_dict env key value in
+  let/ refs_opt =
+    take_opt rd env
+      (fun env key v ->
+        parse_list env key (fun env' -> parse_join_ref env' key) v)
+      "refs"
+  in
+  let/ rules_opt =
+    take_opt rd env
+      (fun env key v ->
+        parse_list env key (fun env' -> parse_step_fields env' key) v)
+      "rules"
+  in
+  let/ refs, rules =
+    match (refs_opt, rules_opt) with
+    | Some _, Some _ ->
+        error_at_key env.id key
+          "You cannot use both 'refs' and 'rules' in a 'join'."
+    | None, None ->
+        error_at_key env.id key
+          "You must use either 'refs' or 'rules' in a 'join'."
+    | Some refs, None -> Ok (refs, [])
+    | None, Some rules -> Ok ([], rules)
+  in
+  (*NOTE: We don't parse the conditions to check their validity, only
+    extracting them as strings. *)
+  let/ on_conds =
+    take_key rd env
+      (fun env key v ->
+        parse_list env key (fun env' -> parse_string env' key) v)
+      "on"
+  in
+  if Base.Hashtbl.length rd.h > 0 then
+    error_at_key env.id key
+      "Additional properties are not allowed in 'join' (only 'refs', 'rules' \
+       and 'on')"
+  else Ok Rule.{ refs; rules; on = on_conds }
 
 (*****************************************************************************)
 (* Parsers for secrets mode *)
@@ -696,12 +850,10 @@ let parse_http_request env key value : (Rule.request, Rule_error.t) result =
   let/ headers = take_key req env parse_dict "headers" in
   let/ headers =
     headers |> fun { h; _ } ->
-    Hashtbl.fold
-      (fun name value lst ->
+    Base.Hashtbl.fold h ~init:(Ok []) ~f:(fun ~key:name ~data:value lst ->
         let/ lst = lst in
         let/ value = parse_string env (fst value) (snd value) in
         Ok ({ Rule.name; value } :: lst))
-      h (Ok [])
   in
   let/ body = take_opt req env parse_string "body" in
   let/ auth = take_opt req env parse_auth "auth" in
@@ -797,7 +949,7 @@ let parse_aws_validator env key value : (Rule.validator, Rule_error.t) result =
 
 let parse_validator key env value =
   let/ dict = parse_dict env key value in
-  match List_.find_some_opt (Hashtbl.find_opt dict.h) [ "http"; "aws" ] with
+  match List_.find_some_opt (Base.Hashtbl.find dict.h) [ "http"; "aws" ] with
   | Some (("http", _), value) -> parse_http_validator env key value
   | Some (("aws", _), value) -> parse_aws_validator env key value
   | Some _
@@ -815,9 +967,18 @@ let parse_validators env key value =
 
 let parse_ecosystem env key value =
   match value.G.e with
-  | G.L (String (_, (_ecosystem, _), _)) ->
-      Ok `Npm
-      (* | _ -> error_at_key env.id key ("Unknown ecosystem: " ^ ecosystem)) *)
+  | G.L (String (_, (ecosystem, _), _)) -> (
+      (* ATD deserializers expect JSON values, so we need to wrap the ecosystem in quotes. *)
+      try
+        Ok
+          (Semgrep_output_v1_j.ecosystem_of_string
+             (Common.spf "\"%s\"" ecosystem))
+      with
+      (* It's not clear to me what exception could be raised here, so catch-all. *)
+      | e ->
+          error_at_key env.id key
+            (Common.spf "Failure parsing ecosystem %s: %s" ecosystem
+               (Printexc.to_string e)))
   | _ -> error_at_key env.id key "Non-string data for ecosystem?"
 
 let parse_dependency_pattern key env value :
@@ -838,7 +999,7 @@ let parse_dependency_pattern key env value :
 let parse_dependency_formula env key value :
     (R.sca_dependency_formula, Rule_error.t) result =
   let/ rd = parse_dict env key value in
-  if Hashtbl.mem rd.h "depends-on-either" then
+  if Base.Hashtbl.mem rd.h "depends-on-either" then
     take_key rd env
       (fun env key -> parse_list env key (parse_dependency_pattern key))
       "depends-on-either"
@@ -856,7 +1017,7 @@ let parse_mode env mode_opt dep_fml_opt (rule_dict : dict) :
   (* We do this because we should only assume that we have a search mode rule
      if there is not a `taint` key present in the rule dict.
   *)
-  let has_taint_key = Option.is_some (Hashtbl.find_opt rule_dict.h "taint") in
+  let has_taint_key = Option.is_some (Base.Hashtbl.find rule_dict.h "taint") in
   (* TODO? maybe have also has_extract_key, has_steps_key, has_secrets_key *)
   match (mode_opt, has_taint_key, dep_fml_opt) with
   (* no mode:, no taint:, default to look for match: *)
@@ -895,12 +1056,15 @@ let parse_mode env mode_opt dep_fml_opt (rule_dict : dict) :
       in
       Ok
         (`Extract
-          Rule.
-            { formula; dst_lang; extract_rule_ids; extract; reduce; transform })
+           Rule.
+             { formula; dst_lang; extract_rule_ids; extract; reduce; transform })
   (* TODO? should we use "mode: steps" instead? *)
   | Some ("step", _), _, _ ->
       let/ steps = take_key rule_dict env parse_steps "steps" in
       Ok (`Steps steps)
+  | Some ("join", _), _, _ ->
+      let/ joins = take_key rule_dict env parse_join "join" in
+      Ok (`Join joins)
   (* SCA Doesn't require patterns. Just trying to be permissive here
      for now. If the SCA rule is a valid search rule then we go ahead
      and parse it as a search rule. Right now the dependency_formula
@@ -989,18 +1153,18 @@ let parse_one_rule ~rewrite_rule_ids (i : int) (rule : G.expr) :
   let/ max_version = take_opt_no_env rd parse_version "max-version" in
   let/ () = check_version_compatibility rule_id ~min_version ~max_version in
 
+  let/ mode_opt = take_opt_no_env rd parse_string_wrap_no_env "mode" in
+
   let/ languages_opt =
     take_opt_no_env rd parse_string_wrap_list_no_env "languages"
   in
   let/ languages =
-    match languages_opt with
-    | Some languages -> Ok languages
-    (* TODO: join-mode does not have languages and is not recognized right now
-     * by semgrep-core
-     * TODO? steps-mode or rules using just pattern-regex could also skip
-     * the languages section? (and use target selector instead)
-     *)
-    | None -> H.error rule_id tok "missing languages"
+    match (languages_opt, mode_opt) with
+    | Some languages, _ -> Ok languages
+    (* TODO? steps-mode or rules using just pattern-regex could also skip
+     * the languages section? (and use target selector instead) *)
+    | None, Some ("join", tok) -> Ok [ ("none", tok) ]
+    | None, _ -> H.error rule_id tok "missing languages"
   in
   let/ options_opt, options_key =
     let/ options = take_opt_no_env rd (parse_options rule_id) "options" in
@@ -1022,7 +1186,6 @@ let parse_one_rule ~rewrite_rule_ids (i : int) (rule : G.expr) :
       options = options_opt;
     }
   in
-  let/ mode_opt = take_opt rd env parse_string_wrap "mode" in
   let/ dep_formula_opt =
     take_opt rd env parse_dependency_formula "r2c-internal-project-depends-on"
   in
@@ -1042,7 +1205,6 @@ let parse_one_rule ~rewrite_rule_ids (i : int) (rule : G.expr) :
   let/ fix_opt = take_opt rd env parse_string "fix" in
   let/ fix_regex_opt = take_opt rd env parse_fix_regex "fix-regex" in
   let/ paths_opt = take_opt rd env parse_paths "paths" in
-  let/ equivs_opt = take_opt rd env parse_equivalences "equivalences" in
   let/ validators_opt = take_opt rd env parse_validators "validators" in
   H.warn_if_remaining_unparsed_fields rule_id rd;
   Ok
@@ -1061,21 +1223,62 @@ let parse_one_rule ~rewrite_rule_ids (i : int) (rule : G.expr) :
       fix = fix_opt |> Option.map String.trim;
       fix_regexp = fix_regex_opt;
       paths = paths_opt;
-      equivalences = equivs_opt;
       options = options_opt;
       validators = validators_opt;
       dependency_formula = dep_formula_opt;
     }
 
-let parse_generic_ast ?(error_recovery = false) ?rewrite_rule_ids
-    (file : Fpath.t) (ast : AST_generic.program) :
+(* Below this many rules, the overhead of spawning
+   domains for parallel validation outweighs the benefit.
+ *)
+let min_rules_for_parallel_validation = 128
+
+let parse_one_rule_with_recovery ~error_recovery ?rewrite_rule_ids (i : int)
+    (rule : G.expr) :
+    ((Rule.t, Rule_error.invalid_rule) Either.t, Rule_error.t) result =
+  match parse_one_rule ~rewrite_rule_ids i rule with
+  | Ok rule -> Ok (Either.Left rule)
+  | Error { kind = InvalidRule ((kind, ruleid, _) as err); _ }
+    when error_recovery || Rule_error.is_skippable_error kind ->
+      let s = Rule_error.string_of_invalid_rule_kind kind in
+      Log.warn (fun m ->
+          m "skipping rule %s, error = %s" (Rule_ID.to_string ruleid) s);
+      Ok (Either.Right err)
+  | Error err -> Error err
+
+let parse_rules ?par_conf ?num_jobs ~error_recovery ?rewrite_rule_ids
+    (rules : G.expr list) :
+    ((Rule.t, Rule_error.invalid_rule) Either.t list, Rule_error.t) result =
+  let parse_one i rule =
+    parse_one_rule_with_recovery ~error_recovery ?rewrite_rule_ids i rule
+  in
+  let results =
+    match (par_conf, num_jobs) with
+    | Some (Parallelism_config.Eio_executor conf), Some n
+      when n > 1
+           && List.compare_length_with rules min_rules_for_parallel_validation
+              >= 0 ->
+        Log.debug (fun m -> m "Validating rules across %d domains" n);
+        rules
+        |> List.mapi (fun i rule -> (i, rule))
+        |> Concurrent.map ~conf ~domain_count:n (fun (i, rule) ->
+            parse_one i rule)
+        |> List.map (function
+          | Ok inner -> inner
+          | Error ((_i, _rule), exn) -> Exception.catch_and_reraise exn)
+    | _ -> List.mapi parse_one rules
+  in
+  Base.Result.all results
+
+let parse_generic_ast ?(error_recovery = false) ?par_conf ?num_jobs
+    ?rewrite_rule_ids (file : Fpath.t) (ast : AST_generic.program) :
     (Rule_error.rules_and_invalid, Rule_error.t) result =
   let res =
     let/ rules =
       match ast with
       | [ { G.s = G.ExprStmt (e, _); _ } ] -> (
           let missing_rules_field () =
-            let loc = Tok.first_loc_of_file file in
+            let loc = Loc.first_loc_of_file file in
             yaml_error (Tok.tok_of_loc loc)
               "missing rules entry as top-level key"
           in
@@ -1092,11 +1295,16 @@ let parse_generic_ast ?(error_recovery = false) ?rewrite_rule_ids
                         yaml_error_at_expr rules
                           "expected a list of rules following `rules:`")
               in
+              (* TODO: 'missed' key is present in the rules downloaded from
+                 semgrep.dev. We don't do anything with the value, but consume
+                 it from the dict to prevent error about unknown or duplicate
+                 properties in YAML. *)
+              let _missed = dict_take_opt root_dict "missed" in
               let/ () = check_that_dict_is_empty root_dict in
               Ok rules
           (* it's also ok to not have the toplevel rules:, anyway we never
-             * used another toplevel key
-          *)
+           * used another toplevel key
+           *)
           | G.Container (G.Array, (_tok, rules, _r)) -> Ok rules
           | _ -> missing_rules_field ())
       | [] ->
@@ -1106,25 +1314,14 @@ let parse_generic_ast ?(error_recovery = false) ?rewrite_rule_ids
       (* yaml_to_generic should always return a ExprStmt *)
     in
     let/ xs =
-      rules
-      |> List_.mapi (fun i rule ->
-             match parse_one_rule ~rewrite_rule_ids i rule with
-             | Ok rule -> Ok (Either.Left rule)
-             | Error { kind = InvalidRule ((kind, ruleid, _) as err); _ }
-               when error_recovery || Rule_error.is_skippable_error kind ->
-                 let s = Rule_error.string_of_invalid_rule_kind kind in
-                 Log.warn (fun m ->
-                     m "skipping rule %s, error = %s" (Rule_ID.to_string ruleid)
-                       s);
-                 Ok (Either.Right err)
-             | Error err -> Error err)
-      |> Base.Result.all
+      parse_rules ?par_conf ?num_jobs ~error_recovery ?rewrite_rule_ids rules
     in
     Ok (Either_.partition (fun x -> x) xs)
   in
   match res with
   | Error (err : Rule_error.t) -> Error (Rule_error.augment_with_file file err)
   | other -> other
+[@@trace]
 
 (* We can't call just Yaml_to_generic.program below because when we parse
  * YAML Semgrep rules, we preprocess unicode characters differently.
@@ -1134,43 +1331,50 @@ let parse_generic_ast ?(error_recovery = false) ?rewrite_rule_ids
  * because we don't want parsing/other/ to depend on core/.
  *)
 let parse_yaml_rule_file ~is_target (file : Fpath.t) =
-  let str = UFile.read_file file in
-  try Ok (Yaml_to_generic.parse_yaml_file ~is_target file str) with
+  let str =
+    (* Tracing here rather than at the definition site of these functions to
+     * avoid excessive tracing when reading other files, which we do a lot. *)
+    let%trace span = "UFile.read_file" in
+    let str = UFile.read_file file in
+    Tracing.add_data_to_span span [ ("file_bytes", `Int (String.length str)) ];
+    str
+  in
+  try
+    (* Tracing here rather than at the definition site of these functions to
+     * avoid excessive tracing when parsing YAML targets. *)
+    let%trace _span = "Yaml_to_generic.parse_yaml_file" in
+    Ok (Yaml_to_generic.parse_yaml_file ~is_target file str)
+  with
   | Parsing_error.Other_error (s, t) ->
       Error (Rule_error.mk_error (InvalidYaml (s, t)))
+[@@trace]
 
-let parse_file ?error_recovery ?rewrite_rule_ids file :
+let parse_file ?error_recovery ?par_conf ?num_jobs ?rewrite_rule_ids file :
     (Rule.rules * Rule_error.invalid_rule list, Rule_error.t) result =
   let/ ast =
     (* coupling: Rule_file.is_valid_rule_filename *)
     match FT.file_type_of_file file with
     | FT.Config FT.Json ->
-        (* in a parsing-rule context, we don't want the parsed strings by
-         * Parse_json.parse_program to remain escaped. For example with this
-         * JSON rule:
-         * { "rules": [ {
-         *       "id": "x",
-         *       "message": "",
-         *       "languages": ["python"],
-         *       "severity": "WARNING",
-         *       "pattern": "\"hello\""
-         *     }
-         *   ]
-         * }
-         * we want the pattern in the generic AST of the rule to contain the
-         * string '"hello"', without the antislash, otherwise
-         * Parse_python.parse_any will fail parsing it.
+        (* We use [Fast_json], a hand-written RFC 8259 parser, instead of
+         * the legacy [Parse_json + Json_to_generic ~unescape_strings:true]
+         * chain. The reason the legacy path needed [~unescape_strings:true]
+         * at all is that [Parse_json] piggy-backs on the JS parser, which
+         * leaves most JSON escapes literal in the AST: a JSON pattern field
+         * containing a backslash-escaped quote arrives in the AST with the
+         * backslashes still present, and [unescape_strings:true] then runs
+         * each string through Yojson to do the actual JSON unescape at
+         * AST-rewrite time. [Fast_json] performs full JSON unescaping
+         * inline during parse, so by the time we get [generic] the embedded
+         * pattern string is already in its final unescaped form, ready for
+         * the downstream pattern parser.
          *
-         * Note that we didn't have this problem before when we were using
-         * Yojson to parse a JSON rule, because Yojson correctly unescaped
-         * and returned the "final string".
-         *
-         * Note that this is handled correctly by Yaml_to_generic.parse_rule
-         * below.
-         *)
-        Ok
-          (Json_to_generic.program ~unescape_strings:true
-             (Parse_json.parse_program file))
+         * This swap is rule-file-specific (see [Fast_json.ml] preamble for
+         * scope and intentional differences from the legacy path). It is
+         * NOT safe to use [Fast_json] for parsing JSON patterns or JSON
+         * targets as a drop-in replacement; those paths still use
+         * [Parse_json + Json_to_generic]. *)
+        let%trace _span = "Fast_json.parse_program" in
+        Ok (Fast_json.parse_program file)
     | FT.Config FT.Jsonnet ->
         (* old: via external jsonnet program
            Common2.with_tmp_file ~str:"parse_rule" ~ext:"json" (fun tmpfile ->
@@ -1201,15 +1405,20 @@ let parse_file ?error_recovery ?rewrite_rule_ids file :
               !!file);
         parse_yaml_rule_file ~is_target:true file
   in
-  parse_generic_ast ?error_recovery ?rewrite_rule_ids file ast
+  parse_generic_ast ?error_recovery ?par_conf ?num_jobs ?rewrite_rule_ids file
+    ast
+[@@trace]
 
 (*****************************************************************************)
 (* Main Entry point *)
 (*****************************************************************************)
 
-let parse_and_filter_invalid_rules ?rewrite_rule_ids (file : Fpath.t) :
+let parse_and_filter_invalid_rules ?par_conf ?num_jobs ?rewrite_rule_ids
+    (file : Fpath.t) :
     (Rule.rules * Rule_error.invalid_rule list, Rule_error.t) result =
-  let/ rules, errors = parse_file ~error_recovery:true ?rewrite_rule_ids file in
+  let/ rules, errors =
+    parse_file ~error_recovery:true ?par_conf ?num_jobs ?rewrite_rule_ids file
+  in
   Log.debug (fun m ->
       m "Parse_rule.parse_and_filter_invalid_rules(%s) = " !!file);
   rules |> List.iter (fun r -> Log.debug (fun m -> m "%s" (Rule.show r)));
@@ -1237,8 +1446,11 @@ let parse_fake_xpattern analyzer str =
 (* Useful for tests *)
 (*****************************************************************************)
 
-let parse (file : Fpath.t) : (Rule.rules, Rule_error.t) result =
-  let/ xs, _skipped = parse_file ~error_recovery:false file in
+let parse ?par_conf ?num_jobs (file : Fpath.t) :
+    (Rule.rules, Rule_error.t) result =
+  let/ xs, _skipped =
+    parse_file ~error_recovery:false ?par_conf ?num_jobs file
+  in
   (* The skipped rules include Apex rules and other rules that are always
      skippable. *)
   Ok xs

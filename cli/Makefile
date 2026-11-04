@@ -4,19 +4,14 @@
 
 # Run everything that makes sense to run.
 .PHONY: default
-default: Pipfile.lock
-	$(MAKE) build
+default:
+	$(MAKE) check
 	$(MAKE) test
 	$(MAKE) qa
 
 ###############################################################################
 # Build (and clean)
 ###############################################################################
-
-# Generate code. Needed at least when the interface changes.
-.PHONY: build
-build:
-	$(MAKE) check
 
 .PHONY: check
 check:
@@ -46,9 +41,6 @@ clean:
 	rm -f src/semgrep/bin/semgrep-core*
 	rm -f src/semgrep/bin/pro-installed-by.txt
 
-Pipfile.lock: setup.py
-	pipenv update
-
 ###############################################################################
 # Tests
 ###############################################################################
@@ -57,9 +49,18 @@ Pipfile.lock: setup.py
 # the quick tests but for the sake of maintainability, we use the same options
 # everywhere.
 #
+# Some of our tests perform git commits, so to avoid signing them as the
+# current user, we ignore the user's .gitconfig by sourcing a global git_config
+# from /dev/null.
+#
+# We are seeing some pytest runs failing with a segfault, despite all the tests
+# passing. Adding PYTHONFAULTHANDLER=1 to the pytest command so that next time
+# it happens, we can get a traceback.
 PYTEST ?= \
-  pipenv run pytest \
-    -n auto -vv --tb=short --durations=10 $(PYTEST_EXTRA_ARGS)
+   PYTHONFAULTHANDLER=1 \
+   GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0="commit.gpgsign" GIT_CONFIG_VALUE_0="false" \
+  uv run --locked pytest \
+    -n auto -vv --tb=long --timeout=300 --durations=10 $(PYTEST_EXTRA_ARGS)
 
 # This is run from .github/workflow/tests.jsonnet (which sets
 # PYTEST_EXTRA_ARGS to some value for snapshot update).
@@ -74,6 +75,8 @@ PYTEST ?= \
 ci-test:
 	# To fail faster, consider running 'make test-dev' instead.
 	$(MAKE) check
+	# We add a timeout of 5 minutes to curb hanging/non-terminating
+	# tests
 	$(PYTEST) -m 'not pysemfail' tests/default
 
 # While 'make typecheck' doesn't work in CI, use 'make ci-test'
@@ -184,15 +187,19 @@ osemgrep-qa:
 # Dev targets
 ###############################################################################
 
-.PHONY:
+# Tip: if you just ran 'make test' and you got errors due to test snapshots
+# that need updating, it's faster to rerun only the failed tests with '--lf'
+# combined with '--snapshot-update'.
+#
+.PHONY: regenerate-tests
 regenerate-tests:
-	pipenv run pytest -n auto \
+	uv run pytest -n auto \
 	  --run-only-snapshots --snapshot-update --allow-snapshot-deletion \
 	  -m 'not pysemfail' tests/default/e2e tests/default/e2e-other
-	PYTEST_USE_OSEMGREP=true pipenv run pytest -n auto \
+	PYTEST_USE_OSEMGREP=true uv run pytest -n auto \
 	  --run-only-snapshots --snapshot-update --allow-snapshot-deletion \
 	  -m 'pysemfail' tests/default/e2e tests/default/e2e-other
 
 .PHONY: setup
 setup:
-	pipenv install --dev
+	uv sync

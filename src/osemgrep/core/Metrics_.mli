@@ -1,3 +1,15 @@
+(*
+   Copyright (c) 2022-2025 Semgrep Inc.
+
+   This library is free software; you can redistribute it and/or
+   modify it under the terms of the GNU Lesser General Public License
+   version 2.1 as published by the Free Software Foundation.
+
+   This library is distributed in the hope that it will be useful, but
+   WITHOUT ANY WARRANTY; without even the implied warranty of
+   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the file
+   LICENSE for more details.
+*)
 (** Metrics upload configuration *)
 type config =
   | On  (** Always send metrics *)
@@ -45,6 +57,10 @@ type t = {
  *)
 val g : t
 
+(* Because this resource is global and may be accessed from multiple
+   LSP tasks, we need to protect it with a mutex. *)
+val g_mutex : Eio.Mutex.t
+
 (* set g.config *)
 val configure : config -> unit
 
@@ -65,7 +81,7 @@ val string_of_user_agent : unit -> string
  * You should not call this function though; only CLI.metrics_init()
  * should call it.
  *)
-val init : < Cap.random ; .. > -> anonymous_user_id:Uuidm.t -> ci:bool -> unit
+val init : anonymous_user_id:Uuidm.t -> ci:bool -> unit
 
 (* just set the payload.sent_at field *)
 val prepare_to_send : unit -> unit
@@ -103,3 +119,6 @@ val add_max_memory_bytes : Core_profiling.t option -> unit
 
 (* useful for us to improve semgrep *)
 val add_errors : Semgrep_output_v1_t.cli_error list -> unit
+
+(* for MCP metrics *)
+val add_findings : Semgrep_output_v1_t.cli_match list -> unit

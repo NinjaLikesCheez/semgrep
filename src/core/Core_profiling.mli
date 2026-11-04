@@ -1,3 +1,22 @@
+(*
+   Copyright (c) 2023-2025 Semgrep Inc.
+
+   This library is free software; you can redistribute it and/or
+   modify it under the terms of the GNU Lesser General Public License
+   version 2.1 as published by the Free Software Foundation.
+
+   This library is distributed in the hope that it will be useful, but
+   WITHOUT ANY WARRANTY; without even the implied warranty of
+   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the file
+   LICENSE for more details.
+*)
+(** Detailed profiling data used for [-json_time] ([--time] from the CLI)
+
+  This should probably be deprecated at some point, it is probably better to
+  rely on OpenTelemetry to gather this kind of data.
+
+ *)
+
 (* Should be set exactly once after the CLI arguments are read *)
 val profiling : bool ref
 
@@ -14,7 +33,7 @@ type rule_profiling = {
 (* Save time information as we run each file *)
 type file_profiling = {
   file : Fpath.t;
-  rule_times : rule_profiling list;
+  rule_times : rule_profiling list option;  (** only for -json_time *)
   run_time : float;
 }
 [@@deriving show]
@@ -26,7 +45,7 @@ type partial_profiling = {
 [@@deriving show]
 
 type t = {
-  rules : Rule.rule list;
+  rules : Rule.rule list option;  (** only for -json_time *)
   rules_parse_time : float;
   file_times : file_profiling list;
   max_memory_bytes : int;
@@ -42,3 +61,7 @@ val empty_rule_profiling : Rule.t -> rule_profiling
  * discard the profiling information.
  *)
 val profiling_opt : 'a -> 'a option
+
+val if_profiling : default:'a -> (unit -> 'a) -> 'a
+(** [if_profiling ~default f] returns [f()] if profiling is enabled,
+    and [default] otherwise. *)

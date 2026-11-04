@@ -1,3 +1,15 @@
+#
+# Copyright (c) 2023-2025 Semgrep Inc.
+#
+# This library is free software; you can redistribute it and/or
+# modify it under the terms of the GNU Lesser General Public License
+# version 2.1 as published by the Free Software Foundation.
+#
+# This library is distributed in the hope that it will be useful, but
+# WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the file
+# LICENSE for more details.
+#
 """
 Parser for Gemfile.lock files
 Based on https://stackoverflow.com/questions/7517524/understanding-the-gemfile-lock-file
@@ -7,6 +19,7 @@ from typing import List
 from typing import Optional
 from typing import Tuple
 
+import semgrep.semgrep_interfaces.semgrep_output_v1 as out
 from semdep.external.parsy import any_char
 from semdep.external.parsy import Parser
 from semdep.external.parsy import peek
@@ -19,11 +32,11 @@ from semdep.parsers.util import mark_line
 from semdep.parsers.util import safe_parse_lockfile_and_manifest
 from semdep.parsers.util import transitivity
 from semdep.parsers.util import upto
+from semgrep import telemetry
 from semgrep.semgrep_interfaces.semgrep_output_v1 import Ecosystem
 from semgrep.semgrep_interfaces.semgrep_output_v1 import FoundDependency
 from semgrep.semgrep_interfaces.semgrep_output_v1 import Fpath
 from semgrep.semgrep_interfaces.semgrep_output_v1 import Gem
-from semgrep.semgrep_interfaces.semgrep_output_v1 import GemfileLock_
 from semgrep.semgrep_interfaces.semgrep_output_v1 import ScaParserName
 
 
@@ -92,11 +105,14 @@ gemfile = gem_section.bind(
 )
 
 
+@telemetry.trace(telemetry.TraceOwner.SSC)
 def parse_gemfile(
     lockfile_path: Path, manifest_path: Optional[Path]
 ) -> Tuple[List[FoundDependency], List[DependencyParserError]]:
     parsed_lockfile, parsed_manifest, errors = safe_parse_lockfile_and_manifest(
-        DependencyFileToParse(lockfile_path, gemfile, ScaParserName(GemfileLock_())),
+        DependencyFileToParse(
+            lockfile_path, gemfile, ScaParserName(out.PGemfileLock())
+        ),
         None,
     )
     if not parsed_lockfile:

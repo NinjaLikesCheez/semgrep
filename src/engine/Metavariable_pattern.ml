@@ -33,9 +33,9 @@ let adjust_content_for_language (analyzer : Analyzer.t) (content : string) :
   | Analyzer.L (Lang.Php, _)
     when not (content =~ {|[ \t\n]*<\?\(php\|=\)?[ \t\n]+|}) ->
       (* THINK:
-         * - Shouldn't the parser just handle the absence of `<?php` ?
-         * - Isn't the `?>` closing needed ?
-      *)
+       * - Shouldn't the parser just handle the absence of `<?php` ?
+       * - Isn't the `?>` closing needed ?
+       *)
       "<?php " ^ content
   | __else__ -> content
 
@@ -69,7 +69,7 @@ let adjust_content_for_language (analyzer : Analyzer.t) (content : string) :
 let filter_new_mvars_by_range range mvars =
   mvars
   |> List.filter (fun (mvar, _) ->
-         not (Option.is_some (List.assoc_opt mvar range.RM.mvars)))
+      not (Option.is_some (List.assoc_opt mvar range.RM.mvars)))
 
 (* We take the bindings from the nested matches, and produce a new match where we add
    the enclosed metavariables to the original range.
@@ -83,21 +83,20 @@ let get_persistent_bindings revert_loc r nested_matches =
     AST_generic_helpers.fix_token_locations_any revert_loc
   in
   nested_matches
-  |> List_.map (fun nested_match ->
-         (* The bindings in this match were produced from a target whose location
+  |> List.map (fun nested_match ->
+      (* The bindings in this match were produced from a target whose location
              data was all adjusted, to avoid re-parsing.
          *)
-         let readjusted_mvars =
-           nested_match.RM.mvars
-           |> List_.map (fun (mvar, mval) ->
-                  let mval =
-                    mval |> MV.mvalue_to_any |> reverting_visitor
-                    |> MV.mvalue_of_any
-                  in
-                  (mvar, mval))
-         in
-         { nested_match with RM.mvars = readjusted_mvars })
-  |> List_.map (fun r' -> filter_new_mvars_by_range r r'.RM.mvars)
+      let readjusted_mvars =
+        nested_match.RM.mvars
+        |> List.map (fun (mvar, mval) ->
+            let mval =
+              mval |> MV.mvalue_to_any |> reverting_visitor |> MV.mvalue_of_any
+            in
+            (mvar, mval))
+      in
+      { nested_match with RM.mvars = readjusted_mvars })
+  |> List.map (fun r' -> filter_new_mvars_by_range r r'.RM.mvars)
 
 (*****************************************************************************)
 (* Entry point *)
@@ -206,8 +205,10 @@ let get_nested_metavar_pattern_bindings get_nested_formula_matches env r mvar
                               env.xtarget.path with
                               internal_path_to_content = file;
                             };
-                          lazy_ast_and_errors = lazy (mast', []);
-                          lazy_content = lazy contents;
+                          lazy_ast_and_errors = lazy_safe (mast', []);
+                          lazy_content = lazy_safe contents;
+                          lazy_utf8_valid =
+                            lazy_safe (String.is_valid_utf_8 contents);
                         }
                       in
                       (* Persist the bindings from inside the `metavariable-pattern`
@@ -280,7 +281,7 @@ let get_nested_metavar_pattern_bindings get_nested_formula_matches env r mvar
                                * created. *)
                               let skipped_tokens =
                                 skipped_tokens
-                                |> List_.map (fun tok -> revert_loc tok)
+                                |> List.map (fun tok -> revert_loc tok)
                               in
                               if skipped_tokens <> [] then
                                 Log.warn (fun m ->
@@ -289,7 +290,7 @@ let get_nested_metavar_pattern_bindings get_nested_formula_matches env r mvar
                                        to fully parse the content of %s"
                                       (Rule_ID.to_string (fst env.rule.Rule.id))
                                       mvar);
-                              Ok (lazy (ast, skipped_tokens))
+                              Ok (lazy_safe (ast, skipped_tokens))
                             with
                             | Parsing_error.Syntax_error tk ->
                                 Error (Tok.content_of_tok tk))
@@ -297,10 +298,10 @@ let get_nested_metavar_pattern_bindings get_nested_formula_matches env r mvar
                         | LSpacegrep
                         | LAliengrep ->
                             Ok
-                              (lazy
-                                (failwith
-                                   "requesting generic AST for \
-                                    LRegex|LSpacegrep|LAliengrep"))
+                              (lazy_safe
+                                 (failwith
+                                    "requesting generic AST for \
+                                     LRegex|LSpacegrep|LAliengrep"))
                       in
                       match ast_and_errors_res with
                       | Error msg ->
@@ -318,12 +319,14 @@ let get_nested_metavar_pattern_bindings get_nested_formula_matches env r mvar
                             {
                               path =
                                 {
-                                  origin = File mval_file;
+                                  origin = Unfilterable_target_file mval_file;
                                   internal_path_to_content = file;
                                 };
                               analyzer;
                               lazy_ast_and_errors;
-                              lazy_content = lazy contents;
+                              lazy_content = lazy_safe contents;
+                              lazy_utf8_valid =
+                                lazy_safe (String.is_valid_utf_8 contents);
                             }
                           in
                           (* Persist the bindings from inside the `metavariable-pattern`

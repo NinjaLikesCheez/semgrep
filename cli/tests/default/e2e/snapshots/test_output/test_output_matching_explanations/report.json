@@ -1,4 +1,5 @@
 {
+  "engine_requested": "OSS",
   "errors": [],
   "explanations": [
     {
@@ -58,6 +59,7 @@
                     }
                   }
                 },
+                "severity": "ERROR",
                 "validation_state": "NO_VALIDATOR"
               },
               "path": "targets/basic/stupid.js",
@@ -118,6 +120,7 @@
                     }
                   }
                 },
+                "severity": "ERROR",
                 "validation_state": "NO_VALIDATOR"
               },
               "path": "targets/basic/stupid.js",
@@ -183,6 +186,7 @@
                 }
               }
             },
+            "severity": "ERROR",
             "validation_state": "NO_VALIDATOR"
           },
           "path": "targets/basic/stupid.js",
@@ -201,6 +205,7 @@
       "targets/basic/stupid.js"
     ]
   },
+  "profiling_results": [],
   "results": [
     {
       "check_id": "rules.eqeq-bad",
@@ -227,5 +232,6 @@
     }
   ],
   "skipped_rules": [],
+  "time": "<masked in tests>",
   "version": "0.42"
 }

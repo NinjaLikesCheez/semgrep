@@ -631,7 +631,7 @@ literal:
  | TChar   { C (Char   ($1)) }
  | TString { C (String ($1)) }
  (* gccext: cppext: *)
- | string_elem string_elem+ { C (MultiString (List_.map (fun x -> StrLit x) ($1 :: $2))) }
+ | string_elem string_elem+ { C (MultiString (List.map (fun x -> StrLit x) ($1 :: $2))) }
  (*c++ext: *)
  | Ttrue   { C (Bool (true, $1)) }
  | Tfalse  { C (Bool (false, $1)) }
@@ -928,7 +928,7 @@ for_range_decl: type_spec_seq2 declarator
   { let (t_ret, _sto, mods) = type_and_storage_from_decl $1 in
     let (name, ftyp) = $2 in
     let ent = { name; specs = mods |> List.map (fun x -> M x) } in
-    ftyp t_ret, ent }
+    BindingName (ftyp t_ret, ent) }
 
 for_range_init: expr { InitExpr $1 }
 

@@ -29,6 +29,8 @@
  * alt: rename to Finding.ml
  *)
 
+open Sexplib.Std
+
 (*****************************************************************************)
 (* Types *)
 (*****************************************************************************)
@@ -44,6 +46,17 @@
  *)
 
 type t = {
+  (* Important: this field must come first for ppx_deriving.ord
+     to generate the desired 'compare' function.
+
+     location info.  *)
+  path : (Target.path[@sexp.opaque]);
+  (* Important: this field must come second for ppx_deriving.ord
+     to generate the desired 'compare' function.
+
+     less: redundant with location?
+     note that the two Tok.location can be equal *)
+  range_loc : Tok.location * Tok.location;
   (* rule (or mini rule) responsible for the pattern match found *)
   rule_id : rule_id; [@equal fun a b -> a.id = b.id]
   (* Indicates whether this match was produced during a run
@@ -52,7 +65,8 @@ type t = {
    * TODO? do we want to consider the same match but with different engine
    * as separate matches? or better make them equal for dedup purpose?
    *)
-  engine_of_match : Engine_kind.engine_of_finding; [@equal fun _a _b -> true]
+  engine_of_match : (Engine_kind.engine_of_finding[@sexp.opaque]);
+      [@equal fun _a _b -> true]
   (* metavars for the pattern match *)
   env : Metavariable.bindings;
       [@equal
@@ -65,11 +79,6 @@ type t = {
               *)
               s1 = s2 && Metavariable.location_aware_equal_mvalue m1 m2)
             a b]
-  (* location info *)
-  path : Target.path;
-  (* less: redundant with location? *)
-  (* note that the two Tok.location can be equal *)
-  range_loc : Tok.location * Tok.location;
   (* Why is this here?
      When we allow pattern matches to be embedded into metavariables, we want
      to be able to assign a faithful mvalue to the new metavariable.
@@ -84,25 +93,49 @@ type t = {
      `has_as_metavariable` is true of the originating rule.
      Otherwise, we leave it at `None`.
   *)
-  ast_node : AST_generic.any option;
+  ast_node : (AST_generic.any[@sexp.opaque]) option;
   (* less: do we need to be lazy? *)
-  tokens : Tok.t list Lazy.t; [@equal fun _a _b -> true]
-  (* Lazy since construction involves forcing lazy token lists. *)
-  (* We used to have `[@equal fun _a _b -> true]` here, but this causes issues with
-     multiple findings to the same sink (but different sources) being removed
-     in deduplication.
-     We now rely on equality of taint traces, which in turn relies on equality of `Parse_info.t`.
+  tokens : (Tok.t list Lazy_safe.t[@sexp.opaque]);
+      [@equal fun _a _b -> true] [@compare fun _a _b -> 0] [@opaque]
+  (* Lazy since construction involves forcing lazy token lists
+
+     We used to have `[@equal fun _a _b -> true]` here, but this causes issues
+     with multiple findings to the same sink (but different sources) being
+     removed in deduplication.
+     We now rely on equality of taint traces, which in turn relies on equality
+     of `Parse_info.t`.
   *)
-  taint_trace : Taint_trace.t Lazy.t option; (* secrets stuff *)
+  taint_trace : (Taint_trace.t Lazy_safe.t[@sexp.opaque]) option;
+      [@opaque]
+      [@equal
+        fun a b ->
+          match (a, b) with
+          | None, None -> true
+          | Some a, Some b ->
+              let a = Lazy_safe.force a in
+              let b = Lazy_safe.force b in
+              Taint_trace.equal a b
+          | _ -> false]
+      [@compare
+        fun a b ->
+          match (a, b) with
+          | None, None -> 0
+          | None, Some _ -> -1
+          | Some _, None -> 1
+          | Some a, Some b ->
+              let a = Lazy_safe.force a in
+              let b = Lazy_safe.force b in
+              Taint_trace.compare a b]
+  (* secrets stuff *)
   (* SCA extra info about a match (e.g., the satisfied version constraint) *)
-  sca_match : SCA_match.t option;
+  sca_match : (SCA_match.t[@sexp.opaque]) option;
   (* Secrets. Indicates whether a postprocessor ran and validated this result. *)
-  validation_state : Rule.validation_state;
+  validation_state : (Rule.validation_state[@sexp.opaque]);
   (* Indicates if the rule default severity should be modified to a different
      severity. Currently this is just used by secrets validators in order to
      modify severity based on information from the validation step. (E.g.,
      validity, scope information) *)
-  severity_override : Rule.severity option;
+  severity_override : (Rule.severity[@sexp.opaque]) option;
   (* Indicates if the rule default metadata should be modified. Currently this
      is just used by secrets validators in order to
      modify metadata based on information from the validation step. (E.g.,
@@ -110,13 +143,13 @@ type t = {
      NOTE: The whole metadata blob is _not_ changed; rather, fields present in
      the override is applied on top of the default and only changes the fields
      present in the override. *)
-  metadata_override : JSON.t option;
+  metadata_override : (JSON.t[@sexp.opaque]) option;
   (* A field to be populated based on intra-formula `fix` keys.
      This is _prior_ to AST-based autofix and interpolation, which occurs in
      Autofix.ml.
   *)
   fix_text : string option;
-  facts : AST_generic.facts;
+  facts : (AST_generic.facts[@sexp.opaque]);
 }
 
 (* This is currently a record, but really only the rule id should matter.
@@ -146,15 +179,48 @@ and rule_id = {
    * mini_rule? *)
   message : string;
   (* so we can calculate core_unique_key later *)
-  metadata : JSON.t option;
+  metadata : (JSON.t[@sexp.opaque]) option;
   fix : string option;
-  fix_regexp : Rule.fix_regexp option;
+  fix_regexp : (Rule.fix_regexp[@sexp.opaque]) option;
   (* ?? why we need that? *)
-  langs : Lang.t list;
+  langs : (Lang.t[@sexp.opaque]) list;
   (* used for debugging (could be removed at some point) *)
   pattern_string : string;
+  (* the rule's (or mini rule's) own declared severity, used as the default
+     severity reported for a match unless overridden (see severity_override
+     above) *)
+  severity : (Rule.severity[@sexp.opaque]) option;
 }
-[@@deriving show, eq]
+[@@deriving show, eq, ord, sexp]
+
+(*****************************************************************************)
+(* Deduplication *)
+(*****************************************************************************)
+
+let hash_with_bindings bindings acc0 =
+  bindings
+  |> List.fold_left
+       (fun acc (mvar, mval) ->
+         acc
+         |> Hashtbl_.combine_hash (Stdlib.Hashtbl.hash mvar)
+         |> Hashtbl_.combine_hash (Stdlib.Hashtbl.hash mval))
+       acc0
+
+(* perf: Make sure the 'env' is part of the hash. Otherwise, if we had a pattern
+    generating lots of matches at the same location, but with different 'env's,
+    all those matches would get the same 'hash' causing perf problems. *)
+let hash m =
+  Stdlib.Hashtbl.hash (m.rule_id.id, m.range_loc, m) |> hash_with_bindings m.env
+[@@profiling]
+
+(* TODO Migrate to Base. Out of scope for first pass due to custom equality and
+ * hash function. *)
+module Tbl = Stdlib.Hashtbl.Make (struct
+  type nonrec t = t
+
+  let equal = equal
+  let hash = hash
+end)
 
 (*****************************************************************************)
 (* API *)
@@ -163,21 +229,22 @@ and rule_id = {
 (* Deduplicate matches *)
 let uniq (pms : t list) : t list =
   (* perf: Previously used an initial size of 1024 but profiling with memtrace
-   * revealed that this was oversized and contributed to 14% of all major heap
-   * usage in an interfile run over juice-shop. Setting it to 8 meant it was
-   * undersized in some cases and led to additional allocations as the table
-   * gets resized. Change this only with caution. *)
-  let tbl = Hashtbl.create (List.length pms) in
+      revealed that this was oversized and contributed to 14% of all major heap
+      usage in an interfile run over juice-shop. Setting it to 8 meant it was
+      undersized in some cases and led to additional allocations as the table
+      gets resized. Change this only with some caution.
+      DOUBT(iago): What is the actual observed effect in terms of runtime and
+        peak memory usage?
+  *)
+  let size = List.length pms in
+  let matches_tbl = Tbl.create size in
+  (* dedup matches *)
+  (* NOTE: Must use `List.filter` to preserve order. *)
   pms
-  |> List.iter (fun match_ ->
-         let loc = match_.range_loc in
-         let matches_at_loc = Hashtbl_.get_stack tbl loc in
-         match
-           List.find_opt (fun match2 -> equal match_ match2) matches_at_loc
-         with
-         | Some _equal_match_at_loc -> ()
-         | None -> Hashtbl_.push tbl loc match_);
-  Hashtbl.fold (fun _loc stack acc -> List.rev_append !stack acc) tbl []
+  |> List.filter (fun match_ ->
+      let is_dup = Tbl.mem matches_tbl match_ in
+      if not is_dup then Tbl.add matches_tbl match_ ();
+      not is_dup)
 [@@profiling]
 
 let range pm =
@@ -195,22 +262,26 @@ let submatch pm1 pm2 =
 let no_submatches pms =
   (* Initial hash table size based on memory profiling with memtrace. Increase
    * only with caution. *)
-  let tbl = Hashtbl.create (List.length pms) in
+  let num_pms = List.length pms in
+  let matches_tbl = Base.Hashtbl.Poly.create ~size:num_pms () in
+  let removed_set = Tbl.create num_pms in
   pms
   |> List.iter (fun pm ->
-         (* This is mainly for removing taint-tracking duplicates and
-          * there should not be too many matches per file; but if perf
-          * is a problem, consider using a specialized data structure. *)
-         let k = (pm.rule_id, pm.path.internal_path_to_content) in
-         match Hashtbl.find_opt tbl k with
-         | None -> Hashtbl.add tbl k [ pm ]
-         | Some ys -> (
-             match List.find_opt (fun y -> submatch pm y) ys with
-             | Some _ -> ()
-             | None ->
-                 let ys' = List.filter (fun y -> not (submatch y pm)) ys in
-                 Hashtbl.replace tbl k (pm :: ys')));
-  tbl |> Hashtbl.to_seq_values |> Seq.flat_map List.to_seq |> List.of_seq
+      (* This is mainly for removing taint-tracking duplicates and
+       * there should not be too many matches per file; but if perf
+       * is a problem, consider using a specialized data structure. *)
+      let k = (pm.rule_id, pm.path.internal_path_to_content) in
+      match Base.Hashtbl.find matches_tbl k with
+      | None -> Base.Hashtbl.set matches_tbl ~key:k ~data:[ pm ]
+      | Some ys -> (
+          match List.find_opt (fun y -> submatch pm y) ys with
+          | Some _ -> Tbl.add removed_set pm ()
+          | None ->
+              let ys', removed =
+                List.partition (fun y -> not (submatch y pm)) ys
+              in
+              removed |> List.iter (fun rm -> Tbl.add removed_set rm ());
+              Base.Hashtbl.set matches_tbl ~key:k ~data:(pm :: ys')));
+  (* NOTE: Must use `List.filter` to preserve order. *)
+  pms |> List.filter (fun pm -> not (Tbl.mem removed_set pm))
 [@@profiling]
-
-let to_proprietary pm = { pm with engine_of_match = `PRO }

@@ -1,3 +1,15 @@
+(*
+   Copyright (c) 2023-2025 Semgrep Inc.
+
+   This library is free software; you can redistribute it and/or
+   modify it under the terms of the GNU Lesser General Public License
+   version 2.1 as published by the Free Software Foundation.
+
+   This library is distributed in the hope that it will be useful, but
+   WITHOUT ANY WARRANTY; without even the implied warranty of
+   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the file
+   LICENSE for more details.
+*)
 (* Gather metadata from local filesystem (we expect, at least, a Git
     repository) of from semgrep-specific environment variables
 *)
@@ -11,6 +23,7 @@ type env = {
   _SEMGREP_PR_ID : string option;
   _SEMGREP_PR_TITLE : string option;
   _SEMGREP_BRANCH : string option;
+  _SEMGREP_PROJECT_ID : string option;
 }
 
 (* Extract the environment variable via Cmdliner.
@@ -22,7 +35,6 @@ type env = {
 val env : env Cmdliner.Term.t
 
 class meta :
-  < Cap.exec > ->
   scan_environment:string ->
   baseline_ref:Digestif.SHA1.t option ->
   env ->
@@ -41,4 +53,5 @@ object
   method repo_display_name : string
   method repo_url : Uri.t option
   method merge_base_ref : Digestif.SHA1.t option
+  method project_id : string option
 end

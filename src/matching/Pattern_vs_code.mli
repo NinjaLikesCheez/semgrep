@@ -1,3 +1,15 @@
+(*
+   Copyright (c) 2020-2025 Semgrep Inc.
+
+   This library is free software; you can redistribute it and/or
+   modify it under the terms of the GNU Lesser General Public License
+   version 2.1 as published by the Free Software Foundation.
+
+   This library is distributed in the hope that it will be useful, but
+   WITHOUT ANY WARRANTY; without even the implied warranty of
+   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the file
+   LICENSE for more details.
+*)
 (* Set of functions to match a Pattern against some code.
  *
  * Both are represented by an AST_generic type but the pattern
@@ -33,11 +45,23 @@ val m_any : AST_generic.any Matching_generic.matcher
 val hook_find_possible_parents :
   (AST_generic.dotted_ident -> AST_generic.name list) option Hook.t
 
+(* deep-scan hook *)
+val hook_match_PatConstructor :
+  (default:(unit -> Matching_generic.tin -> Matching_generic.tout) ->
+  m_pattern:
+    (AST_generic.pattern, AST_generic.pattern) Matching_generic.general_matcher ->
+  AST_generic.name * AST_generic.pattern list ->
+  AST_generic.name * AST_generic.pattern list ->
+  Matching_generic.tin ->
+  Matching_generic.tout)
+  option
+  Hook.t
+
 val hook_r2c_pro_was_here : bool Hook.t
 
 (* used for evaluating `metavariable-type:` in Match_search_mode.ml *)
 val m_compatible_type :
-  Language.t ->
+  Lang.t ->
   AST_generic.ident ->
   AST_generic.type_ ->
   AST_generic.expr ->

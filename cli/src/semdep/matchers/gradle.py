@@ -1,17 +1,30 @@
+#
+# Copyright (c) 2024-2025 Semgrep Inc.
+#
+# This library is free software; you can redistribute it and/or
+# modify it under the terms of the GNU Lesser General Public License
+# version 2.1 as published by the Free Software Foundation.
+#
+# This library is distributed in the hope that it will be useful, but
+# WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the file
+# LICENSE for more details.
+#
+import functools
+import glob
 from dataclasses import dataclass
+from fnmatch import fnmatch
 from pathlib import Path
 from typing import FrozenSet
 from typing import List
 from typing import Optional
 from typing import Set
 from typing import Tuple
+from typing import Union
 
 import semgrep.semgrep_interfaces.semgrep_output_v1 as out
 from semdep.matchers.base import SubprojectMatcher
-from semgrep.subproject import LockfileOnlyDependencySource
-from semgrep.subproject import ManifestLockfileDependencySource
-from semgrep.subproject import ManifestOnlyDependencySource
-from semgrep.subproject import Subproject
+from semgrep.types import Target
 
 
 @dataclass(frozen=True)
@@ -32,15 +45,29 @@ class GradleMatcher(SubprojectMatcher):
 
     BUILD_FILENAMES = ["build.gradle", "build.gradle.kts"]
     SETTINGS_FILENAMES = ["settings.gradle", "settings.gradle.kts"]
-    LOCKFILE_FILENAME = "gradle.lockfile"
+    # Gradle allows setting arbitrary filenamese for its lockfiles
+    # (https://docs.gradle.org/current/userguide/dependency_locking.html#sec:configuring-the-per-project-lock-file-name-and-location).
+    # Our framework does not support arbitrary filenames, but we attempt to handle the most
+    # common cases with this pattern.
+    LOCKFILE_PATTERN = "gradle*.lockfile"
     ECOSYSTEM = out.Ecosystem(out.Maven())
+
+    @functools.cached_property
+    def subproject_identifying_glob_filters(self) -> FrozenSet[str]:
+        return frozenset(
+            list(map(glob.escape, self.BUILD_FILENAMES))
+            + list(map(glob.escape, self.SETTINGS_FILENAMES))
+            + [self.LOCKFILE_PATTERN]
+        )
+
+    def _is_lockfile_match(self, path: Path) -> bool:
+        return fnmatch(str(path.name), self.LOCKFILE_PATTERN)
 
     def is_match(self, path: Path) -> bool:
         return path.name in [
             *self.BUILD_FILENAMES,
             *self.SETTINGS_FILENAMES,
-            self.LOCKFILE_FILENAME,
-        ]
+        ] or self._is_lockfile_match(path)
 
     def _lockfile_to_settings_and_build(
         self, lockfile_path: Path, candidates: FrozenSet[Path]
@@ -69,7 +96,7 @@ class GradleMatcher(SubprojectMatcher):
         return settings_path, build_path
 
     def _sort_source_files(
-        self, dep_source_files: FrozenSet[Path]
+        self, dep_source_files: FrozenSet[Target]
     ) -> Tuple[Set[Path], Set[Path], Set[Path]]:
         """
         Classifies the provided source files as settings.gradle, build.gradle, and lockfiles
@@ -80,23 +107,24 @@ class GradleMatcher(SubprojectMatcher):
         build_files: Set[Path] = set()
         lockfiles: Set[Path] = set()
 
-        for path in dep_source_files:
+        for target in dep_source_files:
+            path = target.fpath
             if path.name in self.BUILD_FILENAMES:
                 build_files.add(path)
             elif path.name in self.SETTINGS_FILENAMES:
                 settings_files.add(path)
-            elif path.name == self.LOCKFILE_FILENAME:
+            elif self._is_lockfile_match(path):
                 lockfiles.add(path)
         return settings_files, build_files, lockfiles
 
     def make_subprojects(
-        self, dep_source_files: FrozenSet[Path]
-    ) -> Tuple[List[Subproject], FrozenSet[Path]]:
+        self, dep_source_files: FrozenSet[Target]
+    ) -> Tuple[List[out.Subproject], FrozenSet[Path]]:
         settings_files, build_files, lockfiles = self._sort_source_files(
             dep_source_files
         )
 
-        subprojects: List[Subproject] = []
+        subprojects: List[out.Subproject] = []
 
         # as we create each subproject, we will add its root directory here. We will use this later
         # to remove any build.gradle files that are already inside one of the subproject we have created
@@ -105,11 +133,12 @@ class GradleMatcher(SubprojectMatcher):
         used_build_paths: Set[Path] = set()
 
         # first, make subprojects from any lockfiles---any accompanying build.gradle and settings.gradle
+        candidates = frozenset(target.fpath for target in dep_source_files)
         for lockfile_path in lockfiles:
             project_root = lockfile_path.parent
             root_dirs.add(project_root)
             settings_path, build_path = self._lockfile_to_settings_and_build(
-                lockfile_path, dep_source_files
+                lockfile_path, candidates
             )
 
             lockfile = out.Lockfile(
@@ -125,34 +154,44 @@ class GradleMatcher(SubprojectMatcher):
 
             manifest: Optional[out.Manifest] = None
             if build_path is not None:
-                # if both settings.gradle and build.gradle exist, prefer build.gradle as it more closely resembles a manifest
+                kind: Union[out.BuildGradle, out.BuildGradleKts] = (
+                    out.BuildGradleKts()
+                    if build_path.suffix == ".kts"
+                    else out.BuildGradle()
+                )
+                # if both settings.gradle and build.gradle exist,
+                # prefer build.gradle as it more closely resembles a
+                # manifest
                 manifest = out.Manifest(
-                    kind=out.ManifestKind(out.BuildGradle()),
+                    kind=out.ManifestKind(kind),
                     path=out.Fpath(str(build_path)),
                 )
             elif settings_path is not None:
-                # Gradle doesn't really have a manifest, but we treat both build.gradle and settings.gradle the same,
-                # so just classify them both as BuildGradle
+                # Gradle doesn't really have a manifest, but we treat
+                # both build.gradle and settings.gradle both as
+                # manifests depending on what's available.
                 manifest = out.Manifest(
-                    kind=out.ManifestKind(out.BuildGradle()),
+                    kind=out.ManifestKind(out.SettingsGradle()),
                     path=out.Fpath(str(settings_path)),
                 )
 
             if manifest is not None:
                 subprojects.append(
-                    Subproject(
-                        root_dir=project_root,
-                        dependency_source=ManifestLockfileDependencySource(
-                            manifest=manifest, lockfile=lockfile
+                    out.Subproject(
+                        root_dir=out.Fpath(str(project_root)),
+                        dependency_source=out.DependencySource(
+                            out.ManifestLockfile((manifest, lockfile))
                         ),
                         ecosystem=self.ECOSYSTEM,
                     )
                 )
             else:
                 subprojects.append(
-                    Subproject(
-                        root_dir=project_root,
-                        dependency_source=LockfileOnlyDependencySource(lockfile),
+                    out.Subproject(
+                        root_dir=out.Fpath(str(project_root)),
+                        dependency_source=out.DependencySource(
+                            out.LockfileOnly(lockfile)
+                        ),
                         ecosystem=self.ECOSYSTEM,
                     )
                 )
@@ -166,7 +205,7 @@ class GradleMatcher(SubprojectMatcher):
                 continue
 
             project_root = settings_path.parent
-            build_paths = dep_source_files.intersection(
+            build_paths = candidates.intersection(
                 settings_path.parent / x for x in self.BUILD_FILENAMES
             )
             if len(build_paths) > 0:
@@ -175,8 +214,13 @@ class GradleMatcher(SubprojectMatcher):
                 # if a build file is present, favor using that as the manifest file, but build
                 # files might be missing for multi-project builds
                 used_build_paths.add(first_build_path)
+                kind = (
+                    out.BuildGradleKts()
+                    if first_build_path.suffix == ".kts"
+                    else out.BuildGradle()
+                )
                 manifest = out.Manifest(
-                    kind=out.ManifestKind(out.BuildGradle()),
+                    kind=out.ManifestKind(kind),
                     path=out.Fpath(str(first_build_path)),
                 )
             else:
@@ -189,9 +233,9 @@ class GradleMatcher(SubprojectMatcher):
             used_settings_paths.add(settings_path)
 
             subprojects.append(
-                Subproject(
-                    root_dir=project_root,
-                    dependency_source=ManifestOnlyDependencySource(manifest),
+                out.Subproject(
+                    root_dir=out.Fpath(str(project_root)),
+                    dependency_source=out.DependencySource(out.ManifestOnly(manifest)),
                     ecosystem=self.ECOSYSTEM,
                 )
             )
@@ -209,15 +253,22 @@ class GradleMatcher(SubprojectMatcher):
                 # this to be part of that subproject and do not create a separate one.
                 continue
 
+            kind = (
+                out.BuildGradleKts()
+                if build_path.suffix == ".kts"
+                else out.BuildGradle()
+            )
             # if we make it to here, we have decided that this build.gradle file defines a single-project
             # gradle build, so we should create a subproject from it.
             subprojects.append(
-                Subproject(
-                    root_dir=build_path.parent,
-                    dependency_source=ManifestOnlyDependencySource(
-                        manifest=out.Manifest(
-                            kind=out.ManifestKind(out.BuildGradle()),
-                            path=out.Fpath(str(build_path)),
+                out.Subproject(
+                    root_dir=out.Fpath(str(build_path.parent)),
+                    dependency_source=out.DependencySource(
+                        out.ManifestOnly(
+                            out.Manifest(
+                                kind=out.ManifestKind(kind),
+                                path=out.Fpath(str(build_path)),
+                            )
                         )
                     ),
                     ecosystem=self.ECOSYSTEM,

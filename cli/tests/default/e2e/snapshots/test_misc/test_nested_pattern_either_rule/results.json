@@ -1,4 +1,5 @@
 {
+  "engine_requested": "OSS",
   "errors": [],
   "paths": {
     "scanned": [
@@ -7,6 +8,7 @@
       "targets/basic/stupid.js"
     ]
   },
+  "profiling_results": [],
   "results": [
     {
       "check_id": "rules.test",
@@ -102,5 +104,6 @@
     }
   ],
   "skipped_rules": [],
+  "time": "<masked in tests>",
   "version": "0.42"
 }

@@ -1,3 +1,15 @@
+#
+# Copyright (c) 2023-2025 Semgrep Inc.
+#
+# This library is free software; you can redistribute it and/or
+# modify it under the terms of the GNU Lesser General Public License
+# version 2.1 as published by the Free Software Foundation.
+#
+# This library is distributed in the hope that it will be useful, but
+# WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the file
+# LICENSE for more details.
+#
 """
 Parser for gradle.lock and build.gradle files
 Based on
@@ -11,6 +23,7 @@ from typing import List
 from typing import Optional
 from typing import Tuple
 
+import semgrep.semgrep_interfaces.semgrep_output_v1 as out
 from semdep.external.parsy import any_char
 from semdep.external.parsy import regex
 from semdep.external.parsy import string
@@ -21,10 +34,10 @@ from semdep.parsers.util import DependencyParserError
 from semdep.parsers.util import mark_line
 from semdep.parsers.util import safe_parse_lockfile_and_manifest
 from semdep.parsers.util import transitivity
+from semgrep import telemetry
 from semgrep.semgrep_interfaces.semgrep_output_v1 import Ecosystem
 from semgrep.semgrep_interfaces.semgrep_output_v1 import FoundDependency
 from semgrep.semgrep_interfaces.semgrep_output_v1 import Fpath
-from semgrep.semgrep_interfaces.semgrep_output_v1 import GradleLockfile_
 from semgrep.semgrep_interfaces.semgrep_output_v1 import Maven
 from semgrep.semgrep_interfaces.semgrep_output_v1 import ScaParserName
 from semgrep.verbose_logging import getLogger
@@ -77,14 +90,20 @@ gradle = (
 )
 
 
+@telemetry.trace(telemetry.TraceOwner.SSC)
 def parse_gradle(
     lockfile_path: Path, manifest_path: Optional[Path]
 ) -> Tuple[List[FoundDependency], List[DependencyParserError]]:
     parsed_lockfile, parsed_manifest, errors = safe_parse_lockfile_and_manifest(
-        DependencyFileToParse(lockfile_path, gradle, ScaParserName(GradleLockfile_())),
-        DependencyFileToParse(manifest_path, manifest, ScaParserName(GradleLockfile_()))
-        if manifest_path
-        else None,
+        DependencyFileToParse(
+            lockfile_path, gradle, ScaParserName(out.PGradleLockfile())
+        ),
+        DependencyFileToParse(
+            manifest_path, manifest, ScaParserName(out.PGradleLockfile())
+        )
+        # the matcher might match a build.gradle.kts file, which we don't currently
+        # support for manifest parsing. In that case just use the lockfile.
+        if manifest_path and manifest_path.name == "build.gradle" else None,
     )
     if not parsed_lockfile:
         return [], errors

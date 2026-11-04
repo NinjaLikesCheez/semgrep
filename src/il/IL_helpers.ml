@@ -34,11 +34,9 @@ let rexps_of_instr x =
   | Assign (({ base = Var _; rev_offset = _ :: _ } as lval), exp) ->
       [ { e = Fetch { lval with rev_offset = [] }; eorig = NoOrig }; exp ]
   | Assign (_, exp) -> [ exp ]
-  | AssignAnon _ -> []
-  | Call (_, e1, args) -> e1 :: List_.map exp_of_arg args
-  | New (_, _, _, args)
-  | CallSpecial (_, _, args) ->
-      List_.map exp_of_arg args
+  | AssignCall (_, { c = Call (e1, args); _ }) -> e1 :: List.map exp_of_arg args
+  | AssignCall (_, { c = CallSpecial (_, args); _ }) -> List.map exp_of_arg args
+  | New (_, _, _, args) -> List.map exp_of_arg args
   | FixmeInstr _ -> []
 
 (* opti: could use a set *)
@@ -48,7 +46,7 @@ let rec lvals_of_exp e =
   | Literal _ -> []
   | Cast (_, e) -> lvals_of_exp e
   | Composite (_, (_, xs, _)) -> lvals_of_exps xs
-  | Operator (_, xs) -> lvals_of_exps (List_.map exp_of_arg xs)
+  | Operator (_, xs) -> lvals_of_exps (List.map exp_of_arg xs)
   | RecordOrDict ys ->
       lvals_of_exps
         (ys
@@ -87,6 +85,13 @@ let rlvals_of_instr x =
 (* Public *)
 (*****************************************************************************)
 
+let loc_of_name fpath name =
+  let var_loc =
+    let* name = name in
+    Tok.loc_of_tok (snd name.ident) |> Result.to_option
+  in
+  var_loc ||| Loc.first_loc_of_file fpath
+
 let is_pro_resolved_global name =
   match !(name.id_info.id_resolved) with
   | Some (GlobalName _, _sid) -> true
@@ -116,21 +121,16 @@ let lval_of_var var = { IL.base = Var var; rev_offset = [] }
 let is_dots_offset offset =
   offset
   |> List.for_all (fun o ->
-         match o.o with
-         | Dot _ -> true
-         | Index _ -> false)
+      match o.o with
+      | Dot _ -> true
+      | Index _ -> false)
 
 let lval_of_instr_opt x =
   match x.i with
   | Assign (lval, _)
-  | AssignAnon (lval, _)
-  | Call (Some lval, _, _)
-  | New (lval, _, _, _)
-  | CallSpecial (Some lval, _, _) ->
+  | New (lval, _, _, _) ->
       Some lval
-  | Call _
-  | CallSpecial _ ->
-      None
+  | AssignCall (lval_opt, _) -> lval_opt
   | FixmeInstr _ -> None
 
 let lvar_of_instr_opt x =
@@ -149,53 +149,42 @@ let rlvals_of_node = function
   | NGoto _
   | Join ->
       []
+  | NCase (scrutinee, _pattern) -> [ lval_of_var scrutinee ]
   | NInstr x -> rlvals_of_instr x
   | NCond (_, e)
   | NReturn (_, e)
   | NThrow (_, e) ->
       lvals_of_exp e
+  | NMatch _scrutinee -> []
+  | NNestedDef _
   | NOther _
   | NTodo _ ->
       []
+
+let orig_of_tok tok =
+  if Tok.is_origintok tok then Some (Related (AST_generic.Tk tok)) else None
 
 let orig_of_node = function
   | Enter
   | Exit ->
       None
-  | TrueNode e
-  | FalseNode e
-  | NCond (_, e)
-  | NReturn (_, e)
-  | NThrow (_, e) ->
-      Some e.eorig
+  | NCond (tok, e)
+  | NReturn (tok, e)
+  | NThrow (tok, e) -> (
+      match e.eorig with
+      | SameAs _
+      | Related _ ->
+          Some e.eorig
+      | NoOrig -> orig_of_tok tok)
+  | NMatch _ -> None
+  | NCase (scrutinee, _) -> orig_of_tok (snd scrutinee.ident)
   | NInstr i -> Some i.iorig
+  | TrueNode e
+  | FalseNode e ->
+      Some e.eorig
   | NGoto _
   | Join
+  | NNestedDef _
   | NOther _
   | NTodo _ ->
-      None
-
-(***********************************************)
-(* CFG *)
-(***********************************************)
-
-let rec reachable_nodes fun_cfg =
-  let main_nodes = CFG.reachable_nodes fun_cfg.cfg in
-  let lambdas_nodes =
-    fun_cfg.lambdas |> NameMap.to_seq
-    |> Seq.map (fun (_lname, lcfg) -> reachable_nodes lcfg)
-  in
-  Seq.concat (Seq.cons main_nodes lambdas_nodes)
-
-(***********************************************)
-(* Lambdas *)
-(***********************************************)
-
-let lval_is_lambda lambdas_cfgs lval =
-  match lval with
-  | { base = Var name; rev_offset = [] } ->
-      let* lambda_cfg = IL.NameMap.find_opt name lambdas_cfgs in
-      Some (name, lambda_cfg)
-  | { base = Var _ | VarSpecial _ | Mem _; rev_offset = _ } ->
-      (* Lambdas are only assigned to plain variables without any offset. *)
       None

@@ -1,4 +1,16 @@
-open Common
+(*
+   Copyright (c) 2022-2025 Semgrep Inc.
+
+   This library is free software; you can redistribute it and/or
+   modify it under the terms of the GNU Lesser General Public License
+   version 2.1 as published by the Free Software Foundation.
+
+   This library is distributed in the hope that it will be useful, but
+   WITHOUT ANY WARRANTY; without even the implied warranty of
+   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the file
+   LICENSE for more details.
+*)
+open Fpath_.Operators
 
 let t = Testo.create
 
@@ -7,28 +19,28 @@ let t = Testo.create
 (*****************************************************************************)
 
 (* ran from the root of the semgrep repository *)
-let tests_path = "tests"
+let tests_path = Fpath.v "tests"
 
-let tests (caps : < Cap.tmp >) =
+let tests =
   Testo.categorize "parsing_ml"
     [
       t "regression files" (fun () ->
-          let dir = Filename.concat tests_path "ml/parsing" in
-          let files = Common2.glob (spf "%s/*.ml" dir) in
+          let dir = tests_path / "ml" / "parsing" in
+          let files = Common2.glob (dir / "*.ml") in
           files
           |> List.iter (fun file ->
-                 try
-                   let _ = Parse_ml.parse_program (Fpath.v file) in
-                   ()
-                 with
-                 | Parsing_error.Syntax_error _ ->
-                     Alcotest.failf "it should correctly parse %s" file));
+              try
+                let _ = Parse_ml.parse_program file in
+                ()
+              with
+              | Parsing_error.Syntax_error _ ->
+                  Alcotest.failf "it should correctly parse %a" Fpath.pp file));
       (* Check that the visitor implementation correctly visit all AST
        * subelements, even when they are deep inside the AST tree (e.g.
        * sub-sub expressions inside parenthesis).
        *)
       t "visitor" (fun () ->
-          CapTmp.with_temp_file caps#tmp ~suffix:".ml"
+          UTmp.with_temp_file ~suffix:".ml"
             ~contents:"open Foo1\nmodule A = Foo2\n" (fun file ->
               let _ast = Parse_ml.parse_program file in
               let _cnt = ref 0 in

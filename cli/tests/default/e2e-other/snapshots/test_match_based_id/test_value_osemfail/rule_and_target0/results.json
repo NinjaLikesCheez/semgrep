@@ -1,4 +1,5 @@
 {
+  "engine_requested": "OSS",
   "errors": [],
   "interfile_languages_used": [],
   "paths": {
@@ -6,6 +7,7 @@
       "targets/taint/taint_trace.cpp"
     ]
   },
+  "profiling_results": [],
   "results": [
     {
       "check_id": "rules.taint-trace",
@@ -153,5 +155,6 @@
     }
   ],
   "skipped_rules": [],
+  "time": "<masked in tests>",
   "version": "0.42"
 }

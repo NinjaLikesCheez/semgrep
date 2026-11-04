@@ -1,4 +1,16 @@
 (*
+   Copyright (c) 2024 Semgrep Inc.
+
+   This library is free software; you can redistribute it and/or
+   modify it under the terms of the GNU Lesser General Public License
+   version 2.1 as published by the Free Software Foundation.
+
+   This library is distributed in the hope that it will be useful, but
+   WITHOUT ANY WARRANTY; without even the implied warranty of
+   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the file
+   LICENSE for more details.
+*)
+(*
    Tests for our String_ module
 *)
 
@@ -36,7 +48,12 @@ let test_safe_sub () =
 let test_show () =
   print_endline (String_.show "abc");
   print_endline (String_.show ~max_len:5 "123456789");
-  print_endline (String_.show ~max_len:20 "123456789")
+  print_endline (String_.show ~max_len:20 "123456789");
+  print_endline (String_.show ~max_len:5 ~keep_end:true "123456789")
+
+let test_show_ends () =
+  print_endline (String_.show_ends ~max_len:5 "123456789");
+  print_endline (String_.show_ends ~max_len:20 "123456789")
 
 let test_trim_cr () =
   let check expected input =
@@ -105,6 +122,7 @@ let tests =
     [
       t "safe_sub" test_safe_sub;
       t ~checked_output:(Testo.stdout ()) "show" test_show;
+      t ~checked_output:(Testo.stdout ()) "show_ends" test_show_ends;
       t "trim_cr" test_trim_cr;
       t "lines_of_range" test_lines_of_range;
     ]

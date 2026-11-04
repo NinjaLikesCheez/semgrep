@@ -1,3 +1,15 @@
+(*
+   Copyright (c) 2023-2025 Semgrep Inc.
+
+   This library is free software; you can redistribute it and/or
+   modify it under the terms of the GNU Lesser General Public License
+   version 2.1 as published by the Free Software Foundation.
+
+   This library is distributed in the hope that it will be useful, but
+   WITHOUT ANY WARRANTY; without even the implied warranty of
+   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the file
+   LICENSE for more details.
+*)
 (* Run jobs in parallel, using number of cores specified with -j.
  *
  * Note that the jobs are currently run in forked process, so while
@@ -8,16 +20,7 @@
  * See: Parmap_.mli for why this returns a result list!
  *)
 val map_targets__run_in_forked_process_do_not_modify_globals :
-  < Cap.fork > ->
-  int (* ncores *) ->
+  num_jobs:int ->
   (Target.t -> 'a) ->
   (* job function *) Target.t list ->
   ('a, Target.t * Core_error.t) result list
-
-(* same but specialized for Target.regular *)
-val map_regular_targets__run_in_forked_process_do_not_modify_globals :
-  < Cap.fork > ->
-  int (* ncores *) ->
-  (Target.regular -> 'a) ->
-  (* job function *) Target.regular list ->
-  ('a, Core_error.t) result list

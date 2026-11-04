@@ -1,4 +1,16 @@
 (*
+   Copyright (c) 2022-2024 Semgrep Inc.
+
+   This library is free software; you can redistribute it and/or
+   modify it under the terms of the GNU Lesser General Public License
+   version 2.1 as published by the Free Software Foundation.
+
+   This library is distributed in the hope that it will be useful, but
+   WITHOUT ANY WARRANTY; without even the implied warranty of
+   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the file
+   LICENSE for more details.
+*)
+(*
    Lexer for the regexp parser.
 
    See Parse.mli for a list of to-dos.
@@ -654,6 +666,12 @@ and char_class conf = parse
     }
   | ']' {
       Empty
+    }
+  | (utf8 as a) '-' ']' {
+      (* A '-' just before ']' is a literal hyphen, not a range: without this
+         rule the range rule below would consume the ']' as the range's upper
+         bound and the class would swallow the rest of the pattern. *)
+      union (Singleton (decode a)) (Singleton (Char.code '-'))
     }
   | (utf8 as a) '-' (utf8 as b) {
       let range = Range (decode a, decode b) in

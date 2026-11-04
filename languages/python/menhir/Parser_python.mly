@@ -363,10 +363,10 @@ namedexpr_or_star_expr:
 (*************************************************************************)
 (* this rule is referenced in compound_stmt shown later *)
 funcdef: DEF NAME parameters return_type? ":" suite
-    { FunctionDef ($1, $2, $3, $4, $6, []) }
+    { FunctionDef ($1, $2, None, $3, $4, $6, []) }
 
 async_funcdef: ASYNC DEF NAME parameters return_type? ":" suite
-    { FunctionDef ($2, $3, $4, $5, $7, [] (* TODO $1 *)) }
+    { FunctionDef ($2, $3, None, $4, $5, $7, [] (* TODO $1 *)) }
 
 (* typing-ext: *)
 return_type:
@@ -440,7 +440,7 @@ fplist:
 (*************************************************************************)
 
 classdef: CLASS NAME arglist_paren_opt ":" suite
-  { ClassDef ($1, $2, $3, $5, []) }
+  { ClassDef ($1, $2, None, $3, $5, []) }
 
 arglist_paren_opt:
  | (* empty *) { [] }
@@ -562,17 +562,17 @@ compound_stmt:
 decorated:
   | decorator+ classdef {
      match $2 with
-     | ClassDef (t, a, b, c, d) -> ClassDef (t, a, b, c, $1 @ d)
+     | ClassDef (t, a, b, c, d, e) -> ClassDef (t, a, b, c, d, $1 @ e)
      | _ -> raise Impossible
    }
   | decorator+ funcdef {
      match $2 with
-     | FunctionDef (t, a, b, c, d, e) -> FunctionDef (t, a, b, c, d, $1 @ e)
+     | FunctionDef (t, a, b, c, d, e, f) -> FunctionDef (t, a, b, c, d, e, $1 @ f)
      | _ -> raise Impossible
    }
   | decorator+ async_funcdef {
      match $2 with
-     | FunctionDef (t, a, b, c, d, e) -> FunctionDef (t, a, b, c, d, $1 @ e)
+     | FunctionDef (t, a, b, c, d, e, f) -> FunctionDef (t, a, b, c, d, e, $1 @ f)
      | _ -> raise Impossible
   }
 
@@ -615,11 +615,13 @@ try_stmt:
       { TryExcept ($1, $3, [], None, Some ($4, $6)) }
 
 excepthandler:
-  | EXCEPT              ":" suite { ExceptHandler ($1, None, None, $3) }
-  | EXCEPT test         ":" suite { ExceptHandler ($1, Some $2, None, $4) }
-  | EXCEPT test AS NAME ":" suite { ExceptHandler ($1, Some $2, Some $4, $6)}
-  (* python2: *)
-  | EXCEPT test "," NAME ":" suite { ExceptHandler ($1, Some $2, Some $4, $6) }
+  | EXCEPT                  ":" suite { ExceptHandler ($1, None, None, $3) }
+  (* python3-ext: https://peps.python.org/pep-0758/ (was 'except A, e:' in python2) *)
+  | EXCEPT     tuple(test)  ":" suite { ExceptHandler ($1, Some (tuple_expr $2), None, $4) }
+  | EXCEPT     test AS NAME ":" suite { ExceptHandler ($1, Some $2, Some $4, $6) }
+  (* python3-ext: https://peps.python.org/pep-0654/ *)
+  | EXCEPT "*" tuple(test)  ":" suite { ExceptHandler ($1, Some (tuple_expr $3), None, $5) }
+  | EXCEPT "*" test AS NAME ":" suite { ExceptHandler ($1, Some $3, Some $5, $7) }
 
 with_stmt:
   | WITH with_inner ":" suite                         { $2 ($1, $4) }

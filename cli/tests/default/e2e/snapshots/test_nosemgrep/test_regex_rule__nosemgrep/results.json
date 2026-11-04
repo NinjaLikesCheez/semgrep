@@ -1,10 +1,12 @@
 {
+  "engine_requested": "OSS",
   "errors": [],
   "paths": {
     "scanned": [
       "targets/basic/regex-nosemgrep.txt"
     ]
   },
+  "profiling_results": [],
   "results": [
     {
       "check_id": "rules.regex.detected-aws-account-id",
@@ -34,5 +36,6 @@
     }
   ],
   "skipped_rules": [],
+  "time": "<masked in tests>",
   "version": "0.42"
 }

@@ -37,24 +37,30 @@ open Fpath_.Operators
 (*****************************************************************************)
 
 (* Pos.t is used in many places in Semgrep, either directly
- * or indirectly via Tok.t.
- *
- * In theory, we should just have 'type t = int'. This would be nice
- * because Pos.t, which is used in Tok.t, is used to store the position of
- * every token in the generic AST (see AST_generic.ml) so keeping its type
- * small would help reduce the memory footprint of an AST.
- * However this would require a big refactoring effort. Indeed,
- * even though the current type is a bit "fat", it is also convenient
- * because you can easily get line x col or filename information.
- * Moving the filename out of Pos.t would require to pass it around
- * in parsers, evaluators, static analyzers, etc.
- * With the current design, once you have a Pos.t (or Tok.t), you
- * can easily issue an error message with a precise location.
- *
- * TODO: we could probably remove the line x column and compute them
- * on demand.
+  or indirectly via Tok.t.
+
+   In theory, we should just have 'type t = int'. This would be nice
+   because Pos.t, which is used in Tok.t, is used to store the position of
+   every token in the generic AST (see AST_generic.ml) so keeping its type
+   small would help reduce the memory footprint of an AST.
+   However this would require a big refactoring effort. Indeed,
+   even though the current type is a bit "fat", it is also convenient
+   because you can easily get line x col or filename information.
+   Moving the filename out of Pos.t would require to pass it around
+   in parsers, evaluators, static analyzers, etc.
+   With the current design, once you have a Pos.t (or Tok.t), you
+   can easily issue an error message with a precise location.
+
+   TODO: we could probably remove the line x column and compute them
+   on demand.
+
+   The fields are ordered such that deriving a 'compare' function with
+   '@@deriving ord' works as expected (sort by file path first,
+   then by position within the file).
  *)
 type t = {
+  (* TODO: use an Src.t/Origin.t instead? (see spacegrep Src_file.source *)
+  file : Fpath_.t;
   (* Does it handle UTF-8? This is a byte position, not a character
    * position, so in theory we should not have to care about UTF-8.
    *)
@@ -62,8 +68,6 @@ type t = {
   (* Those two fields can be derived from bytepos (See complete_position() *)
   line : int; (* 1-based *)
   column : int; (* 0-based *)
-  (* TODO: use an Src.t/Origin.t instead? (see spacegrep Src_file.source *)
-  file : Fpath_.t;
 }
 [@@deriving show, eq, ord, sexp]
 
@@ -75,6 +79,14 @@ type linecol = { l : int; c : int } [@@deriving show, eq]
  *)
 let make ?(line = -1) ?(column = -1) file bytepos =
   { bytepos; line; column; file }
+
+let of_lexing_position (pos : Lexing.position) =
+  {
+    file = Fpath.v pos.pos_fname;
+    line = pos.pos_lnum;
+    column = pos.pos_cnum - pos.pos_bol;
+    bytepos = pos.pos_cnum;
+  }
 
 (*****************************************************************************)
 (* Helpers *)
@@ -147,17 +159,17 @@ let converters_of_arrays line_arr col_arr : bytepos_linecol_converters =
              let res =
                line_arr
                |> Ord.binary_search_bigarr1 ~f:(fun bytepos line' ->
-                      let col' = col_arr.{bytepos} in
-                      (* We want the relationship of the varying line' with
+                   let col' = col_arr.{bytepos} in
+                   (* We want the relationship of the varying line' with
                          respect to the line we are trying to search for.
                          For instance, if we want to find line 5, but are given
                          line 3, we should want to say Greater, because we want
                          to go greater.
                       *)
-                      match cmp line line' with
-                      | Ord.Equal -> cmp col col'
-                      | Ord.Less -> Ord.Less
-                      | Ord.Greater -> Ord.Greater)
+                   match cmp line line' with
+                   | Ord.Equal -> cmp col col'
+                   | Ord.Less -> Ord.Less
+                   | Ord.Greater -> Ord.Greater)
              in
              match res with
              | Error _idx -> raise Not_found
@@ -166,7 +178,7 @@ let converters_of_arrays line_arr col_arr : bytepos_linecol_converters =
 
 (* coupling: see also Parse_tree_sitter_helpers.line_col_to_pos *)
 let full_converters_large (file : Fpath.t) : bytepos_linecol_converters =
-  let size = UFile.filesize file + 2 in
+  let size = UFile.filesize_exn file + 2 in
 
   (* old: let arr = Array.create size  (0,0) in *)
   let arr1 = Bigarray.Array1.create Bigarray.int Bigarray.c_layout size in

@@ -16,6 +16,7 @@ open Common
 module C = Rules_config
 module Env = Semgrep_envvars
 module Out = Semgrep_output_v1_t
+module Rule_ID_map = Map.Make (Rule_ID)
 
 (*****************************************************************************)
 (* Prelude *)
@@ -30,24 +31,6 @@ module Out = Semgrep_output_v1_t
 (*****************************************************************************)
 (* Types *)
 (*****************************************************************************)
-(* TODO: remain mostly Cap.FS.files_argv_r and Cap.FS.files_argv_w if autofix *)
-type caps =
-  < Cap.stdout
-  ; (* mainly to access the registry *)
-    Cap.network
-  ; (* TODO: we should get rid of that *)
-    Cap.tmp
-  ; (* this is for Git_remote for semgrep query console and also for
-     * differential scans as we use Git_wrapper.run_with_worktree.
-     *)
-    Cap.chdir
-  ; (* for Parmap in Core_scan *)
-    Cap.fork
-  ; (* for Check_rules timeout *)
-    Cap.time_limit
-  ; (* for iter_targets memory limit *)
-    Cap.memory_limit >
-
 (*****************************************************************************)
 (* Metrics *)
 (*****************************************************************************)
@@ -63,7 +46,10 @@ let add_project_and_config_metrics (conf : Scan_CLI.conf) : unit =
   | Pattern _ -> ()
 
 let notify_user_about_metrics_once (settings : Semgrep_settings.t) : unit =
-  if not (settings.has_shown_metrics_notification =*= Some true) then (
+  if
+    Metrics_.is_enabled ()
+    && not (settings.has_shown_metrics_notification =*= Some true)
+  then (
     (* python compatibility: the 22m and 24m are "normal color or intensity",
        and "underline off". It doesn't change how the text is rendered
        but allows us to produce the same exact output as pysemgrep.
@@ -91,9 +77,9 @@ let notify_user_about_metrics_once (settings : Semgrep_settings.t) : unit =
           pysemgrep_hack1);
     Logs.app (fun m ->
         m
-          "To disable Registry rule metrics, use \"--metrics=off\".@.Using \
-           configs only from local files (like --config=xyz.yml) does not \
-           enable metrics.@.@.More information: \
+          "To disable Registry rule metrics, use \"--metrics=off\".@.When \
+           using configs only from local files (like --config=xyz.yml) metrics \
+           are sent only when the user is logged in.@.@.More information: \
            https://semgrep.dev/docs/metrics");
     Logs.app (fun m -> m "%s" pysemgrep_hack2);
     Semgrep_settings.save
@@ -110,13 +96,13 @@ let rules_and_counted_matches (res : Core_runner.result) : (Rule.t * int) list =
     | None -> Some 1
   in
   let fold acc (core_match : Out.core_match) =
-    Map_.update core_match.check_id update acc
+    Rule_ID_map.update core_match.check_id update acc
   in
-  let xmap = List.fold_left fold Map_.empty res.core.results in
-  Map_.fold
+  let xmap = List.fold_left fold Rule_ID_map.empty res.core.results in
+  Rule_ID_map.fold
     (fun rule_id n acc ->
       let res =
-        try Hashtbl.find res.hrules rule_id with
+        try Hashtbl_.Base.find res.hrules rule_id with
         | Not_found ->
             failwith
               (spf "could not find rule_id %s in hash"
@@ -168,12 +154,11 @@ let exit_code_of_errors ~strict (errors : Out.core_error list) : Exit_code.t =
 let core_errors_of_fatal_rule_errors (fatal_errors : Rule_error.t list) :
     Core_error.t list =
   fatal_errors
-  |> List_.map (fun (e : Rule_error.t) -> Core_error.error_of_rule_error e)
+  |> List.map (fun (e : Rule_error.t) -> Core_error.error_of_rule_error e)
 
 (* we require stdout here to give the proper output, such as with --json *)
-let output_and_exit_from_fatal_core_errors_exn ~exit_code
-    (caps : < Cap.stdout >) (conf : Scan_CLI.conf) (profiler : Profiler.t)
-    (errors : Core_error.t list) : Exit_code.t =
+let output_and_exit_from_fatal_core_errors_exn ~exit_code (conf : Scan_CLI.conf)
+    (profiler : Profiler.t) (errors : Core_error.t list) : Exit_code.t =
   match conf.output_conf.output_format with
   (* For textual output, it seems that we do not have a unified way to
      display errors, other than raising an exception and dispatching to the
@@ -188,8 +173,7 @@ let output_and_exit_from_fatal_core_errors_exn ~exit_code
            ( Common.spf
                "invalid configuration file found (%d configs were invalid)\n%s"
                (List.length errors)
-               (String.concat "\n"
-                  (List_.map Core_error.string_of_error errors)),
+               (String.concat "\n" (List.map Core_error.string_of_error errors)),
              Some (Exit_code.missing_config ~__LOC__) ))
   | _ ->
       let runtime_params : Out.format_context =
@@ -206,7 +190,6 @@ let output_and_exit_from_fatal_core_errors_exn ~exit_code
       in
 
       Output.output_result
-        (caps :> < Cap.stdout >)
         (* TODO: choose output conf? *)
         conf.output_conf runtime_params profiler res
       |> ignore;
@@ -217,11 +200,10 @@ let output_and_exit_from_fatal_core_errors_exn ~exit_code
 (*****************************************************************************)
 
 (* Note that this hook is run in parallel in Parmap at the end of processing
- * a file. Using Format.std_formatter in parallel requires some synchronization
- * to avoid having the output of multiple child processes interwinded, hence
- * the use of Unix.lockf below.
+ * a file. Using stdout (used internally by 'xxx_printer') in parallel requires
+ * some synchronization to avoid having the output of multiple child processes
+ * interwinded, hence the use of Unix.lockf below.
  *)
-
 let mk_file_match_hook (conf : Scan_CLI.conf) (rules : Rule.rules)
     (printer : Scan_CLI.conf -> Out.cli_match list -> unit) (_file : Fpath.t)
     (match_results : Core_result.matches_single_file) : unit =
@@ -233,16 +215,29 @@ let mk_file_match_hook (conf : Scan_CLI.conf) (rules : Rule.rules)
     let core_matches : Out.core_match list =
       pms
       (* OK, because we don't need the postprocessing to report the matches. *)
-      |> List_.map Core_result.mk_processed_match
+      |> List.map Core_result.mk_processed_match
       |> Result_.partition Core_json_output.match_to_match
       |> fst |> Core_json_output.dedup_and_sort
     in
     let hrules = Rule.hrules_of_rules rules in
-    let fixed_env = Fixed_lines.mk_env () in
+    let fixed_env_opt =
+      if conf.output_conf.fixed_lines then Some (Fixed_lines.mk_env ())
+      else None
+    in
     core_matches
-    |> List_.map
-         (Cli_json_output.cli_match_of_core_match
-            ~fixed_lines:conf.output_conf.fixed_lines fixed_env hrules)
+    |> List.map (fun (cm : Out.core_match) ->
+        let rule =
+          try Hashtbl_.Base.find hrules cm.check_id with
+          | Not_found ->
+              (* should never happen; the core_matches are derived from
+               * the passed rules
+               *)
+              failwith
+                (spf "could not find the rule with rule_ID %s"
+                   (Rule_ID.show cm.check_id))
+        in
+        Cli_json_output.cli_match_of_core_match
+          ~fips_mode:conf.core_runner_conf.fips_mode fixed_env_opt rule cm)
     |> List_.exclude (fun (m : Out.cli_match) -> m.extra.is_ignored ||| false)
   in
   if cli_matches <> [] then (
@@ -255,23 +250,21 @@ let mk_file_match_hook (conf : Scan_CLI.conf) (rules : Rule.rules)
         Unix.lockf Unix.stdout Unix.F_ULOCK 0))
 
 (* coupling: similar to Output.dispatch_output_format for Text *)
-let incremental_text_printer (caps : < Cap.stdout >) (conf : Scan_CLI.conf)
+let incremental_text_printer (conf : Scan_CLI.conf)
     (cli_matches : Out.cli_match list) : unit =
-  CapConsole.print_no_nl caps#stdout
+  UConsole.print_no_nl
     (Text_output.matches_output
        ~max_chars_per_line:conf.output_conf.max_chars_per_line
        ~max_lines_per_finding:conf.output_conf.max_lines_per_finding cli_matches)
 
-let incremental_json_printer (caps : < Cap.stdout >) (conf : Scan_CLI.conf)
+let incremental_json_printer (_conf : Scan_CLI.conf)
     (cli_matches : Out.cli_match list) : unit =
-  ignore conf;
   cli_matches
   |> List.iter (fun cli_match ->
-         CapConsole.print caps#stdout
-           (Semgrep_output_v1_j.string_of_cli_match cli_match))
+      UConsole.print (Semgrep_output_v1_j.string_of_cli_match cli_match))
 
-let choose_output_format_and_match_hook (caps : < Cap.stdout >)
-    (conf : Scan_CLI.conf) (rules : Rule.rules) =
+let choose_output_format_and_match_hook (conf : Scan_CLI.conf)
+    (rules : Rule.rules) =
   match conf with
   | {
       output_conf = { output_format = Output_format.Text; _ };
@@ -284,14 +277,14 @@ let choose_output_format_and_match_hook (caps : < Cap.stdout >)
       _;
     } ->
       ( Output_format.Incremental,
-        Some (mk_file_match_hook conf rules (incremental_text_printer caps)) )
+        Some (mk_file_match_hook conf rules incremental_text_printer) )
   | {
    output_conf = { output_format = Output_format.Json; _ };
    incremental_output = true;
    _;
   } ->
       ( Output_format.Incremental,
-        Some (mk_file_match_hook conf rules (incremental_json_printer caps)) )
+        Some (mk_file_match_hook conf rules incremental_json_printer) )
   | { output_conf; _ } -> (output_conf.output_format, None)
 
 (*************************************************************************)
@@ -299,12 +292,10 @@ let choose_output_format_and_match_hook (caps : < Cap.stdout >)
 (*************************************************************************)
 
 (* Select and execute the scan func based on the configured engine settings *)
-let mk_core_run_for_osemgrep (caps : < Core_scan.caps ; .. >)
-    (conf : Scan_CLI.conf) (diff_config : Differential_scan_config.t) :
-    Core_runner.func =
+let mk_core_run_for_osemgrep (conf : Scan_CLI.conf) : Core_runner.func =
   let core_run_for_osemgrep : Core_runner.func =
     match conf.engine_type with
-    | OSS -> Core_runner.mk_core_run_for_osemgrep (Core_scan.scan caps)
+    | OSS -> Core_runner.mk_core_run_for_osemgrep Core_scan.scan
     | PRO _ -> (
         match Hook.get Core_runner.hook_mk_pro_core_run_for_osemgrep with
         | None ->
@@ -316,11 +307,7 @@ let mk_core_run_for_osemgrep (caps : < Core_scan.caps ; .. >)
                acquire a different binary."
         | Some pro_scan_func ->
             pro_scan_func
-              {
-                roots = conf.target_roots;
-                diff_config;
-                engine_type = conf.engine_type;
-              })
+              { roots = conf.target_roots; engine_type = conf.engine_type })
   in
   let core_run_for_osemgrep : Core_runner.func =
     match conf.targeting_conf.force_project_root with
@@ -337,8 +324,7 @@ let mk_core_run_for_osemgrep (caps : < Core_scan.caps ; .. >)
   in
   core_run_for_osemgrep
 
-let rules_from_rules_source ~token_opt ~rewrite_rule_ids ~strict caps
-    rules_source =
+let rules_from_rules_source ~token_opt ~rewrite_rule_ids ~strict rules_source =
   (* Create the wait hook for our progress indicator *)
   let spinner_ls =
     if Console_Spinner.should_show_spinner () then
@@ -348,9 +334,7 @@ let rules_from_rules_source ~token_opt ~rewrite_rule_ids ~strict caps
   (* Fetch the rules *)
   let rules_and_origins =
     Rule_fetching.rules_from_rules_source_async ~token_opt ~rewrite_rule_ids
-      ~strict
-      (caps :> < Cap.network ; Cap.tmp >)
-      rules_source
+      ~strict rules_source
   in
   Lwt_platform.run (Lwt.pick (rules_and_origins :: spinner_ls))
 [@@profiling]
@@ -371,7 +355,7 @@ let adjust_skipped (skipped : Out.skipped_target list)
     in
     let skipped =
       if in_test then
-        List_.map
+        List.map
           (fun (x : Out.skipped_target) -> { x with Out.details = None })
           skipped
       else skipped
@@ -409,7 +393,7 @@ let adjust_nosemgrep_and_autofix ~keep_ignored (res : Core_runner.result) :
     Core_runner.result =
   let filtered_matches =
     res.core.results
-    |> List_.map trim_core_match_fix
+    |> List.map trim_core_match_fix
     |> Nosemgrep.filter_ignored ~keep_ignored
   in
   { res with core = { res.core with results = filtered_matches } }
@@ -417,21 +401,11 @@ let adjust_nosemgrep_and_autofix ~keep_ignored (res : Core_runner.result) :
 (*****************************************************************************)
 (* Yet another check targets with rules *)
 (*****************************************************************************)
-(* this is called also from Ci_subcommand.ml.
- * caps = topevel caps - Cap.network
- *)
-let check_targets_with_rules
-    (caps :
-      < Cap.stdout
-      ; Cap.chdir
-      ; Cap.tmp
-      ; Cap.fork
-      ; Cap.time_limit
-      ; Cap.memory_limit
-      ; .. >) (conf : Scan_CLI.conf) (profiler : Profiler.t)
+(* this is called also from Ci_subcommand.ml. *)
+let check_targets_with_rules (conf : Scan_CLI.conf) (profiler : Profiler.t)
     (rules_and_origins : Rule_fetching.rules_and_origin list)
     ((targets, errors, skipped) :
-      Fpath.t list * Core_error.t list * Out.skipped_target list) :
+      Fppath.t list * Core_error.t list * Out.skipped_target list) :
     (Rule.rule list * Core_runner.result * Out.cli_output, Exit_code.t) result =
   Metrics_.add_engine_type conf.engine_type;
 
@@ -443,7 +417,7 @@ let check_targets_with_rules
   let rules =
     rules
     |> List_.deduplicate_gen ~get_key:(fun r ->
-           Rule_ID.to_string (fst r.Rule.id))
+        Rule_ID.to_string (fst r.Rule.id))
   in
   let too_many_entries = conf.output_conf.max_log_list_entries in
   Logs.info (fun m ->
@@ -476,12 +450,11 @@ let check_targets_with_rules
          errors are also surfaced to users who request --json or similar.
       *)
       let core_errors =
-        List_.map Core_error.error_of_invalid_rule invalid_rules
+        List.map Core_error.error_of_invalid_rule invalid_rules
       in
       Error
         (output_and_exit_from_fatal_core_errors_exn
            ~exit_code:(Exit_code.missing_config ~__LOC__)
-           (caps :> < Cap.stdout >)
            conf profiler core_errors)
   | _ -> begin
       (* It's important that this step happens _after_ we check whether we have
@@ -495,7 +468,7 @@ let check_targets_with_rules
 
       (* step 3: choose the right engine and right hooks *)
       let output_format, file_match_hook =
-        choose_output_format_and_match_hook (caps :> < Cap.stdout >) conf rules
+        choose_output_format_and_match_hook conf rules
       in
       (* step 3': call the engine! *)
       Logs.info (fun m ->
@@ -509,8 +482,7 @@ let check_targets_with_rules
         | None ->
             Profiler.record profiler ~name:"core_time" (fun () ->
                 let { run } : Core_runner.func =
-                  mk_core_run_for_osemgrep caps conf
-                    Differential_scan_config.WholeScan
+                  mk_core_run_for_osemgrep conf
                 in
                 run ?file_match_hook conf.core_runner_conf conf.targeting_conf
                   (rules, invalid_rules) targets)
@@ -518,17 +490,13 @@ let check_targets_with_rules
             (* scan_baseline calls internally Profiler.record "head_core_time"*)
             (* diff scan mode *)
             let diff_scan_func : Diff_scan.diff_scan_func =
-             fun ?(diff_config = Differential_scan_config.WholeScan) targets
-                 rules ->
-              let { run } : Core_runner.func =
-                mk_core_run_for_osemgrep caps conf diff_config
-              in
+             fun targets rules ->
+              let { run } : Core_runner.func = mk_core_run_for_osemgrep conf in
               run ?file_match_hook conf.core_runner_conf conf.targeting_conf
                 (rules, invalid_rules) targets
             in
-            Diff_scan.scan_baseline
-              (caps :> < Cap.chdir ; Cap.tmp >)
-              conf profiler baseline_commit targets rules diff_scan_func
+            Diff_scan.scan_baseline profiler baseline_commit rules
+              diff_scan_func
       in
       match result_or_exn with
       | Error exn ->
@@ -565,7 +533,6 @@ let check_targets_with_rules
               }
             in
             Output.output_result
-              (caps :> < Cap.stdout >)
               { conf.output_conf with output_format }
               runtime_params profiler res
           in
@@ -577,8 +544,8 @@ let check_targets_with_rules
             match result_or_exn with
             | Ok r ->
                 r.valid_rules
-                |> List_.map (fun (rv : Rule.rule) ->
-                       Rule_ID.to_string (fst rv.id))
+                |> List.map (fun (rv : Rule.rule) ->
+                    Rule_ID.to_string (fst rv.id))
             | Error _ -> []
           in
 
@@ -604,7 +571,8 @@ let check_targets_with_rules
                    ~respect_gitignore:conf.targeting_conf.respect_gitignore
                    ~max_target_bytes:conf.targeting_conf.max_target_bytes
                    ~num_valid_rules:(List.length valid_rules)
-                   conf.common.maturity cli_output skipped_groups));
+                   conf.common.maturity cli_output skipped_groups
+                   conf.common.logging_level));
 
           (* step 6: apply autofixes *)
           (* this must happen posterior to reporting matches, or will report the
@@ -630,7 +598,7 @@ let check_targets_with_rules
 (* Run the real 'scan' subcommand *)
 (*****************************************************************************)
 
-let run_scan_conf (caps : < caps ; .. >) (conf : Scan_CLI.conf) : Exit_code.t =
+let run_scan_conf (conf : Scan_CLI.conf) : Exit_code.t =
   (* Print The logo ASAP to minimize time to first meaningful content paint.
    * Note that Logs.app() is printing on stderr (but without any [XXX] prefix),
    * and is filtered when using --quiet.
@@ -678,9 +646,8 @@ let run_scan_conf (caps : < caps ; .. >) (conf : Scan_CLI.conf) : Exit_code.t =
   if new_cli_ux then
     Logs.app (fun m -> m "%s" (Text_reports.rules_source conf.rules_source));
   let rules_and_origins, fatal_errors =
-    rules_from_rules_source
-      (caps :> < Cap.network ; Cap.tmp >)
-      ~token_opt:settings.api_token ~rewrite_rule_ids:conf.rewrite_rule_ids
+    rules_from_rules_source ~token_opt:settings.api_token
+      ~rewrite_rule_ids:conf.rewrite_rule_ids
       ~strict:conf.core_runner_conf.strict conf.rules_source
   in
 
@@ -690,27 +657,19 @@ let run_scan_conf (caps : < caps ; .. >) (conf : Scan_CLI.conf) : Exit_code.t =
       let core_errors = core_errors_of_fatal_rule_errors fatal_errors in
       output_and_exit_from_fatal_core_errors_exn
         ~exit_code:(Exit_code.missing_config ~__LOC__)
-        (caps :> < Cap.stdout >)
         conf profiler core_errors
   (* but with no fatal rule errors, we can proceed with the scan! *)
   | [] -> (
-      (* step2: getting the targets *)
-      Logs.info (fun m -> m "Computing the targets");
+      (* step2: getting the targets (part1) *)
+      Logs.info (fun m -> m "Computing the target candidates");
       let targets_and_skipped =
-        Find_targets.get_target_fpaths conf.targeting_conf conf.target_roots
+        Find_targets.get_targets conf.targeting_conf conf.target_roots
       in
 
       (* step3: let's go *)
       let res =
-        check_targets_with_rules
-          (caps
-            :> < Cap.stdout
-               ; Cap.chdir
-               ; Cap.tmp
-               ; Cap.fork
-               ; Cap.time_limit
-               ; Cap.memory_limit >)
-          conf profiler rules_and_origins targets_and_skipped
+        check_targets_with_rules conf profiler rules_and_origins
+          targets_and_skipped
       in
 
       (* step4: exit with the right exit code *)
@@ -730,10 +689,14 @@ let run_scan_conf (caps : < caps ; .. >) (conf : Scan_CLI.conf) : Exit_code.t =
 
 (* All the business logic after command-line parsing. Return the desired
    exit code. *)
-let run_conf (caps : < caps ; .. >) (conf : Scan_CLI.conf) : Exit_code.t =
+let run_conf (conf : Scan_CLI.conf) : Exit_code.t =
   (* coupling: if you modify the pysemgrep fallback code below, you
    * probably also need to modify it in Ci_subcommand.ml
    *)
+  CLI_common.with_logging
+    ~color:(if conf.output_conf.force_color then On else Auto)
+    ~level:conf.common.logging_level
+  @@ fun () ->
   (match conf.common.maturity with
   | Maturity.Default -> (
       (* TODO: handle more confs, or fallback to pysemgrep further down *)
@@ -759,23 +722,17 @@ let run_conf (caps : < caps ; .. >) (conf : Scan_CLI.conf) : Exit_code.t =
   | Maturity.Develop ->
       ());
 
-  (* Note that basic logging (Logs_.setup_basic()) was done in CLI.ml before, but
-   * in CLI_common.setup_logging() we do the full setup (Logs_.setup()) now
-   * that we have a conf object.
-   *)
-  CLI_common.setup_logging ~force_color:conf.output_conf.force_color
-    ~level:conf.common.logging_level;
   Logs.info (fun m -> m "Semgrep version: %s" Version.version);
 
   let conf =
-    if conf.common.profile then (
+    if conf.common.simple_profiling then (
       (* ugly: no need to set Profiling.profile, this was done in CLI.ml
        * See also Core_profiling.profiling set in run_scan_conf() above.
        *)
       Logs.warn (fun m -> m "Profile mode On (running one job, ignoring -j)");
       {
         conf with
-        core_runner_conf = { conf.core_runner_conf with num_jobs = 1 };
+        core_runner_conf = { conf.core_runner_conf with num_jobs = Force 1 };
       })
     else conf
   in
@@ -791,45 +748,26 @@ let run_conf (caps : < caps ; .. >) (conf : Scan_CLI.conf) : Exit_code.t =
    * (e.g., 'semgrep show version') instead of abusing 'semgrep scan' flags.
    *)
   | _ when conf.version ->
-      CapConsole.print caps#stdout Version.version;
+      UConsole.print Version.version;
       (* TOPORT: if enable_version_check: version_check() *)
       Exit_code.ok ~__LOC__
-  | _ when conf.test <> None ->
-      Test_subcommand.run_conf
-        (caps
-          :> < Cap.stdout
-             ; Cap.fork
-             ; Cap.time_limit
-             ; Cap.memory_limit
-             ; Cap.tmp >)
-        (Common2.some conf.test)
+  | _ when conf.test <> None -> Test_subcommand.run_conf (Option.get conf.test)
   | _ when conf.validate <> None ->
-      Validate_subcommand.run_conf
-        (caps
-          :> < Cap.stdout
-             ; Cap.network
-             ; Cap.tmp
-             ; Cap.fork
-             ; Cap.time_limit
-             ; Cap.memory_limit >)
-        (Common2.some conf.validate)
-  | _ when conf.show <> None ->
-      Show_subcommand.run_conf
-        (caps :> < Cap.stdout ; Cap.network ; Cap.tmp >)
-        (Common2.some conf.show)
+      Validate_subcommand.run_conf (Option.get conf.validate)
+  | _ when conf.show <> None -> Show_subcommand.run_conf (Option.get conf.show)
   | _ when conf.ls ->
       Ls_subcommand.run ~target_roots:conf.target_roots
-        ~targeting_conf:conf.targeting_conf ~format:conf.ls_format ()
+        ~targeting_conf:conf.targeting_conf ~format:conf.ls_format
   | _ ->
       (* --------------------------------------------------------- *)
       (* Let's go, this is an actual scan subcommand *)
       (* --------------------------------------------------------- *)
-      run_scan_conf caps conf
+      run_scan_conf conf
 
 (*****************************************************************************)
 (* Entry point *)
 (*****************************************************************************)
 
-let main (caps : < caps ; .. >) (argv : string array) : Exit_code.t =
-  let conf = Scan_CLI.parse_argv (caps :> < Cap.tmp >) argv in
-  run_conf caps conf
+let main (argv : string array) : Exit_code.t =
+  let conf = Scan_CLI.parse_argv argv in
+  run_conf conf

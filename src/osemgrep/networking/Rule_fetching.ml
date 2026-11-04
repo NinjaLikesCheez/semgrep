@@ -1,3 +1,15 @@
+(*
+   Copyright (c) 2022-2025 Semgrep Inc.
+
+   This library is free software; you can redistribute it and/or
+   modify it under the terms of the GNU Lesser General Public License
+   version 2.1 as published by the Free Software Foundation.
+
+   This library is distributed in the hope that it will be useful, but
+   WITHOUT ANY WARRANTY; without even the implied warranty of
+   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the file
+   LICENSE for more details.
+*)
 open Common
 open Fpath_.Operators
 module E = Error
@@ -32,6 +44,12 @@ module XP = Xpattern
 (* Types *)
 (*****************************************************************************)
 
+(* capabilities required to fetch rules from a Rules_source.t
+ * network: for registry rules
+ * tmp: for saving the downloaded rules somewhere so we can
+ * loading them from disk (alt: parse rules from a buffer instead of a file)
+ * readdir: for config_string denotating local directories
+ *)
 (* python: was called ConfigFile, and called a 'config' in text output.
  * TODO? maybe we don't need this intermediate type anymore; just return
  * a pair, which would remove the need for partition_rules_and_invalid.
@@ -78,7 +96,7 @@ let prefix_for_fpath_opt (fpath : Fpath.t) : string option =
   | [ _file ] -> None
   | _file :: dirs ->
       let prefix =
-        dirs |> List.rev |> List_.map (fun s -> s ^ ".") |> String.concat ""
+        dirs |> List.rev |> List.map (fun s -> s ^ ".") |> String.concat ""
       in
       Some prefix
 
@@ -111,16 +129,24 @@ let partition_rules_and_invalid (xs : rules_and_origin list) :
   in
   (rules, invalid_rules)
 
-let fetch_content_from_url_async ?token_opt caps (url : Uri.t) : string Lwt.t =
+(* coupling(eio-port): if you change this you must change the eio version *)
+let fetch_content_from_url_async ?token_opt ?timeout_secs (url : Uri.t) :
+    string Lwt.t =
   (* TOPORT? _nice_semgrep_url() *)
   Logs.info (fun m -> m "trying to download from %s" (Uri.to_string url));
   let content =
     let headers =
       match token_opt with
       | None -> None
-      | Some token -> Some [ Auth.auth_header_of_token token ]
+      | Some token ->
+          Some
+            [
+              ("Content-Type", "application/json");
+              ("User-Agent", spf "Semgrep/%s" Version.version);
+              Auth.auth_header_of_token token;
+            ]
     in
-    match%lwt Http_helpers.get ?headers caps#network url with
+    match%lwt Http_helpers.get ?headers ?timeout_secs url with
     | Ok { body = Ok body; _ } -> Lwt.return body
     | Ok { body = Error error; code; _ } ->
         Error.abort
@@ -134,12 +160,46 @@ let fetch_content_from_url_async ?token_opt caps (url : Uri.t) : string Lwt.t =
   Logs.info (fun m -> m "finished downloading from %s" (Uri.to_string url));
   content
 
-let fetch_content_from_registry_url_async ~token_opt caps url =
-  Metrics_.g.is_using_registry <- true;
-  fetch_content_from_url_async ?token_opt caps url
+(* coupling(eio-port): if you change this you must change the lwt version *)
+let fetch_content_from_url_eio ?token_opt (url : Uri.t) : string =
+  (* TOPORT? _nice_semgrep_url() *)
+  Logs.info (fun m -> m "trying to download from %s" (Uri.to_string url));
+  let content =
+    let headers =
+      match token_opt with
+      | None -> None
+      | Some token ->
+          Some
+            [
+              ("Content-Type", "application/json");
+              ("User-Agent", spf "Semgrep/%s" Version.version);
+              Auth.auth_header_of_token token;
+            ]
+    in
+    match Http_helpers.get_eio ?headers url with
+    | Ok { body = Ok body; _ } -> body
+    | Ok { body = Error error; code; _ } ->
+        Error.abort
+          (spf "Failed to download config from %s, returned code %u: %s"
+             (Uri.to_string url) code error)
+    | Error e ->
+        (* was raise Semgrep_error, but equivalent to abort now *)
+        Error.abort
+          (spf "Failed to download config from %s: %s" (Uri.to_string url) e)
+  in
+  Logs.info (fun m -> m "finished downloading from %s" (Uri.to_string url));
+  content
 
-let fetch_content_from_registry_url ~token_opt caps url =
-  Lwt_platform.run (fetch_content_from_registry_url_async ~token_opt caps url)
+let fetch_content_from_registry_url_async ~token_opt url =
+  Metrics_.g.is_using_registry <- true;
+  fetch_content_from_url_async ?token_opt url
+
+let fetch_content_from_registry_url_eio ~token_opt url =
+  Metrics_.g.is_using_registry <- true;
+  fetch_content_from_url_eio ?token_opt url
+
+let fetch_content_from_registry_url ~token_opt url =
+  Lwt_platform.run (fetch_content_from_registry_url_async ~token_opt url)
 [@@profiling]
 
 (*****************************************************************************)
@@ -159,13 +219,13 @@ let parse_yaml_for_jsonnet (file : Fpath.t) : AST_jsonnet.program =
    *)
   AST_generic_to_jsonnet.program gen
 
-let mk_import_callback (caps : < Cap.network ; Cap.tmp ; .. >) base str =
+let mk_import_callback ~sandbox base str =
   match str with
   | s when s =~ ".*\\.y[a]?ml$" ->
       (* On the fly conversion from yaml to jsonnet. We can do
        * 'local x = import "foo.yml";'!
        *)
-      let final_path = Fpath.v base / str in
+      let final_path = sandbox (Fpath.v base // Fpath.v str) in
       Some (parse_yaml_for_jsonnet final_path)
   | s ->
       let url_opt =
@@ -189,28 +249,25 @@ let mk_import_callback (caps : < Cap.network ; Cap.tmp ; .. >) base str =
       in
       url_opt
       |> Option.map (fun url ->
-             (* similar to load_rules_from_url() but here we
-              * must return some AST_jsonnet, not rules (yet).
-              *
-              * TODO: ask for JSON in headers which improves performance
-              * because Yaml rule parsing is slower than Json rule parsing.
-              *
-              * TODO: fix token_opt parameter. Currently we don't pass it.
-              * import_callback either needs an additional parameter, or
-              * parse_rule should take an import_callback as a parameter.
-              *)
-             let contents =
-               fetch_content_from_registry_url ~token_opt:None caps url
-             in
-             (* TODO: this assumes every URLs are for yaml, but maybe we could
-              * also import URLs to jsonnet files or gist! or look at the
-              * header mimetype when downloading the URL to decide how to
-              * convert it further?
-              *)
-             CapTmp.with_temp_file caps#tmp ~contents ~suffix:".yaml"
-               (fun file ->
-                 (* LATER: adjust locations so refer to registry URL *)
-                 parse_yaml_for_jsonnet file))
+          (* similar to load_rules_from_url() but here we
+           * must return some AST_jsonnet, not rules (yet).
+           *
+           * TODO: ask for JSON in headers which improves performance
+           * because Yaml rule parsing is slower than Json rule parsing.
+           *
+           * TODO: fix token_opt parameter. Currently we don't pass it.
+           * import_callback either needs an additional parameter, or
+           * parse_rule should take an import_callback as a parameter.
+           *)
+          let contents = fetch_content_from_registry_url ~token_opt:None url in
+          (* TODO: this assumes every URLs are for yaml, but maybe we could
+           * also import URLs to jsonnet files or gist! or look at the
+           * header mimetype when downloading the URL to decide how to
+           * convert it further?
+           *)
+          UTmp.with_temp_file ~contents ~suffix:".yaml" (fun file ->
+              (* LATER: adjust locations so refer to registry URL *)
+              parse_yaml_for_jsonnet file))
 [@@profiling]
 
 (* Performs modification to metadata for non-registry/app originating rules.
@@ -233,7 +290,7 @@ let modify_registry_provided_metadata (origin : origin) (rule : Rule.t) =
         match (obj : JSON.t) with
         | Object members ->
             JSON.Object
-              (List_.map
+              (List.map
                  (function
                    | key', _ when key = key' -> (key, v)
                    | x -> x)
@@ -262,7 +319,7 @@ let modify_registry_provided_metadata (origin : origin) (rule : Rule.t) =
 (* similar to Parse_rule.parse_file but with special import callbacks
  * for a registry-aware jsonnet.
  *)
-let parse_rule ~rewrite_rule_ids ~origin caps (file : Fpath.t) :
+let parse_rule ~rewrite_rule_ids ~origin (file : Fpath.t) :
     (Rule_error.rules_and_invalid, Rule_error.t) Result.t =
   let rule_id_rewriter =
     if rewrite_rule_ids then Some (mk_rewrite_rule_ids origin) else None
@@ -277,8 +334,8 @@ let parse_rule ~rewrite_rule_ids ~origin caps (file : Fpath.t) :
                any point.");
         let ast = Parse_jsonnet.parse_program file in
         let core =
-          Desugar_jsonnet.desugar_program
-            ~import_callback:(mk_import_callback caps) file ast
+          Desugar_jsonnet.desugar_program ~import_callback:mk_import_callback
+            file ast
         in
         let value_ = Eval_jsonnet.eval_program core in
         let gen = Manifest_jsonnet_to_AST_generic.manifest_value value_ in
@@ -291,7 +348,7 @@ let parse_rule ~rewrite_rule_ids ~origin caps (file : Fpath.t) :
   in
   match rules_and_invalid with
   | Ok (rules, invalid) ->
-      Ok (List_.map (modify_registry_provided_metadata origin) rules, invalid)
+      Ok (List.map (modify_registry_provided_metadata origin) rules, invalid)
   | Error err -> Error err
 
 (*****************************************************************************)
@@ -305,11 +362,11 @@ let parse_rule ~rewrite_rule_ids ~origin caps (file : Fpath.t) :
  *  Parse_rule.is_valid_rule_filename, but we still need ojsonnet to
  *  be done).
  *)
-let load_rules_from_file ~rewrite_rule_ids ~origin caps (file : Fpath.t) :
+let load_rules_from_file ~rewrite_rule_ids ~origin (file : Fpath.t) :
     (rules_and_origin, Rule_error.t) result =
   Logs.info (fun m -> m "loading local config from %s" !!file);
-  if Sys.file_exists !!file then
-    match parse_rule ~rewrite_rule_ids ~origin caps file with
+  if Sys_.Fpath.exists file then
+    match parse_rule ~rewrite_rule_ids ~origin file with
     | Ok (rules, invalid_rules) ->
         Logs.info (fun m -> m "Done loading local config from %s" !!file);
         Ok { rules; invalid_rules; origin = Local_file file }
@@ -320,9 +377,12 @@ let load_rules_from_file ~rewrite_rule_ids ~origin caps (file : Fpath.t) :
      *)
     Error.abort (spf "file %s does not exist anymore" !!file)
 
-let load_rules_from_url_async ~origin ?token_opt ?(ext = "yaml") caps url :
-    (rules_and_origin, Rule_error.t) result Lwt.t =
-  let%lwt contents = fetch_content_from_url_async ?token_opt caps url in
+(* coupling(eio-port): if you change this you must change the eio version *)
+let load_rules_from_url_async ~origin ?token_opt ?(ext = "yaml") ?timeout_secs
+    url : (rules_and_origin, Rule_error.t) result Lwt.t =
+  let%lwt contents =
+    fetch_content_from_url_async ?token_opt ?timeout_secs url
+  in
   let ext, contents =
     if ext = "policy" then
       (* project rule_config, from config_resolver.py in _make_config_request *)
@@ -337,17 +397,149 @@ let load_rules_from_url_async ~origin ?token_opt ?(ext = "yaml") caps url :
       | _failure -> (ext, contents)
     else (ext, contents)
   in
-  CapTmp.with_temp_file caps#tmp ~contents ~suffix:("." ^ ext) (fun file ->
-      load_rules_from_file ~rewrite_rule_ids:false ~origin caps file)
+  UTmp.with_temp_file ~contents ~suffix:("." ^ ext) (fun file ->
+      load_rules_from_file ~rewrite_rule_ids:false ~origin file)
   |> Lwt.return
 
-let load_rules_from_url ~origin ?token_opt ?(ext = "yaml") caps url :
+(* coupling(eio-port): if you change this you must change the lwt version *)
+let load_rules_from_url_eio ~origin ?token_opt ?(ext = "yaml") url :
     (rules_and_origin, Rule_error.t) result =
-  Lwt_platform.run (load_rules_from_url_async ~origin ?token_opt ~ext caps url)
+  let contents = fetch_content_from_url_eio ?token_opt url in
+  let ext, contents =
+    if ext = "policy" then
+      (* project rule_config, from config_resolver.py in _make_config_request *)
+      try
+        match Yojson.Basic.from_string contents with
+        | `Assoc e -> (
+            match List.assoc "rule_config" e with
+            | `String e -> ("json", e)
+            | _else -> (ext, contents))
+        | _else -> (ext, contents)
+      with
+      | _failure -> (ext, contents)
+    else (ext, contents)
+  in
+  UTmp.with_temp_file ~contents ~suffix:("." ^ ext) (fun file ->
+      load_rules_from_file ~rewrite_rule_ids:false ~origin file)
+
+let load_rules_from_url ~origin ?token_opt ?(ext = "yaml") url :
+    (rules_and_origin, Rule_error.t) result =
+  Lwt_platform.run (load_rules_from_url_async ~origin ?token_opt ~ext url)
 [@@profiling]
 
-(* TODO: merge caps and token_opt and caps_opt? *)
-let rules_from_dashdash_config_async ~rewrite_rule_ids ~token_opt caps kind :
+(* TODO: merge token_opt? *)
+(* coupling(eio-port): if you change this you must change the lwt version *)
+let rules_from_dashdash_config_eio ~rewrite_rule_ids ~token_opt kind :
+    (* alt: (rules_and_origin list, Rule.Error.t list) result
+       here and below:
+       we could do this, but it lacks flexibility compared with this output type
+       for instance, Validate_subcommand and Publish_subcommand pool together the
+       invalid rule errors (located inside each `rules_and_origin`) and the fatal
+       rule errors (the `Rule.Error.t`s), and decides to fail if either are present
+
+       if we split each into a sum, we never have either at the same time. this
+       breaks the code's behavior *
+    *)
+    rules_and_origin list * Rule_error.t list =
+  match kind with
+  | C.File path ->
+      Result_.partition
+        (load_rules_from_file ~rewrite_rule_ids ~origin:(Local_file path))
+        [ path ]
+  | C.Dir dir ->
+      (* We used to skip dot files under [dir], but keeping rules/.semgrep.yml,
+       * but not path/.github/foo.yml, but keeping src/.semgrep/bad_pattern.yml
+       * but not ./.pre-commit-config.yaml, ... This was mainly because
+       * we used to fetch rules from ~/.semgrep/ implicitely when --config
+       * was not given, but this feature was removed, so now we can KISS.
+       *)
+      List_files.list dir
+      |> List.filter Rule_file.is_valid_rule_filename
+      |> List.map (fun file ->
+          load_rules_from_file ~rewrite_rule_ids ~origin:(Local_file file) file)
+      |> Result_.partition Fun.id
+  | C.URL url ->
+      (* TODO: Re-enable passing in our token to trusted remote urls.
+       * This is currently disabled because we don't want to pass our token
+       * to untrusted endpoints. There should be a relatively painless way
+       * to do this, but this can be addressed in a follow-up PR.
+       *)
+      let rules = load_rules_from_url_eio ~origin:(Untrusted_remote url) url in
+      [ rules ] |> Result_.partition Fun.id
+  | C.R rkind ->
+      let url = Semgrep_Registry.url_of_registry_config_kind rkind in
+      let contents = fetch_content_from_registry_url_eio ~token_opt url in
+      UTmp.with_temp_file ~contents ~suffix:".yaml" (fun file ->
+          [ load_rules_from_file ~rewrite_rule_ids ~origin:Registry file ])
+      |> Result_.partition Fun.id
+  | C.A Policy
+  | C.A Hooks ->
+      let token =
+        match token_opt with
+        | None ->
+            Error.abort
+              (spf
+                 "Cannot to download rules from policy without authorization \
+                  token")
+        | Some token -> token
+      in
+      if !Env.v.disable_config_download_v2 then (
+        Logs.app (fun m -> m "Fetching rules via legacy config download");
+        let uri =
+          Semgrep_App.url_for_policy ~from_hooks:(kind =*= C.A Hooks) token
+        in
+        Metrics_.add_feature ~category:"config_download"
+          ~name:"legacy_config_eio";
+        let rules_and_errors =
+          load_rules_from_url_eio ?token_opt ~ext:"policy" ~origin:Registry uri
+        in
+        Metrics_.g.is_using_app <- true;
+        [ rules_and_errors ] |> Result_.partition Fun.id)
+      else (
+        Logs.app (fun m ->
+            m
+              "Fetching rules via config download v2 (set \
+               SEMGREP_DISABLE_CONFIG_DOWNLOAD_V2=1 to disable)");
+        (* TODO: deprecate the above call site or add a repo parameter at this
+         * call site when needed.
+         * The v2 endpoint can accept a repository field, but make_scan_request_v2
+         * always sets repository = "" here, so the server falls back to
+         * deployment-level config rather than repo-specific policy rules.
+         *
+         * The legacy path (url_for_policy) required SEMGREP_REPO_NAME and sent
+         * it as a query param to fetch repo-specific rules for C.A Policy. The
+         * Hooks case already used an empty repo in legacy, so that path is
+         * unaffected.
+         *
+         * With v2 as default, `semgrep --config policy` with SEMGREP_REPO_NAME
+         * set will silently receive deployment-level rules instead of
+         * repo-specific policy rules — no error is raised and rule counts may
+         * differ. If repo-specific rules are required here, fetch_scan_config_v2_eio
+         * (and make_scan_request_v2) need to accept a repo parameter. *)
+        match
+          Semgrep_App.fetch_scan_config_v2_eio ~secrets:false ~sca:false token
+        with
+        | Error e ->
+            Error.abort
+              (spf
+                 "Failed to fetch scan config (v2): %s. Set \
+                  SEMGREP_DISABLE_CONFIG_DOWNLOAD_V2=1 to fall back to legacy."
+                 e)
+        | Ok sc ->
+            let rules_json =
+              Yojson.Basic.to_string sc.Semgrep_output_v1_t.rules
+            in
+            Metrics_.g.is_using_app <- true;
+            UTmp.with_temp_file ~contents:rules_json ~suffix:".json"
+              (fun file ->
+                [ load_rules_from_file ~rewrite_rule_ids ~origin:App file ])
+            |> Result_.partition Fun.id)
+  | C.A SupplyChain ->
+      Metrics_.g.is_using_app <- true;
+      failwith "TODO: SupplyChain not handled yet"
+
+(* coupling(eio-port): if you change this you must change the eio version *)
+let rules_from_dashdash_config_async ~rewrite_rule_ids ~token_opt kind :
     (* alt: (rules_and_origin list, Rule.Error.t list) result
        here and below:
        we could do this, but it lacks flexibility compared with this output type
@@ -363,8 +555,7 @@ let rules_from_dashdash_config_async ~rewrite_rule_ids ~token_opt caps kind :
   | C.File path ->
       Lwt.return
         (Result_.partition
-           (load_rules_from_file ~rewrite_rule_ids ~origin:(Local_file path)
-              caps)
+           (load_rules_from_file ~rewrite_rule_ids ~origin:(Local_file path))
            [ path ])
   | C.Dir dir ->
       (* We used to skip dot files under [dir], but keeping rules/.semgrep.yml,
@@ -375,29 +566,27 @@ let rules_from_dashdash_config_async ~rewrite_rule_ids ~token_opt caps kind :
        *)
       List_files.list dir
       |> List.filter Rule_file.is_valid_rule_filename
-      |> List_.map (fun file ->
-             load_rules_from_file ~rewrite_rule_ids ~origin:(Local_file file)
-               caps file)
+      |> List.map (fun file ->
+          load_rules_from_file ~rewrite_rule_ids ~origin:(Local_file file) file)
       |> Result_.partition Fun.id |> Lwt.return
   | C.URL url ->
       (* TODO: Re-enable passing in our token to trusted remote urls.
-         * This is currently disabled because we don't want to pass our token
-         * to untrusted endpoints. There should be a relatively painless way
-         * to do this, but this can be addressed in a follow-up PR.
-      *)
+       * This is currently disabled because we don't want to pass our token
+       * to untrusted endpoints. There should be a relatively painless way
+       * to do this, but this can be addressed in a follow-up PR.
+       *)
       let%lwt rules =
-        load_rules_from_url_async ~origin:(Untrusted_remote url) caps url
+        load_rules_from_url_async ~origin:(Untrusted_remote url) url
       in
       [ rules ] |> Result_.partition Fun.id |> Lwt.return
   | C.R rkind ->
       let url = Semgrep_Registry.url_of_registry_config_kind rkind in
-      let%lwt contents =
-        fetch_content_from_registry_url_async ~token_opt caps url
-      in
-      CapTmp.with_temp_file caps#tmp ~contents ~suffix:".yaml" (fun file ->
-          [ load_rules_from_file ~rewrite_rule_ids ~origin:Registry caps file ])
+      let%lwt contents = fetch_content_from_registry_url_async ~token_opt url in
+      UTmp.with_temp_file ~contents ~suffix:".yaml" (fun file ->
+          [ load_rules_from_file ~rewrite_rule_ids ~origin:Registry file ])
       |> Result_.partition Fun.id |> Lwt.return
-  | C.A Policy ->
+  | C.A Policy
+  | C.A Hooks ->
       let token =
         match token_opt with
         | None ->
@@ -407,23 +596,72 @@ let rules_from_dashdash_config_async ~rewrite_rule_ids ~token_opt caps kind :
                   token")
         | Some token -> token
       in
-      let caps' = Auth.cap_token_and_network token caps in
-      let uri = Semgrep_App.url_for_policy caps' in
-      let caps'' = Auth.cap_token_and_network_and_tmp token caps in
-      let%lwt rules_and_errors =
-        load_rules_from_url_async ?token_opt ~ext:"policy" ~origin:Registry
-          caps'' uri
-      in
-      Metrics_.g.is_using_app <- true;
-      [ rules_and_errors ] |> Result_.partition Fun.id |> Lwt.return
+      if !Env.v.disable_config_download_v2 then (
+        Logs.app (fun m -> m "Fetching rules via legacy config download");
+        let uri =
+          Semgrep_App.url_for_policy ~from_hooks:(kind =*= C.A Hooks) token
+        in
+        let timeout_secs =
+          match kind with
+          | C.A Hooks -> Some 30.0
+          | _ -> None
+        in
+        Metrics_.add_feature ~category:"config_download"
+          ~name:"legacy_config_lwt";
+        let%lwt rules_and_errors =
+          load_rules_from_url_async ?token_opt ~ext:"policy" ~origin:Registry
+            ?timeout_secs uri
+        in
+        Metrics_.g.is_using_app <- true;
+        [ rules_and_errors ] |> Result_.partition Fun.id |> Lwt.return)
+      else (
+        Logs.app (fun m ->
+            m
+              "Fetching rules via config download v2 (set \
+               SEMGREP_DISABLE_CONFIG_DOWNLOAD_V2=1 to disable)");
+        (* TODO: deprecate the above call site or add a repo parameter at this
+         * call site when needed.
+         * The v2 endpoint can accept a repository field, but make_scan_request_v2
+         * always sets repository = "" here, so the server falls back to
+         * deployment-level config rather than repo-specific policy rules.
+         *
+         * The legacy path (url_for_policy) required SEMGREP_REPO_NAME and sent
+         * it as a query param to fetch repo-specific rules for C.A Policy. The
+         * Hooks case already used an empty repo in legacy, so that path is
+         * unaffected.
+         *
+         * With v2 as default, `semgrep --config policy` with SEMGREP_REPO_NAME
+         * set will silently receive deployment-level rules instead of
+         * repo-specific policy rules — no error is raised and rule counts may
+         * differ. If repo-specific rules are required here, fetch_scan_config_v2_async
+         * (and make_scan_request_v2) need to accept a repo parameter. *)
+        let%lwt result =
+          Semgrep_App.fetch_scan_config_v2_async ~secrets:false ~sca:false token
+        in
+        match result with
+        | Error e ->
+            Error.abort
+              (spf
+                 "Failed to fetch scan config (v2): %s. Set \
+                  SEMGREP_DISABLE_CONFIG_DOWNLOAD_V2=1 to fall back to legacy."
+                 e)
+        | Ok sc ->
+            let rules_json =
+              Yojson.Basic.to_string sc.Semgrep_output_v1_t.rules
+            in
+            Metrics_.g.is_using_app <- true;
+            UTmp.with_temp_file ~contents:rules_json ~suffix:".json"
+              (fun file ->
+                [ load_rules_from_file ~rewrite_rule_ids ~origin:App file ])
+            |> Result_.partition Fun.id |> Lwt.return)
   | C.A SupplyChain ->
       Metrics_.g.is_using_app <- true;
       failwith "TODO: SupplyChain not handled yet"
 
-let rules_from_dashdash_config ~rewrite_rule_ids ~token_opt caps kind :
+let rules_from_dashdash_config ~rewrite_rule_ids ~token_opt kind :
     rules_and_origin list * Rule_error.t list =
   Lwt_platform.run
-    (rules_from_dashdash_config_async ~rewrite_rule_ids ~token_opt caps kind)
+    (rules_from_dashdash_config_async ~rewrite_rule_ids ~token_opt kind)
 [@@profiling]
 
 (*****************************************************************************)
@@ -438,45 +676,36 @@ let langs_of_pattern (pat, analyzer_opt) : Analyzer.t list =
   match analyzer_opt with
   | Some analyzer ->
       (* TODO? capture also parse errors here? and transform the pattern
-         * parse error in invalid_rule_error to return in rules_and_origin? *)
+       * parse error in invalid_rule_error to return in rules_and_origin? *)
       [ analyzer_compatible_with_pat analyzer |> Result.get_ok ]
   (* osemgrep-only: better: can use -e without -l! we try all languages *)
   | None ->
       (* We need uniq_by because Lang.assoc contain multiple times the
-         * same value, for instance we have ("cpp", Cpp); ("c++", Cpp) in
-         * Lang.assoc
-         * TODO? use Analyzer.assoc instead?
-      *)
+       * same value, for instance we have ("cpp", Cpp); ("c++", Cpp) in
+       * Lang.assoc
+       * TODO? use Analyzer.assoc instead?
+       *)
       let all_langs =
-        Lang.assoc
-        |> List_.map (fun (_k, l) -> l)
-        |> List_.deduplicate
-        (* TODO: we currently get a segfault with the Dart parser
-           * (for example on a pattern like ': string (* filename *)'), so we
-           * skip Dart for now (which anyway is not really supported).
-        *)
-        |> List_.exclude (fun x -> x =*= Lang.Dart)
+        Lang.assoc |> List.map (fun (_k, l) -> l) |> List_.deduplicate
       in
       all_langs
-      |> List_.filter_map (fun l ->
-             match
-               let analyzer =
-                 Analyzer.of_lang l |> analyzer_compatible_with_pat
-               in
-               Logs.debug (fun m ->
-                   m "language %s valid for the pattern" (Lang.show l));
-               analyzer
-             with
-             | Ok analyzer -> Some analyzer
-             | Error _
-             | (exception Failure _) ->
-                 None)
+      |> List.filter_map (fun l ->
+          match
+            let analyzer = Analyzer.of_lang l |> analyzer_compatible_with_pat in
+            Logs.debug (fun m ->
+                m "language %s valid for the pattern" (Lang.show l));
+            analyzer
+          with
+          | Ok analyzer -> Some analyzer
+          | Error _
+          | (exception Failure _) ->
+              None)
 
 let rules_and_origin_of_rule rule =
   { rules = [ rule ]; invalid_rules = []; origin = CLI_argument }
 
 (* python: mix of resolver_config.get_config() and get_rules() *)
-let rules_from_rules_source_async ~token_opt ~rewrite_rule_ids ~strict:_ caps
+let rules_from_rules_source_async ~token_opt ~rewrite_rule_ids ~strict:_
     (src : Rules_source.t) : (rules_and_origin list * Rule_error.t list) Lwt.t =
   let%lwt rules_and_origins, errors =
     match src with
@@ -484,10 +713,10 @@ let rules_from_rules_source_async ~token_opt ~rewrite_rule_ids ~strict:_ caps
         let%lwt pairs_list =
           xs
           |> Lwt_list.map_p (fun str ->
-                 let in_docker = !Semgrep_envvars.v.in_docker in
-                 let config = Rules_config.parse_config_string ~in_docker str in
-                 rules_from_dashdash_config_async ~rewrite_rule_ids ~token_opt
-                   caps config)
+              let in_docker = !Semgrep_envvars.v.in_docker in
+              let config = Rules_config.parse_config_string ~in_docker str in
+              rules_from_dashdash_config_async ~rewrite_rule_ids ~token_opt
+                config)
         in
         let rules_and_origins_nested, errors_nested =
           Common2.unzip pairs_list
@@ -513,23 +742,23 @@ let rules_from_rules_source_async ~token_opt ~rewrite_rule_ids ~strict:_ caps
 
         Lwt.return (rules_and_origins, errors)
     (* better: '-e foo -l regex' was not handled in pysemgrep
-       *  (got a weird 'invalid pattern clause' error)
-       * better: '-e foo -l generic' was not handled in semgrep-core
-    *)
+     *  (got a weird 'invalid pattern clause' error)
+     * better: '-e foo -l generic' was not handled in semgrep-core
+     *)
     | Pattern (pat, analyzer_opt, fix) ->
         let valid_langs = langs_of_pattern (pat, analyzer_opt) in
         let rules_and_origins =
           valid_langs
-          |> List_.map (fun analyzer ->
-                 let xpat =
-                   match Parse_rule.parse_fake_xpattern analyzer pat with
-                   | Ok xpat -> xpat
-                   (* TODO: this shouldn't be any worse than the status quo but
+          |> List.map (fun analyzer ->
+              let xpat =
+                match Parse_rule.parse_fake_xpattern analyzer pat with
+                | Ok xpat -> xpat
+                (* TODO: this shouldn't be any worse than the status quo but
                       this should be more robust *)
-                   | Error e -> failwith (Rule_error.string_of_error e)
-                 in
-                 let rule = Rule.rule_of_xpattern ?fix analyzer xpat in
-                 rules_and_origin_of_rule rule)
+                | Error e -> failwith (Rule_error.string_of_error e)
+              in
+              let rule = Rule.rule_of_xpattern ?fix analyzer xpat in
+              rules_and_origin_of_rule rule)
         in
         (* In run_scan.py, in the pattern case, we would do this:
            if real_config_errors and strict:
@@ -550,8 +779,8 @@ let rules_from_rules_source_async ~token_opt ~rewrite_rule_ids ~strict:_ caps
  * to use the _async variant above mixed with a spinner as in
  * Scan_subcommand.rules_from_rules_source()
  *)
-let rules_from_rules_source ~token_opt ~rewrite_rule_ids ~strict caps
+let rules_from_rules_source ~token_opt ~rewrite_rule_ids ~strict
     (src : Rules_source.t) : rules_and_origin list * Rule_error.t list =
   Lwt_platform.run
-    (rules_from_rules_source_async ~token_opt ~rewrite_rule_ids ~strict caps src)
+    (rules_from_rules_source_async ~token_opt ~rewrite_rule_ids ~strict src)
 [@@profiling]

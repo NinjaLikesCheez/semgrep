@@ -179,7 +179,7 @@ and expr =
   | NameId of ident
   | This of Tok.t
   (* used in Dot but also can be in Call *)
-  (* TODO: Super of tok *)
+  | Super of Tok.t
   (* This is used only in the context of annotations *)
   | NameOrClassType of name_or_class_type
   | Literal of literal
@@ -219,6 +219,8 @@ and expr =
    * that requires semantic information about the type of x and y.
    *)
   | Dot of expr * Tok.t * ident
+  | DotSuper of expr * Tok.t * Tok.t (* Type.super *)
+  | DotEllipsis of expr * Tok.t (* ... *)
   | ArrayAccess of expr * expr bracket
   | Unary of AST_generic.operator (* +/-/~/! *) wrap * expr
   | Postfix of expr * AST_generic.incr_decr wrap
@@ -227,13 +229,14 @@ and expr =
   | SwitchE of Tok.t * expr * (cases * stmts) list (* TODO bracket *)
   (* usually just a single typ, but can also have intersection type t1 & t2 *)
   | Cast of typ list1 bracket * expr
-  | InstanceOf of expr * ref_type
+  | InstanceOf of expr * (ref_type, pattern) Either_.t
   | Conditional of expr * expr * expr
   (* ugly java, like in C assignement is an expression not a statement :( *)
   | Assign of expr * Tok.t * expr
   | AssignOp of expr * AST_generic.operator wrap * expr
   (* javaext: 1.? *)
   | Lambda of parameters * Tok.t (* -> *) * stmt
+  | Template of expr * Tok.t * string_component list bracket
   (* sgrep-ext: *)
   | Ellipsis of Tok.t
   | DeepEllipsis of expr bracket
@@ -243,7 +246,7 @@ and expr =
 and literal =
   | Int of Parsed_int.t
   | Float of float option wrap
-  | String of string wrap (* TODO: bracket *)
+  | String of string_component list bracket (* TODO: bracket *)
   | Char of string wrap
   | Bool of bool wrap
   | Null of Tok.t
@@ -251,8 +254,18 @@ and literal =
   (* TODO? the string contains the enclosing triple quotes for now *)
   | TextBlock of string wrap (* TODO bracket *)
 
+and string_component = StrLit of string wrap | StrInterp of expr bracket
 and arguments = expr list bracket
 and expr_or_type = (expr, typ) Either_.t
+
+(*****************************************************************************)
+(* Patterns *)
+(*****************************************************************************)
+and pattern =
+  | PatUnderscore of Tok.t
+  | PatId of ident
+  | PatTyped of pattern * typ
+  | PatConstructor of qualified_ident * pattern list
 
 (*****************************************************************************)
 (* Statement *)
@@ -282,8 +295,14 @@ and stmt =
   | Assert of Tok.t * expr * expr option (* assert e or assert e : e2 *)
 
 and stmts = stmt list
-and case = Case of (Tok.t * expr) | Default of Tok.t
+
+and case =
+  | Case of Tok.t * pattern * guard option
+  | CaseExprs of Tok.t * expr list * guard option
+  | Default of Tok.t
+
 and cases = case list
+and guard = expr
 
 and for_control =
   | ForClassic of for_init * expr list (* TODO: expr option? *) * expr list
@@ -503,11 +522,11 @@ type any =
 let unwrap = fst
 
 let is_final xs =
-  let xs = List_.map fst xs in
+  let xs = List.map fst xs in
   List.mem Final xs
 
 let is_final_static xs =
-  let xs = List_.map fst xs in
+  let xs = List.map fst xs in
   List.mem Final xs && List.mem Static xs
 
 let basic_entity id mods = { name = id; mods; type_ = None }
@@ -537,6 +556,7 @@ let tok_of_name_or_class_type (x : name_or_class_type) : Tok.t =
  *)
 
 type var_decl_id = IdentDecl of ident | ArrayDecl of var_decl_id
+[@@deriving show]
 
 let rec tok_of_var = function
   | IdentDecl i -> snd i
@@ -568,14 +588,12 @@ let decls f mods vtype vars =
   let dcl (v, init) =
     f { f_var = canon_var mods (Some vtype) v; f_init = init }
   in
-  List_.map dcl vars
+  List.map dcl vars
 
-let typ_of_qualified_id xs = TClass (xs |> List_.map (fun id -> (id, None)))
+let typ_of_qualified_id xs = TClass (xs |> List.map (fun id -> (id, None)))
 
 let name_of_id id =
   (*Name ([[], id]) *)
   NameId id
 
-(* TODO: use a special at some point *)
-let super tok = name_of_id ("super", tok)
 let new_id tok = ("new", tok)

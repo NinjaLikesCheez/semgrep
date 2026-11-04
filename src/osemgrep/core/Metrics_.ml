@@ -1,5 +1,18 @@
+(*
+   Copyright (c) 2022-2025 Semgrep Inc.
+
+   This library is free software; you can redistribute it and/or
+   modify it under the terms of the GNU Lesser General Public License
+   version 2.1 as published by the Free Software Foundation.
+
+   This library is distributed in the hope that it will be useful, but
+   WITHOUT ANY WARRANTY; without even the implied warranty of
+   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the file
+   LICENSE for more details.
+*)
 open Common
-module OutJ = Semgrep_output_v1_j
+open Fpath_.Operators
+module Out = Semgrep_output_v1_j
 
 (*****************************************************************************)
 (* Prelude *)
@@ -163,6 +176,7 @@ let default_payload =
         isAuthenticated = false;
         integrationName = None;
         deployment_id = None;
+        installMethod = None;
       };
     performance =
       {
@@ -204,9 +218,58 @@ let default_payload =
         autofixCount = None;
         ignoreCount = None;
       };
+    mcp =
+      {
+        deployment_name = None;
+        session_id = None;
+        num_findings = None;
+        num_skipped_rules = None;
+        rules = None;
+        num_scanned_files = None;
+        findings = None;
+        errors = None;
+        num_lines = None;
+        git_username = None;
+        git_repo = None;
+        git_branch = None;
+        tool_name = None;
+        num_tps = None;
+        tps = None;
+        num_fps = None;
+        fps = None;
+        num_skips = None;
+        skips = None;
+        oauth_id = None;
+        oauth_name = None;
+        oauth_email = None;
+      };
+    guardian =
+      {
+        hook = None;
+        session_id = None;
+        login_method = None;
+        scanner_version = None;
+        guardian_version = None;
+        deployment_names = None;
+        deployment_ids = None;
+        organization_ids = None;
+        oauth_id = None;
+        oauth_email = None;
+        tool_name = None;
+        package_manager = None;
+        attached_lockfile = None;
+        num_scanned_files = None;
+        num_lines = None;
+        num_findings = None;
+        findings = None;
+        blocking = None;
+        exit_code = None;
+        errors = None;
+      };
+    install_pro = { success = None; error = None };
   }
 
-let default =
+let default () =
   {
     (* default to Off, so don't forget to call Metrics_.configure()
      * to change it in the different subcommands.
@@ -231,7 +294,11 @@ let default =
  * as a global because all fields in Metrics_.t and the payload type
  * are mutable.
  *)
-let g = default
+let g = default ()
+
+(* XXX: what is the safety property that this mutex maintains?  It is not
+ * used consistently (used in the pro LSP, but not in CLI nor in this file) *)
+let g_mutex = Eio.Mutex.create ()
 
 (*****************************************************************************)
 (* Metrics config *)
@@ -269,7 +336,6 @@ let is_enabled () =
 let add_user_agent_tag (str : string) =
   let str =
     str
-    (* TODO: don't use JaneStreet Base until we agree to do so *)
     |> Base.String.chop_prefix_if_exists ~prefix:"("
     |> Base.String.chop_suffix_if_exists ~suffix:")"
     |> String.trim |> spf "(%s)"
@@ -285,9 +351,18 @@ let string_of_user_agent () = String.concat " " g.user_agent
 (* we pass an anonymous_user_id here to avoid a dependency cycle with
  * ../configuring/Semgrep_settings.ml
  *)
-let init (caps : < Cap.random ; .. >) ~anonymous_user_id ~ci =
+let init ~anonymous_user_id ~ci =
+  (* Reset the fields of [g] back to their default values, in case init()
+   * has been previously called (for instance, during e2e tests which may
+   * run multiple distinct subcommands within the same process). *)
+  let g' = default () in
+  g.config <- g'.config;
+  g.is_using_registry <- g'.is_using_registry;
+  g.is_using_app <- g'.is_using_app;
+  g.user_agent <- g'.user_agent;
+
   g.payload.started_at <- now ();
-  g.payload.event_id <- Uuidm.v4_gen (CapRandom.get_state caps#random ()) ();
+  g.payload.event_id <- Uuidm.v4_gen (Random.get_state ()) ();
   g.payload.anonymous_user_id <- Uuidm.to_string anonymous_user_id;
   (* TODO: this field in semgrep_metrics.atd should be a boolean *)
   if ci then g.payload.environment.ci <- Some "true"
@@ -313,10 +388,9 @@ let add_engine_type (engine_type : Engine_type.t) =
         {
           analysis;
           extra_languages;
+          path_sensitive = _;
+          sca_config;
           secrets_config;
-          code_config;
-          supply_chain_config;
-          _;
         } ->
         {
           analysis_type =
@@ -324,10 +398,7 @@ let add_engine_type (engine_type : Engine_type.t) =
             | Intraprocedural -> `Intraprocedural
             | Interprocedural -> `Interprocedural
             | Interfile -> `Interfile);
-          code_config =
-            Option.map
-              (fun () : Semgrep_metrics_t.code_config -> { _rfu = None })
-              code_config;
+          code_config = Some { _rfu = None };
           secrets_config =
             Option.map
               (fun (conf : Engine_type.secrets_config) :
@@ -339,15 +410,15 @@ let add_engine_type (engine_type : Engine_type.t) =
               secrets_config;
           supply_chain_config =
             Option.map
-              (fun () : Semgrep_metrics_t.supply_chain_config ->
+              (fun _TODO : Semgrep_metrics_t.supply_chain_config ->
                 { _rfu = None })
-              supply_chain_config;
+              sca_config;
           pro_langs = extra_languages;
         }
   in
   (* TODO: remove this field? *)
   g.payload.value.engineRequested <-
-    OutJ.show_engine_kind
+    Out.show_engine_kind
       (match engine_type with
       | OSS -> `OSS
       | PRO _ -> `PRO);
@@ -378,8 +449,8 @@ let add_configs_hash configs =
 let add_rules_hashes_and_rules_profiling ?profiling:_TODO rules =
   let hashes =
     rules
-    |> List_.map Rule.sha256_of_rule
-    |> List_.map Digestif.SHA256.to_hex
+    |> List.map Rule.sha256_of_rule
+    |> List.map Digestif.SHA256.to_hex
     |> List.sort String.compare
   in
   let rulesHash_value =
@@ -418,70 +489,83 @@ let add_rules_hashes_and_findings_count (filtered_matches : (Rule.t * int) list)
    *)
   let ruleHashesWithFindings_value =
     filtered_matches
-    |> List_.filter_map (fun (rule, rule_matches) ->
-           if rule_matches > 0 then
-             Some
-               (Digestif.SHA256.to_hex (Rule.sha256_of_rule rule), rule_matches)
-           else None)
+    |> List.filter_map (fun (rule, rule_matches) ->
+        if rule_matches > 0 then
+          Some (Digestif.SHA256.to_hex (Rule.sha256_of_rule rule), rule_matches)
+        else None)
   in
   g.payload.value.ruleHashesWithFindings <- Some ruleHashesWithFindings_value
 
 let add_targets_stats (targets : Fpath.t Set_.t)
     (prof_opt : Core_profiling.t option) =
   let targets = Set_.elements targets in
-  let hprof : (Fpath.t, Core_profiling.file_profiling) Hashtbl.t =
+  let hprof : (Fpath.t, Core_profiling.file_profiling) Base.Hashtbl.t =
     match prof_opt with
-    | None -> Hashtbl.create 0
+    | None -> Base.Hashtbl.Poly.create ()
     | Some (prof : Core_profiling.t) ->
         prof.file_times
-        |> List_.map (fun ({ Core_profiling.file; _ } as file_prof) ->
-               (file, file_prof))
-        |> Hashtbl_.hash_of_list
+        |> List.map (fun ({ Core_profiling.file; _ } as file_prof) ->
+            (file, file_prof))
+        |> Hashtbl_.Base.hash_of_list
   in
 
   let file_stats =
     targets
-    |> List_.map (fun path ->
-           let runTime, parseTime, matchTime =
-             match Hashtbl.find_opt hprof path with
-             | Some (fprof : Core_profiling.file_profiling) ->
-                 ( Some fprof.run_time,
-                   Some
-                     (fprof.rule_times
-                     |> List_.map (fun rt -> rt.Core_profiling.rule_parse_time)
-                     |> Common2.sum_float),
-                   Some
-                     (fprof.rule_times
-                     |> List_.map (fun rt -> rt.Core_profiling.rule_match_time)
-                     |> Common2.sum_float) )
-             | None -> (None, None, None)
-           in
-           {
-             Semgrep_metrics_t.size = UFile.filesize path;
-             numTimesScanned =
-               (match Hashtbl.find_opt hprof path with
-               | None -> 0
-               | Some fprof -> List.length fprof.rule_times);
-             parseTime;
-             matchTime;
-             runTime;
-           })
+    |> List.filter_map (fun path ->
+        let runTime, parseTime, matchTime =
+          match Base.Hashtbl.find hprof path with
+          | Some (fprof : Core_profiling.file_profiling) ->
+              ( Some fprof.run_time,
+                fprof.rule_times
+                |> Option.map (fun rule_times ->
+                    rule_times
+                    |> List.map (fun rt -> rt.Core_profiling.rule_parse_time)
+                    |> Common2.sum_float),
+                fprof.rule_times
+                |> Option.map (fun rule_times ->
+                    rule_times
+                    |> List.map (fun rt -> rt.Core_profiling.rule_match_time)
+                    |> Common2.sum_float) )
+          | None -> (None, None, None)
+        in
+        match UFile.filesize path with
+        | Ok size ->
+            Some
+              {
+                Semgrep_metrics_t.size;
+                numTimesScanned =
+                  (match Base.Hashtbl.find hprof path with
+                  | None -> 0
+                  | Some fprof -> Option.map List.length fprof.rule_times ||| 0);
+                parseTime;
+                matchTime;
+                runTime;
+              }
+        | Error (code, _func, info) ->
+            Logs.warn (fun m ->
+                m
+                  "add_targets_stats: unexpected error when reading %s: %s \
+                   (code %s)"
+                  !!path info (Unix.error_message code));
+            None)
   in
   g.payload.performance.fileStats <- Some file_stats;
   g.payload.performance.totalBytesScanned <-
-    Some (targets |> List_.map UFile.filesize |> Common2.sum_int);
+    Some
+      (file_stats
+      |> List.map (fun { Semgrep_metrics_t.size; _ } -> size)
+      |> Common2.sum_int);
   g.payload.performance.numTargets <- Some (List.length targets)
 
 (* TODO? type_ is enough? or want also to log the path? but too
  * privacy sensitive maybe?
  *)
-let string_of_error (err : OutJ.cli_error) : string =
+let string_of_error (err : Out.cli_error) : string =
   Error.string_of_error_type err.type_
 
 let add_errors errors =
   g.payload.errors.errors <-
-    Some
-      (errors |> List_.map (fun (err : OutJ.cli_error) -> string_of_error err))
+    Some (errors |> List.map (fun (err : Out.cli_error) -> string_of_error err))
 
 let add_profiling profiler =
   g.payload.performance.profilingTimes <- Some (Profiler.dump profiler)
@@ -497,6 +581,22 @@ let add_exit_code code =
 let add_feature ~category ~name =
   let str = Format.asprintf "%s/%s" category name in
   g.payload.value.features <- str :: g.payload.value.features
+
+let add_findings (findings : Out.cli_match list) =
+  let findings =
+    findings
+    |> List.map (fun (finding : Out.cli_match) ->
+        ( Rule_ID.to_string finding.check_id,
+          ({
+             path = Fpath.to_string finding.path;
+             line = finding.start.line;
+             col = finding.start.col;
+             offset = finding.start.offset;
+             severity = Out.string_of_match_severity finding.extra.severity;
+           }
+            : Semgrep_metrics_t.finding) ))
+  in
+  g.payload.mcp.findings <- Some findings
 
 (*****************************************************************************)
 (* Init and Send *)

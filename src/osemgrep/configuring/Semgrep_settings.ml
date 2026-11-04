@@ -1,3 +1,15 @@
+(*
+   Copyright (c) 2019-2025 Semgrep Inc.
+
+   This library is free software; you can redistribute it and/or
+   modify it under the terms of the GNU Lesser General Public License
+   version 2.1 as published by the Free Software Foundation.
+
+   This library is distributed in the hope that it will be useful, but
+   WITHOUT ANY WARRANTY; without even the implied warranty of
+   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the file
+   LICENSE for more details.
+*)
 open Common
 open Fpath_.Operators
 
@@ -71,8 +83,8 @@ let of_yaml = function
 let to_yaml { has_shown_metrics_notification; api_token; anonymous_user_id } =
   `O
     ((match has_shown_metrics_notification with
-     | None -> []
-     | Some v -> [ ("has_shown_metrics_notification", `Bool v) ])
+       | None -> []
+       | Some v -> [ ("has_shown_metrics_notification", `Bool v) ])
     @ (match api_token with
       | None -> []
       | Some v -> [ ("api_token", `String (Auth.string_of_token v)) ])
@@ -112,8 +124,13 @@ let from_file ?(maturity = Maturity.Default) () =
   Logs.info (fun m -> m "Loading settings from %s" !!settings);
   try
     if
-      Sys.file_exists !!settings
-      && Unix.(stat !!settings).st_kind =*= Unix.S_REG
+      Sys_.Fpath.exists settings
+      (* put the stat call here so we can explicitly short-circuit the `stat`
+         call if the file doesn't exist *)
+      &&
+      match Unix.(stat !!settings) with
+      | { st_kind = Unix.S_REG; _ } -> true
+      | _ -> false
     then
       let data = UFile.read_file settings in
       let settings_result = Result.bind (Yaml.of_string data) of_yaml in
@@ -123,7 +140,8 @@ let from_file ?(maturity = Maturity.Default) () =
               m
                 "Bad settings format; %s will be overriden. Contents:\n\
                  %s\n\
-                 Decode error: %s" !!settings data msg);
+                 Decode error: %s"
+                !!settings data msg);
           None
       | Ok settings -> Some settings
     else
@@ -195,7 +213,7 @@ let save setting =
   let str = Yaml.to_string_exn yaml in
   try
     let dir = Fpath.parent settings in
-    if not (Sys.file_exists !!dir) then Sys.mkdir !!dir 0o755;
+    if not (Sys_.Fpath.exists dir) then Sys.mkdir !!dir 0o755;
     (* TODO: we don't use UTmp.new_temp_file because this function modifies
      * a global (_temp_files_created) which is then used to autoamtically
      * remove temp files when the process terminates, but in this case the tmp
@@ -203,7 +221,7 @@ let save setting =
      *)
     (* nosemgrep: forbid-tmp *)
     let tmp = Filename.temp_file ~temp_dir:!!dir "settings" "yml" in
-    if Sys.file_exists tmp then Sys.remove tmp;
+    if Sys_.file_exists tmp then Sys.remove tmp;
     UFile.write_file (Fpath.v tmp) str;
     (* Create a temporary file and rename to have a consistent settings file,
        even if the power fails (or a Ctrl-C happens) during the write_file. *)

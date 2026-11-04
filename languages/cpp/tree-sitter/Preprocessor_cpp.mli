@@ -1,4 +1,19 @@
+(*
+   Copyright (c) 2024 Semgrep Inc.
+
+   This library is free software; you can redistribute it and/or
+   modify it under the terms of the GNU Lesser General Public License
+   version 2.1 as published by the Free Software Foundation.
+
+   This library is distributed in the hope that it will be useful, but
+   WITHOUT ANY WARRANTY; without even the implied warranty of
+   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the file
+   LICENSE for more details.
+*)
 module CST = Tree_sitter_cpp.CST
+(** A common view of preprocessor conditionals in blocks, class fields, and
+    enumerator lists. Each CST adapter preserves the items and recursive branch
+    structure so the converter can share its conditional traversal. *)
 
 type ifdef_token =
   [ `Ifdef of Tree_sitter_run.Token.t (* pattern #[ 	]*ifdef *)
@@ -24,9 +39,10 @@ and 'a preproc_else_poly =
     * CST.preproc_expression
     * Tree_sitter_run.Token.t (* "\n" *)
     * 'a list (* zero or more *)
-    * 'a preproc_else_poly option ]
+    * 'a preproc_else_poly option
+  | `Prep_elifdef_poly of 'a preproc_elifdef_poly ]
 
-type 'a preproc_ifdef_poly =
+and 'a preproc_ifdef_poly =
   ifdef_token
   * Tree_sitter_run.Token.t (* identifier *)
   * 'a list (* zero or more *)

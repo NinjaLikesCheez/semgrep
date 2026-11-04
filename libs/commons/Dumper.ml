@@ -1,9 +1,21 @@
+(*
+   Copyright (c) 2022-2025 Semgrep Inc.
+
+   This library is free software; you can redistribute it and/or
+   modify it under the terms of the GNU Lesser General Public License
+   version 2.1 as published by the Free Software Foundation.
+
+   This library is distributed in the hope that it will be useful, but
+   WITHOUT ANY WARRANTY; without even the implied warranty of
+   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the file
+   LICENSE for more details.
+*)
 (* Dump an OCaml value into a printable string.
  * By Richard W.M. Jones (rich@annexia.org).
  * dumper.ml 1.2 2005/02/06 12:38:21 rich Exp
  *)
 
-open UStdlib.Obj
+open Stdlib.Obj
 
 let rec dump r =
   if is_int r then string_of_int (magic r : int)
@@ -40,11 +52,11 @@ let rec dump r =
     if is_list r then
       (* List. *)
       let fields = get_list r in
-      "[" ^ String.concat "; " (List_.map dump fields) ^ "]"
+      "[" ^ String.concat "; " (List.map dump fields) ^ "]"
     else if t = 0 then
       (* Tuple, array, record. *)
       let fields = get_fields [] s in
-      "(" ^ String.concat ", " (List_.map dump fields) ^ ")"
+      "(" ^ String.concat ", " (List.map dump fields) ^ ")"
       (* Note that [lazy_tag .. forward_tag] are < no_scan_tag.  Not
        * clear if very large constructed values could have the same
        * tag. XXX *)
@@ -62,7 +74,7 @@ let rec dump r =
        * out the ID and the slots.
        *)
       "Object #" ^ dump id ^ " ("
-      ^ String.concat ", " (List_.map dump slots)
+      ^ String.concat ", " (List.map dump slots)
       ^ ")"
     else if t = infix_tag then opaque "infix"
     else if t = forward_tag then opaque "forward"
@@ -70,7 +82,7 @@ let rec dump r =
       (* Constructed value. *)
       let fields = get_fields [] s in
       "Tag" ^ string_of_int t ^ " ("
-      ^ String.concat ", " (List_.map dump fields)
+      ^ String.concat ", " (List.map dump fields)
       ^ ")"
     else if t = string_tag then "\"" ^ String.escaped (magic r : string) ^ "\""
     else if t = double_tag then string_of_float (magic r : float)

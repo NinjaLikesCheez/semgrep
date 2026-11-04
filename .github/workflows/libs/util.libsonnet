@@ -1,11 +1,12 @@
 // Factorize utility jobs or steps for repeated use across multiple workflows
+local uses = import './uses.libsonnet';
 
 {
   setup_docker_tag: function() {
     name: 'Reconstruct Docker tag created by docker/metadata-action',
     'runs-on': 'ubuntu-22.04',
     outputs: {
-      'docker-tag': '${{ steps.setup-docker-tag.outputs.docker-tag }}'
+      'docker-tag': '${{ steps.setup-docker-tag.outputs.docker-tag }}',
     },
     steps: [{
       id: 'setup-docker-tag',
@@ -34,7 +35,7 @@
     },
     steps: [
       {
-        uses: 'actions/checkout@v3',
+        uses: uses.actions.checkout,
       },
       {
         id: 'get-sha',
@@ -69,7 +70,8 @@
         SHA: '${{ needs.get-sha.outputs.sha }}',
         TOKEN: '${{ secrets.ARGO_WORKFLOWS_TOKEN }}',
       } + {
-        [std.asciiUpper(e.name)]: e.value for e in workflow_inputs
+        [std.asciiUpper(e.name)]: e.value
+        for e in workflow_inputs
       },
       run: |||
         echo "Repository: $REPOSITORY"
@@ -77,14 +79,15 @@
         curl --fail-with-body -X POST %s \
           -H "Authorization: Bearer $TOKEN" \
           -d %s
-      ||| % [ trigger_url, std.escapeStringJson(std.toString(
+      ||| % [trigger_url, std.escapeStringJson(std.toString(
         {
           repository: '$REPOSITORY',
           sha: '$SHA',
         } + {
-          [e.name]: "$" + std.asciiUpper(e.name) for e in workflow_inputs
+          [e.name]: '$' + std.asciiUpper(e.name)
+          for e in workflow_inputs
         }
       ))],
-    }]
-  }
+    }],
+  },
 }

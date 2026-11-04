@@ -1,3 +1,15 @@
+(*
+   Copyright (c) 2023-2025 Semgrep Inc.
+
+   This library is free software; you can redistribute it and/or
+   modify it under the terms of the GNU Lesser General Public License
+   version 2.1 as published by the Free Software Foundation.
+
+   This library is distributed in the hope that it will be useful, but
+   WITHOUT ANY WARRANTY; without even the implied warranty of
+   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the file
+   LICENSE for more details.
+*)
 (* [unit_str cnt prefix] will print "%d %s" cnt prefix
  * but with an additional "s" at the end if the cnt is > 1.
  * ex: unit_str 2 "file" -> "2 files"
@@ -30,10 +42,23 @@ val safe_sub : string -> int -> int -> string
 (*
    Print an escaped and quoted string, truncating it to show at most max_len
    bytes. The length in bytes is printed if the string has to be truncated.
+   The string is truncated such that the first max_len bytes are shown by default,
+   or so that the last max_len bytes are shown if keep_end is true.
    The default value for max_len is 200.
    This function is intended for logs.
 *)
-val show : ?max_len:int -> string -> string
+val show : ?max_len:int -> ?keep_end:bool -> string -> string
+
+(*
+   Print an escaped and quoted string, truncating it to show at most max_len
+   bytes. If truncation is necessary, the string is truncated such that the
+   first and last max_len/2 bytes are shown. Text is inserted in the middle of
+   the string indicating that middle bytes were omitted.
+   The default value for max_len is 200.
+   This function is intended for logs where the beginning and ending bytes are
+   expected to be more interesting than only the beginning bytes.
+*)
+val show_ends : ?max_len:int -> string -> string
 
 (* Removes a trailing carriage return ('\r') from the given string. For use when
  * reading an input line from an input stream or when splitting a string by the
@@ -50,3 +75,7 @@ val truncate_with_message : int -> (string -> int -> string) -> string -> string
 (** [truncate max_len fmt str] truncates the string [str] to at most [max_len]
     bytes. If the string is truncated, [fmt] is called with the original string
     and the number of characters that were removed. *)
+
+val take_last : max_len:int -> string -> string
+(** [take_last ~max_len str] returns the last [max_len] characters of [str].
+    If [str] is shorter than [max_len], the entire string is returned. *)

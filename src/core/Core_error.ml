@@ -63,12 +63,9 @@ let () =
              (show core_error))
     | _ -> None)
 
-(* ugly alias because 'type t = t' is not allowed in ErrorSet below *)
-type core_error = t
-
 (* TODO: use Set_.t instead *)
 module ErrorSet = Set.Make (struct
-  type t = core_error
+  type nonrec t = t
 
   let compare = compare
 end)
@@ -96,9 +93,29 @@ let mk_error ?rule_id ?(msg = "") ?(loc : Tok.location option)
     | RuleParseError
     | InvalidYaml
     | SemgrepMatchFound
+    (* 'Timeout': a rule failed to scan a target in time *)
     | Timeout
+    (* 'FixpointTimeout': a dataflow fixpoint could not be reached in time
+
+      Constant propagation or taint analysis of a function/method/etc is performed
+      by an iterative algorithm that runs until a fixpoint is reached.
+
+      A timeout could indicate a bug in the Dataflow transfer function, or a perf
+      problem. It could also happen if a function/method/etc is very large/complex.
+
+      We produce a single 'FixpointTimeout' error per function/method/etc, multiple
+      rules timing out on the same code still produce a single error.
+
+      This is a somewhat low-level error that is mainly interesting for Semgrep devs.
+
+      See 'Dataflow_core.fixpoint' and 'Limits_semgrep.*_FIXPOINT_TIMEOUT'. *)
+    | FixpointTimeout
     | OutOfMemory
     | StackOverflow
+    (* 'TimeoutDuringInterfile': Some step during inter-file analysis has timed out.
+
+      NOTE: This error used to mean that the entire inter-file analysis had timed out,
+        because we had one big timeout for the whole thing. *)
     | TimeoutDuringInterfile
     | OutOfMemoryDuringInterfile
     | PatternParseError _
@@ -130,7 +147,7 @@ let mk_error_tok ?rule_id ?(file : Fpath.t option) (tok : Tok.t) (msg : string)
     | Ok loc -> Some loc
     | Error _ ->
         let* file = file in
-        Some (Tok.first_loc_of_file file)
+        Some (Loc.first_loc_of_file file)
   in
   mk_error ?rule_id ~msg ?loc err
 
@@ -184,7 +201,7 @@ let error_of_rule_error (err : Rule_error.t) : t =
       mk_error_tok ?rule_id ~file pos s Out.InvalidYaml
   | UnparsableYamlException msg ->
       mk_error ?rule_id ~msg
-        ~loc:(Tok.first_loc_of_file file)
+        ~loc:(Loc.first_loc_of_file file)
         Out.OtherParseError
 
 (*
@@ -223,30 +240,30 @@ let known_exn_to_error ?(file : Fpath.t option) (e : Exception.t) : t option =
       Some (mk_error_tok ?file tok s Out.OtherParseError)
   | AST_generic.Error (s, tok) ->
       Some (mk_error_tok ?file tok s Out.AstBuilderError)
-  | Time_limit.Timeout timeout_info ->
+  | Time_limit.Timeout (timeout_info, _) ->
       let s = Printexc.get_backtrace () in
       Log.warn (fun m -> m "WEIRD Timeout converted to exn, backtrace = %s" s);
       (* This exception should always be reraised. *)
       let loc =
         let* file = file in
-        Some (Tok.first_loc_of_file file)
+        Some (Loc.first_loc_of_file file)
       in
       let msg = Time_limit.string_of_timeout_info timeout_info in
       Some (mk_error ~msg ?loc Out.Timeout)
   | Memory_limit.ExceededMemoryLimit msg ->
       let loc =
         let* file = file in
-        Some (Tok.first_loc_of_file file)
+        Some (Loc.first_loc_of_file file)
       in
       Some (mk_error ~msg ?loc Out.OutOfMemory)
   | Out_of_memory ->
       let loc =
         let* file = file in
-        Some (Tok.first_loc_of_file file)
+        Some (Loc.first_loc_of_file file)
       in
       Some (mk_error ~msg:"Heap space exceeded" ?loc Out.OutOfMemory)
   | Common.ErrorOnFile (s, file) ->
-      let loc = Some (Tok.first_loc_of_file file) in
+      let loc = Some (Loc.first_loc_of_file file) in
       (* TODO: see the comment below we want OtherErrorWithAttachedFile *)
       Some (mk_error ~msg:s ?loc Out.OtherParseError)
   (* general case, can't extract line information from it, default to line 1 *)
@@ -263,7 +280,7 @@ let exn_to_error ?(file : Fpath.t option) (e : Exception.t) : t =
       let trace = Exception.to_string e in
       let loc =
         let* file = file in
-        Some (Tok.first_loc_of_file file)
+        Some (Loc.first_loc_of_file file)
       in
       let typ =
         match file with
@@ -326,6 +343,7 @@ let severity_of_error (typ : Out.error_type) : Out.error_severity =
   | OtherParseError
   | InvalidYaml
   | Timeout
+  | FixpointTimeout
   | OutOfMemory
   | StackOverflow
   | SemgrepWarning ->
@@ -349,3 +367,12 @@ let severity_of_error (typ : Out.error_type) : Out.error_severity =
   | MissingPlugin
   | DependencyResolutionError _ ->
       `Info
+
+let split_fixpoint_timeouts errors =
+  let errors, fixpoint_timeouts =
+    errors
+    |> List.partition (function
+      | { typ = FixpointTimeout; _ } -> false
+      | __else__ -> true)
+  in
+  (errors, `Fixpoint_timeouts fixpoint_timeouts)

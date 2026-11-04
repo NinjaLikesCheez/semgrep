@@ -1,4 +1,16 @@
 (*
+   Copyright (c) 2023-2024 Semgrep Inc.
+
+   This library is free software; you can redistribute it and/or
+   modify it under the terms of the GNU Lesser General Public License
+   version 2.1 as published by the Free Software Foundation.
+
+   This library is distributed in the hope that it will be useful, but
+   WITHOUT ANY WARRANTY; without even the implied warranty of
+   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the file
+   LICENSE for more details.
+*)
+(*
    Utilities for creating, scanning, and deleting a hierarchy
    of test files.
 
@@ -48,7 +60,7 @@ type t =
 
 (* if you prefer a curried syntax to build the tree *)
 
-val file : string (* filename *) -> t
+val file : ?contents:string -> string (* filename *) -> t
 val dir : string (* name *) -> t list -> t
 val symlink : string (* name *) -> string (* dest *) -> t
 
@@ -80,18 +92,31 @@ val print_files : t list -> unit
 *)
 val flatten : ?root:Fpath.t -> ?include_dirs:bool -> t list -> Fpath.t list
 
-(*
-   Read the file tree starting from a root folder. Don't follow symlinks.
+val read : Fpath.t -> t
+(**
+   Read the file tree. Don't follow symlinks.
    Fail with an exception if we can't read the files or if they're of an
    exotic kind.
 *)
-val read : Fpath.t -> t list
 
-(*
-   Write a file hierarchy into the given root folder,
+val read_dir : Fpath.t -> t list
+(**
+   Read the file tree starting from a root folder. The result is the list
+   of entries in that folder.
+
+   Don't follow symlinks. Fail with an exception if we can't read the
+   files or if they're of an exotic kind.
+*)
+
+val write : Fpath.t -> t -> unit
+(** Write a file hierarchy into the given root folder, which must
+    already exist. *)
+
+val write_dir : Fpath.t -> t list -> unit
+(**
+   Write a list of files or folders into the given root folder,
    which must already exist.
 *)
-val write : Fpath.t -> t list -> unit
 
 (* Other utilities independent of 't' but useful in tests working on
  * file trees.
@@ -116,13 +141,37 @@ val remove : Fpath.t -> unit
 *)
 val mkdir : ?root:Fpath.t -> Fpath.t -> unit
 
-(*
+val with_tempdir : ?persist:bool -> ?chdir:bool -> (Fpath.t -> 'a) -> 'a
+(**
    Create a temporary directory and pass its path to the function to call.
    The folder is automatically deleted upon exit unless 'persist'
-   is true. If 'chdir' is set to true, the current directory is
+   is true. If [chdir] is set to true, the current directory is
    set temporarily to the temporary directory.
  *)
-val with_tempdir : ?persist:bool -> ?chdir:bool -> (Fpath.t -> 'a) -> 'a
 
-(* Run a function in a directory, then return to the original directory. *)
 val with_chdir : Fpath.t -> (unit -> 'a) -> 'a
+(** Run a function in a directory, then return to the original directory. *)
+
+val copy : src:Fpath.t -> dst:Fpath.t -> unit
+(** Copy folders and files recursively.
+    Symbolic links are dereferenced.
+    Files of other types are ignored silently.
+
+    Raise an exception if [dst] already exists or if anything goes wrong.
+
+    TODO: move to Testo
+*)
+
+val with_temp_copy : src:Fpath.t -> (dst:Fpath.t -> 'a) -> 'a
+(** Create a temporary workspace containing a copy of the given folder
+    or file.
+    Files other than regular files, folders, and symlinks are not copied.
+    Symbolic links are dereferenced.
+
+    [src] is the source folder or file to copy.
+    The temporary folder will contain a copy of [src] with the same basename.
+    The argument passed to the handler is [dst], the path to the copied
+    folder or file.
+
+    TODO: move to Testo
+*)

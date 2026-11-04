@@ -106,7 +106,7 @@ let tokenize_and_adjust_pos lexbuf table (filename : Fpath.t) tokenizer
       | Parsing_error.Lexical_error (s, info) ->
           raise (Parsing_error.Lexical_error (s, adjust_info info))
     in
-    if !Flag_parsing.debug_lexer then
+    if Hook.get Flag_parsing.debug_lexer then
       Log.debug (fun m -> m "tok = %s" (Dumper.dump tok));
     let tok = tok |> visitor_tok adjust_info in
     if is_eof tok then List.rev (tok :: acc) else tokens_aux (tok :: acc)
@@ -213,7 +213,8 @@ let (error_messagebis : string (* filename *) -> string * int -> int -> string)
   in
   spf
     "File \"%s\", line %d, column %d,  charpos = %d\n\
-    \    around = '%s', whole content = %s" filename line pos charpos tok s
+    \    around = '%s', whole content = %s"
+    filename line pos charpos tok s
 
 let error_message filename (lexeme, lexstart) =
   try error_messagebis filename (lexeme, lexstart) 0 with

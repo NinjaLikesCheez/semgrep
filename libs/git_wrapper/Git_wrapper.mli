@@ -1,20 +1,37 @@
+(*
+   Copyright (c) 2023-2025 Semgrep Inc.
+
+   This library is free software; you can redistribute it and/or
+   modify it under the terms of the GNU Lesser General Public License
+   version 2.1 as published by the Free Software Foundation.
+
+   This library is distributed in the hope that it will be useful, but
+   WITHOUT ANY WARRANTY; without even the implied warranty of
+   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the file
+   LICENSE for more details.
+*)
 (* Small wrapper around the 'git' command-line program.
  *
- * The functions in this module will call the external 'git' program, hence
- * the use of the Cap.exec capability.
- * TODO: generalize the use of Cap.exec to all functions!
+ * The functions in this module call the external 'git' program.
  *)
 
-(* many of the functions in this module can raise Error if git does not
- * exist or fail to run for some reasons.
- *)
-exception Error of string
+exception Git_error of string
+(** This exception indicates an error while executing a Git command.
+    The argument is an error message.
+    It should be raised only by the 'fatal' function. The functions whose
+    name ends in '_exn' raise this exception to signal an error.
+*)
 
-(* very general helper to run a git command and return its output
- * if everthing went fine or log the error (using Logs) and
- * raise an Error exn otherwise.
- *)
-val command : < Cap.exec > -> Cmd.args -> string
+val fatal : ('a, string) Result.t -> 'a
+(** Unwrap the result or raise a 'Git_error' exception in case of an error. *)
+
+val command : Cmd.args -> (string, string) result
+(** Very general helper to run a git command and return its output
+    if everthing went fine or log the error (using Logs) and
+    raise an Error exn otherwise.
+*)
+
+val command_exn : Cmd.args -> string
 
 type ls_files_kind =
   (* --cached, the default:
@@ -28,7 +45,27 @@ type ls_files_kind =
    *)
   | Others
 
-(*
+(** Options for excluding files when listing untracked files with
+    [git ls-files --others]. The default for [--others] is to not
+    use any Gitignore exclusion. *)
+type untracked_exclude_option =
+  | Exclude_standard
+      (** pass ["--exclude-standard"] to consult the standard
+          Gitignore files. *)
+  | Exclude_pattern of string
+      (** pass a Gitignore pattern using [--exclude]. Supports [!] to
+          de-exclude matching paths. *)
+  | Exclude_from of Fpath.t
+      (** pass [--exclude-from] to specify a nonstandard Gitignore
+          file. *)
+
+val ls_files :
+  ?cwd:Fpath.t ->
+  ?untracked_exclude:untracked_exclude_option list ->
+  ?kinds:ls_files_kind list ->
+  Fpath.t list ->
+  (Fpath.t list, string) result
+(**
    cwd: directory to cd into (-C)
 
    The argument is the list of files to start scanning from which defaults
@@ -36,15 +73,18 @@ type ls_files_kind =
 
    This returns a list of paths relative to cwd.
 *)
-val ls_files :
+
+val ls_files_exn :
   ?cwd:Fpath.t ->
-  ?exclude_standard:bool ->
+  ?untracked_exclude:untracked_exclude_option list ->
   ?kinds:ls_files_kind list ->
   Fpath.t list ->
   Fpath.t list
 
-(* get merge base between arg and HEAD *)
-val merge_base : string -> string
+(* Get the commit ID of the most recent common ancestor of the current
+   branch's HEAD and some commit. *)
+val merge_base : commit:string -> (string, string) result
+val merge_base_exn : commit:string -> string
 
 (* Executing a function inside a directory created from git-worktree.
 
@@ -63,23 +103,23 @@ val merge_base : string -> string
    don't need to git stash anything, or expect a clean working tree.
 *)
 val run_with_worktree :
-  < Cap.chdir ; Cap.tmp > ->
-  commit:string ->
-  ?branch:string ->
-  (unit -> 'a) ->
-  'a
+  commit:string -> ?branch:string -> (unit -> 'a) -> ('a, string) result
+
+val run_with_worktree_exn :
+  commit:string -> ?branch:string -> (unit -> 'a) -> 'a
 
 type status = {
-  added : string list;
-  modified : string list;
-  removed : string list;
-  unmerged : string list;
-  renamed : (string * string) list;
+  added : Fpath.t list;
+  modified : Fpath.t list;
+  removed : Fpath.t list;
+  unmerged : Fpath.t list;
+  renamed : (Fpath.t * Fpath.t) list;
 }
 [@@deriving show]
 
 (* git status *)
-val status : ?cwd:Fpath.t -> ?commit:string -> unit -> status
+val status : ?cwd:Fpath.t -> ?commit:string -> unit -> (status, string) result
+val status_exn : ?cwd:Fpath.t -> ?commit:string -> unit -> status
 
 (*
    Find the root of the git worktree for any files contained in the
@@ -115,8 +155,10 @@ val project_root_for_file_or_files_in_dir : Fpath.t -> Fpath.t option
 (* Determine whether a path is tracked by git. *)
 val is_tracked_by_git : Fpath.t -> bool
 
-val checkout : ?cwd:Fpath.t -> ?git_ref:string -> unit -> unit
+val checkout : ?cwd:Fpath.t -> ?git_ref:string -> unit -> (unit, string) result
 (** Checkout the given optional ref *)
+
+val checkout_exn : ?cwd:Fpath.t -> ?git_ref:string -> unit -> unit
 
 val sparse_shallow_filtered_checkout : Uri.t -> Fpath.t -> (unit, string) result
 (** Checkout the given commit in the given directory, but only
@@ -125,16 +167,26 @@ val sparse_shallow_filtered_checkout : Uri.t -> Fpath.t -> (unit, string) result
     This is useful to avoid checking out the whole repo when
     we only need a few files. *)
 
+val sparse_shallow_filtered_checkout_exn : Uri.t -> Fpath.t -> unit
+
 val sparse_checkout_add : ?cwd:Fpath.t -> Fpath.t list -> (unit, string) result
 (** Add the given files to the sparse-checkout config *)
 
+val sparse_checkout_add_exn : ?cwd:Fpath.t -> Fpath.t list -> unit
+
 (* precondition: cwd must be a directory *)
 val dirty_lines_of_file :
-  ?cwd:Fpath.t -> ?git_ref:string -> Fpath.t -> (int * int) array option
+  ?cwd:Fpath.t ->
+  ?git_ref:string ->
+  Fpath.t ->
+  ((int * int) array option, string) result
 (** [dirty_lines_of_file path] will return an optional array of line ranges that indicate what
-  * lines have been changed. An optional [git_ref] can be passed that will be used
-  * to diff against. The default [git_ref] is ["HEAD"]
+    lines have been changed. An optional [git_ref] can be passed that will be used
+    to diff against. The default [git_ref] is ["HEAD"]
   *)
+
+val dirty_lines_of_file_exn :
+  ?cwd:Fpath.t -> ?git_ref:string -> Fpath.t -> (int * int) array option
 
 (* precondition: cwd must be a directory *)
 val dirty_paths : ?cwd:Fpath.t -> unit -> Fpath.t list
@@ -146,7 +198,7 @@ val dirty_paths : ?cwd:Fpath.t -> unit -> Fpath.t list
     for newly created directories!
   *)
 
-val init : ?cwd:Fpath.t -> ?branch:string -> unit -> unit
+val init : ?cwd:Fpath.t -> ?branch:string -> unit -> (unit, string) result
 (** [init ()] creates an empty git repository in the current directory. If
     [cwd] is specified, its value is passed to git's [-C] flag. If
     [branch] is specified, it is used as the name of the default branch.
@@ -158,22 +210,32 @@ val init : ?cwd:Fpath.t -> ?branch:string -> unit -> unit
     on the git version.
 *)
 
+val init_exn : ?cwd:Fpath.t -> ?branch:string -> unit -> unit
+
 (* Set or replace an entry in the user's config tied to the repo. *)
-val config_set : ?cwd:Fpath.t -> string -> string -> unit
+val config_set : ?cwd:Fpath.t -> string -> string -> (unit, string) result
+val config_set_exn : ?cwd:Fpath.t -> string -> string -> unit
 
 (* Get the value of an entry in the user's config. *)
-val config_get : ?cwd:Fpath.t -> string -> string option
+val config_get : ?cwd:Fpath.t -> string -> (string option, string) result
+val config_get_exn : ?cwd:Fpath.t -> string -> string option
 
-val gc : ?cwd:Fpath.t -> unit -> unit
+val gc : ?cwd:Fpath.t -> unit -> (unit, string) result
 (** [gc ()] executes [git gc] in the current directory. If [cwd] is specified,
     its value is passed to git's [-C] flag. *)
 
-val add : ?cwd:Fpath.t -> ?force:bool -> Fpath.t list -> unit
+val gc_exn : ?cwd:Fpath.t -> unit -> unit
+
+val add : ?cwd:Fpath.t -> ?force:bool -> Fpath.t list -> (unit, string) result
 (** [add files] adds the [files] to the git index. *)
 
-val commit : ?cwd:Fpath.t -> string -> unit
+val add_exn : ?cwd:Fpath.t -> ?force:bool -> Fpath.t list -> unit
+
+val commit : ?cwd:Fpath.t -> string -> (unit, string) result
 (** [commit msg] creates a commit with containing the current contents of the
     index with [msg] as the commit message. *)
+
+val commit_exn : ?cwd:Fpath.t -> string -> unit
 
 val project_url : ?cwd:Fpath.t -> unit -> string option
 (** [project_url ()] tries to get the URL of the project from
@@ -190,7 +252,7 @@ type contribution = {
   commit_author_email : string;
 }
 
-val logs : ?cwd:Fpath.t -> ?since:float -> < Cap.exec > -> contribution list
+val logs : ?cwd:Fpath.t -> ?since:float -> unit -> contribution list
 (** [logs ()] will run 'git log' in the current directory and returns for each
     log a contribution record.
     It returns an empty list if it found nothing relevant.
@@ -203,10 +265,16 @@ type value = hash Git.Value.t [@@deriving show, eq, ord]
 type commit = hash Git.Commit.t [@@deriving show, eq, ord]
 type author = Git.User.t [@@deriving show, eq, ord]
 type blob = Git.Blob.t [@@deriving show, eq, ord]
-type object_table = (hash, value) Hashtbl.t
+type tree = hash Git.Tree.t
 
-type blob_with_extra = { blob : blob; path : Fpath.t; size : int }
-[@@deriving show]
+type object_kind = [ `Commit | `Tree | `Blob | `Tag ]
+(** The four Git object kinds. *)
+
+type object_metadata = { hash : hash; kind : object_kind; size : int }
+(** Metadata reported by Git for an object without reading its contents. *)
+
+type blob_info = { hash : hash; path : Fpath.t; size : int } [@@deriving show]
+(** A blob reference found while walking a commit tree. *)
 
 val commit_digest : commit -> hash
 (** [commit_digest commit] is the SHA of the commit*)
@@ -223,8 +291,16 @@ val string_of_blob : blob -> string
 val hex_of_hash : hash -> string
 (** [hex_of_hash hash] is the hexadecimal representation of the hash*)
 
-val commit_blobs_by_date : object_table -> (commit * blob_with_extra list) list
-(** [commit_blobs_by_date store] is the list of commits and the blobs they reference, ordered by date, newest first*)
+val commit_blobs_by_date :
+  find_tree:(hash -> tree option) ->
+  find_blob_size:(hash -> int option) ->
+  commit list ->
+  (commit * blob_info list) list
+(** [commit_blobs_by_date ~find_tree ~find_blob_size commits] lists the commits
+    and the blobs they reference, ordered by date, newest first. References
+    which cannot be resolved by the supplied lookup functions are skipped.
+    [find_tree] resolves a tree hash, and [find_blob_size] resolves a blob hash
+    to the size of its contents in bytes. *)
 
 val cat_file_blob : ?cwd:Fpath.t -> hash -> (string, string) result
 (** [cat_file_blob sha] will run [git cat-file blob sha] and return either
@@ -235,6 +311,14 @@ val cat_file_blob : ?cwd:Fpath.t -> hash -> (string, string) result
       [hash] does not designate an object.}
     }
  *)
+
+val cat_file_blob_exn : ?cwd:Fpath.t -> hash -> string
+
+val list_object_metadata :
+  ?cwd:Fpath.t -> unit -> (object_metadata list, string) result
+(** [list_object_metadata ()] returns metadata for every object in the
+    repository's object store (reachable or not), without reading any object
+    contents. For a blob, [size] is the size of its contents in bytes. *)
 
 val remote_repo_name : string -> string option
 (** [remote_repo_name "https://github.com/semgrep/semgrep.git"] will return [Some "semgrep"] *)

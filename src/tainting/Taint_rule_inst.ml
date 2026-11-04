@@ -1,6 +1,6 @@
 (* Yoann Padioleau, Iago Abal
  *
- * Copyright (C) 2019-2024 Semgrep Inc.
+ * Copyright (C) 2019-2025 Semgrep Inc.
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public License
@@ -27,86 +27,103 @@
  * taint rule intance and a function from that file.
  *)
 
-type var = Dataflow_var_env.var
-(** A string of the form "<source name>:<sid>". *)
+open Common
+module E = Core_error
 
-type a_propagator = {
-  kind : [ `From | `To ];
-  prop : Rule.taint_propagator;
-  var : var; (* TODO: Use prop.id instead ? *)
+type java_props_cache = (string * AST_generic.SId.t, IL.name) Base.Hashtbl.t
+
+type file_timeout_var_stats = {
+  first_rule : Rule_ID.t;
+  mutable num_rules : int;
 }
 
-type spec_predicates = {
-  is_source : AST_generic.any -> Rule.taint_source Taint_spec_match.t list;
-      (** Test whether 'any' is a taint source, this corresponds to
-      * 'pattern-sources:' in taint-mode. *)
-  is_propagator : AST_generic.any -> a_propagator Taint_spec_match.t list;
-      (** Test whether 'any' matches a taint propagator, this corresponds to
-       * 'pattern-propagators:' in taint-mode.
-       *
-       * Propagators allow to specify how taint propagates through side effects.
-       *
-       * Note that we tried to solve this with a hack in semgrep/semgrep#5150
-       * but it caused a bunch of FPs in semgrep-rules. The hack was essentially
-       * to assume that in `x.f(y)` taint always propagated from `y` to `x`.
-       *
-       * The typical FP was a call that incorrectly tainted an object or module,
-       * that also happened to be part of a sink specification. For example, in
-       * rule ruby.rails.security.audit.avoid-tainted-shell-call the `Shell` class
-       * does not really get tainted even if we call `Shell.cat` on tainted data:
-       *
-       *     # ruleid: avoid-tainted-shell-call
-       *     Shell.cat(params[:filename])
-       *
-       * But with the hack, `Shell` becomes tainted. Later on, when we call
-       * `Shell.cat` on safe data, it triggered an FP. Why? Because the entire
-       * `Shell.cat(...)` was marked as a sink, and `Shell` was considered
-       * tainted!
-       *
-       *     # ok: avoid-tainted-shell-call
-       *     Shell.cat("/var/log/www/access.log")
-       *
-       * Most of these FPs could be prevented by fine tuning pattern-sinks. But
-       * anyhow it's clearly incorrect to taint `Shell`, so a better solution was
-       * needed (hence `pattern-propagators`).
-       *)
-  is_sanitizer :
-    AST_generic.any -> Rule.taint_sanitizer Taint_spec_match.t list;
-      (** Test whether 'any' is a sanitizer, this corresponds to
-      * 'pattern-sanitizers:' in taint-mode. *)
-  is_sink : AST_generic.any -> Rule.taint_sink Taint_spec_match.t list;
-      (** Test whether 'any' is a sink, this corresponds to 'pattern-sinks:'
-      * in taint-mode. *)
-}
+type file_timeout_stats =
+  (IL.name option, file_timeout_var_stats) Base.Hashtbl.t
 
-type effects_handler =
-  IL.name option (** name of the function definition ('None' if anonymous) *) ->
-  Shape_and_sig.Effect.t list ->
-  Shape_and_sig.Effect.t list
-
-type java_props_cache = (string * AST_generic.SId.t, IL.name) Hashtbl.t
-
-type t = {
+(* components of a taint rule that are immutable and sharable. *)
+type file = {
   lang : Lang.t;
-  file : Fpath.t;  (** File under analysis, for Deep Semgrep. *)
-  rule_id : Rule_ID.t;  (** Taint rule id, for Deep Semgrep. *)
+  path : Fpath.t;  (** File under analysis, for Deep Semgrep. *)
+}
+
+type 'muts t = {
+  file : file;
+  muts : 'muts;
+  rule : Rule_ID.t;
   options : Rule_options.t;
   track_control : bool;
       (** Whether the rule requires tracking "control taint". If it does not,
-       * then we avoid adding control taint-variables to environment. *)
-  preds : spec_predicates;
-  handle_effects : effects_handler;  (** Callback to report effects. *)
-  java_props_cache : java_props_cache;
-      (** Pro should be autogenerating definitions for these getters/setters,
-    * but that seems to hurt performance and it's still unclear why, so instead
-    * we give taint access to Pro typing info through a hook
-    * ('Dataflow_tainting.hook_find_attribute_in_class') and look for the
-    * property corresponding to the getter/setter.
-    *
-    * On very large files, allocating a new name every time could have a perf
-    * impact, so we cache them. *)
+         then we avoid adding control taint-variables to environment. *)
+  preds : Taint_spec_preds.t;
+  stats : Taint_coverage_stats.file_rule_stats;
+      (** Per-file per-rule coverage stats, what sources and what sinks have matched?
+
+        TODO: If we just had the raw_spec_matches here we could easily compute
+            these stats from the matches later.
+        *)
 }
-(** Taint rule instantiated for a given file.
-  *
-  * For a source to taint a sink, the bindings of both source and sink must be
-  * unifiable. See 'Dataflow_tainting.unify_meta_envs'. *)
+(** Taint rule instantiated for a given file, generic in the shape of the
+    mutable state ['muts]. Kept fully opaque in ['muts] -- OSS and Pro each
+    define their own concrete 'mutable_state' ('OSS_taint_rule_inst.mutable_state',
+    'Pro_taint_rule_inst.mutable_state') and plug it in here, so a future
+    OSS/Pro divergence in what mutable state looks like needs no change in
+    this module.
+
+    For a source to taint a sink, the bindings of both source and sink must be
+    unifiable. See 'Dataflow_tainting.unify_meta_envs'. *)
+
+type config = {
+  file : file;
+  rule : Rule_ID.t;
+  options : Rule_options.t;
+  track_control : bool;
+  preds : Taint_spec_preds.t;
+  stats : Taint_coverage_stats.file_rule_stats;
+}
+(** The effect-free configuration of a taint rule instance, as produced by
+    'Match_taint_spec.taint_config_of_rule'. A caller combines this with a
+    (fresh or cached) mutable state via 'of_config' to obtain a full 't'. *)
+
+let mk_file ~lang ~path = { lang; path }
+
+let of_config (c : config) ~muts : 'muts t =
+  {
+    file = c.file;
+    muts;
+    rule = c.rule;
+    options = c.options;
+    track_control = c.track_control;
+    preds = c.preds;
+    stats = c.stats;
+  }
+
+let record_timeout ~(timeouts : file_timeout_stats) ~(rule : Rule_ID.t) opt_name
+    =
+  match Base.Hashtbl.find timeouts opt_name with
+  | None ->
+      Base.Hashtbl.set timeouts ~key:opt_name
+        ~data:{ first_rule = rule; num_rules = 1 };
+      ()
+  | Some stats ->
+      stats.num_rules <- stats.num_rules + 1;
+      ()
+
+let check_timeouts_and_warn ~interfile file (timeouts : file_timeout_stats) :
+    E.ErrorSet.t =
+  Base.Hashtbl.fold timeouts ~init:E.ErrorSet.empty
+    ~f:(fun ~key:opt_name ~data:stats errors_acc ->
+      (* TODO: Hash 'opt_name' and show it *)
+      let loc = IL_helpers.loc_of_name file.path opt_name in
+      let msg =
+        spf
+          "Fixpoint timeout while performing%s taint analysis at %s [rules: \
+           %d, first: %s]"
+          (if interfile then " inter-file" else "")
+          (Pos.string_of_pos loc.pos)
+          stats.num_rules
+          (Rule_ID.to_string stats.first_rule)
+      in
+      (* nosemgrep: no-logs-in-library *)
+      Logs.warn (fun m -> m "%s" msg);
+      let err = E.mk_error ~msg ~loc Semgrep_output_v1_t.FixpointTimeout in
+      errors_acc |> E.ErrorSet.add err)

@@ -1,8 +1,19 @@
+(*
+   Copyright (c) 2023-2025 Semgrep Inc.
+
+   This library is free software; you can redistribute it and/or
+   modify it under the terms of the GNU Lesser General Public License
+   version 2.1 as published by the Free Software Foundation.
+
+   This library is distributed in the hope that it will be useful, but
+   WITHOUT ANY WARRANTY; without even the implied warranty of
+   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the file
+   LICENSE for more details.
+*)
 module Arg = Cmdliner.Arg
 module Term = Cmdliner.Term
 module Cmd = Cmdliner.Cmd
 module H = Cmdliner_
-open Fpath_.Operators
 
 (*****************************************************************************)
 (* Prelude *)
@@ -28,6 +39,7 @@ type conf = {
   pro : bool;
   (* ??? *)
   ignore_todo : bool;
+  override_expectations : Fpath.t option;
   (* TODO? do we need those options? people use the JSON output?
    * the playground? and the optimizations and strict?
    *)
@@ -61,6 +73,17 @@ let o_test_ignore_todo : bool Term.t =
       {|If --test-ignore-todo, ignores rules marked as '#todoruleid:' in
 test files.
 |}
+
+let o_override_expectations : string option Term.t =
+  let info =
+    Arg.info
+      [ "override-expectations" ]
+      ~docv:"FILE"
+      ~doc:
+        "JSON overrides for expected finding lines, keyed by target, rule ID, \
+         and engine. Target paths are relative to FILE's directory."
+  in
+  Arg.value (Arg.opt (Arg.some Arg.string) None info)
 
 let o_json : bool Term.t =
   let info = Arg.info [ "json" ] ~doc:{|Output results in JSON format.|} in
@@ -126,11 +149,10 @@ let o_args : string list Term.t =
 let target_kind_of_roots_and_config target_roots config =
   match (target_roots, config) with
   | [ file ], [ config ] ->
-      if Sys.file_exists !!file && Sys.is_directory !!file then
-        Dir (file, Some config)
+      if Sys_.Fpath.is_directory file then Dir (file, Some config)
       else File (file, config)
   | [ file ], [] ->
-      if Sys.is_directory !!file then Dir (file, None)
+      if Sys_.Fpath.is_directory file then Dir (file, None)
       else
         (* was raise Exception but cleaner abort I think *)
         Error.abort "--config is required when running a test on single file"
@@ -145,8 +167,8 @@ let target_kind_of_roots_and_config target_roots config =
 let cmdline_term : conf Term.t =
   (* !The parameters must be in alphabetic orders to match the order
    * of the corresponding '$ o_xx $' further below! *)
-  let combine args common config json matching_diagnosis pro strict
-      test_ignore_todo =
+  let combine args common config json matching_diagnosis override_expectations
+      pro strict test_ignore_todo =
     let target =
       target_kind_of_roots_and_config (Fpath_.of_strings args) config
     in
@@ -156,6 +178,7 @@ let cmdline_term : conf Term.t =
       strict;
       json;
       ignore_todo = test_ignore_todo;
+      override_expectations = Option.map Fpath.v override_expectations;
       common;
       optimizations = true;
       matching_diagnosis;
@@ -163,7 +186,8 @@ let cmdline_term : conf Term.t =
   in
   Term.(
     const combine $ o_args $ CLI_common.o_common $ o_config $ o_json
-    $ o_matching_diagnosis $ o_pro $ o_strict $ o_test_ignore_todo)
+    $ o_matching_diagnosis $ o_override_expectations $ o_pro $ o_strict
+    $ o_test_ignore_todo)
 
 let doc = "testing the rules (EXPERIMENTAL improvements over scan --test)"
 
@@ -171,10 +195,13 @@ let man : Cmdliner.Manpage.block list =
   [
     `S Cmdliner.Manpage.s_description;
     `P "See https://semgrep.dev/docs/writing-rules/testing-rules/";
+    `S Cmdliner.Manpage.s_options;
+    `S Cmdliner.Manpage.s_common_options;
   ]
   @ CLI_common.help_page_bottom
 
-let cmdline_info : Cmd.info = Cmd.info "semgrep test" ~doc ~man
+let cmdline_info : Cmd.info =
+  Cmd.info "semgrep test" ~doc ~man ~exits:CLI_common.exits
 
 (*****************************************************************************)
 (* Entry point *)

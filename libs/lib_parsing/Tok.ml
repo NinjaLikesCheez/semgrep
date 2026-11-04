@@ -53,18 +53,7 @@ open Sexplib.Std
 (* To report errors, regular position information.
  * Note that Loc.t is now an alias for Tok.location.
  *)
-type location = {
-  (* the content of the "token" *)
-  str : string;
-  (* TODO? the content of Pos.t used to be inlined in this location type.
-   * It is cleaner to factorize things in Pos.t, but this introduces
-   * an extra pointer which actually can have real performance implication
-   * in Semgrep on huge monorepos. It might be worth inlining it back
-   * (and also reduce its number of fields).
-   *)
-  pos : Pos.t;
-}
-[@@deriving show { with_path = false }, eq, ord, sexp]
+type location = Loc.t [@@deriving show { with_path = false }, eq, ord, sexp]
 
 (* to represent fake (e.g., fake semicolons in languages such as Javascript),
  * and expanded tokens (e.g., preprocessed constructs by cpp for C/C++)
@@ -138,17 +127,32 @@ exception NoTokenLocation of string
 (*****************************************************************************)
 
 (* see also -full_token_info in Meta_AST.ml *)
+(* nosemgrep: no-ref-declarations-at-top-scope *)
 let pp_full_token_info = ref false
 
 (* for ppx_deriving *)
-let pp fmt t = if !pp_full_token_info then pp fmt t else Format.fprintf fmt "()"
+let generated_pp = pp
 
-(* not sure why we also need to define this one, but without this
- * semgrep-core -diff_pfff_tree_sitter, which uses AST_generic.show_program,
- * always display the full token info of the token
- *)
-let pp_t_always_equal fmt t =
-  if !pp_full_token_info then pp fmt t else Format.fprintf fmt "()"
+(*
+   By default, hide locations because:
+   - they take a lot of visual space when reviewing an AST
+   - Windows paths are printed with backslashes, causing mismatches in tests
+*)
+let pp fmt t =
+  if !pp_full_token_info then generated_pp fmt t else Format.fprintf fmt "_"
+
+let pp_t_always_equal fmt t = pp fmt t
+
+(* Override the pretty-printer for the location type
+
+   This is used somewhere in the AST where the location is used independently
+   from tokens.
+*)
+let generated_pp_location = pp_location
+
+let pp_location fmt x =
+  if !pp_full_token_info then generated_pp_location fmt x
+  else Format.fprintf fmt "_"
 
 (*****************************************************************************)
 (* Fake tokens (safe and unsafe) *)
@@ -240,31 +244,6 @@ let content_of_tok_opt ii =
   | Ab ->
       None
 
-(* Token locations are supposed to denote the beginning of a token.
-   Suppose we are interested in instead having line, column, and bytepos of
-   the end of a token instead.
-   This is something we can do at relatively low cost by going through and
-   inspecting the contents of the token, plus the start information.
-*)
-let end_pos_of_loc loc =
-  let line, col, trailing_nl =
-    String.fold_left
-      (fun (line, col, after_nl) c ->
-        match c with
-        | '\n' when after_nl -> (line + 1, 0, true)
-        | '\n' -> (line, col, true)
-        | _ when after_nl -> (line + 1, 1, false)
-        | _ -> (line, col + 1, false))
-      (loc.pos.line, loc.pos.column, false)
-      loc.str
-  in
-  let col =
-    (* THINK: We count a trailing newline as an extra character in the last line,
-     * is that the standard ? *)
-    if trailing_nl then col + 1 else col
-  in
-  (line, col, loc.pos.bytepos + String.length loc.str)
-
 (*****************************************************************************)
 (* Builders *)
 (*****************************************************************************)
@@ -272,7 +251,7 @@ let end_pos_of_loc loc =
 let tok_of_loc loc = OriginTok loc
 
 let make ~str ~file ~bytepos =
-  let loc =
+  let loc : Loc.t =
     {
       str;
       (* the pos will be filled in post-lexing phase, see complete_location *)
@@ -280,6 +259,9 @@ let make ~str ~file ~bytepos =
     }
   in
   tok_of_loc loc
+
+let of_lexing_position (pos : Lexing.position) str : t =
+  OriginTok (Loc.of_lexing_position pos str)
 
 (* TODO: we can't rely on Lexing.lexbuf.pos_fname to have
  * been set correctly by the caller (or need an "origin" when lexbuf is stdin)
@@ -292,8 +274,7 @@ let tok_of_lexbuf lexbuf =
   let file = if fname = "" then Fpath_.fake_file else Fpath.v fname in
   make ~str:(Lexing.lexeme lexbuf) ~file ~bytepos:(Lexing.lexeme_start lexbuf)
 
-let first_loc_of_file file = { str = ""; pos = Pos.first_pos_of_file file }
-let first_tok_of_file file = fake_tok_loc (first_loc_of_file file) ""
+let first_tok_of_file file = fake_tok_loc (Loc.first_loc_of_file file) ""
 
 let rewrap_str s ii =
   match ii with
@@ -316,7 +297,7 @@ let str_of_info_fake_ok ii =
   | Ab -> raise (NoTokenLocation "Ab")
 
 let combine_toks x xs =
-  let str = xs |> List_.map str_of_info_fake_ok |> String.concat "" in
+  let str = xs |> List.map str_of_info_fake_ok |> String.concat "" in
   tok_add_s str x
 
 let count_char c str =
@@ -432,8 +413,10 @@ let combine_sparse_toks ?(ignorable_newline = "\n") ?(ignorable_blank = ' ')
             (* It's safe to insert missing bytes only if they're followed
                by a newline that resets the indentation. *)
             if missing_newlines > 0 then
-              for (* Adjust bytepos *)
-                  _ = 1 to missing_bytes do
+              for
+                (* Adjust bytepos *)
+                _ = 1 to missing_bytes
+              do
                 Buffer.add_char buf ignorable_blank;
                 incr current_column
               done;
@@ -461,7 +444,7 @@ let empty_tok_after tok : t =
   match loc_of_tok tok with
   | Ok loc ->
       let prev_len = String.length loc.str in
-      let loc =
+      let loc : Loc.t =
         {
           str = "";
           pos =
@@ -476,7 +459,7 @@ let empty_tok_after tok : t =
   | Error _ -> rewrap_str "" tok
 
 let combine_bracket_contents (open_, xs, _close) =
-  let toks = List_.map snd xs in
+  let toks = List.map snd xs in
   match toks with
   | x :: xs -> combine_toks x xs
   | [] -> empty_tok_after open_
@@ -487,7 +470,7 @@ let split_tok_at_bytepos pos ii =
   let loc1_str = String.sub str 0 pos in
   let loc2_str = String.sub str pos (String.length str - pos) in
   let loc1 = { loc with str = loc1_str } in
-  let loc2 =
+  let loc2 : Loc.t =
     {
       str = loc2_str;
       pos =
@@ -504,23 +487,6 @@ let split_tok_at_bytepos pos ii =
 (* Adjusting location *)
 (*****************************************************************************)
 
-(* TODO? move to Pos.ml and use Pos.t instead *)
-let adjust_loc_wrt_base base_loc loc =
-  (* Note that bytepos and columns are 0-based, whereas lines are 1-based. *)
-  let base_pos = base_loc.pos in
-  let pos = loc.pos in
-  {
-    loc with
-    pos =
-      {
-        bytepos = base_pos.bytepos + pos.bytepos;
-        line = base_pos.line + pos.line - 1;
-        column =
-          (if pos.line =|= 1 then base_pos.column + pos.column else pos.column);
-        file = base_pos.file;
-      };
-  }
-
 let fix_location fix ii =
   match ii with
   | OriginTok pi -> OriginTok (fix pi)
@@ -529,9 +495,7 @@ let fix_location fix ii =
   | Ab -> Ab
 
 let adjust_tok_wrt_base base_loc ii =
-  fix_location (adjust_loc_wrt_base base_loc) ii
-
-let fix_pos fix loc = { loc with pos = fix loc.pos }
+  fix_location (Loc.adjust_loc_wrt_base base_loc) ii
 
 (*****************************************************************************)
 (* Adjust line x col *)
@@ -558,7 +522,6 @@ Now I just have
 because I don't use berkeley DB. I use codegraph and an entity_finder
 we just focus on use/def and does not store huge asts on disk.
 
-
 let rec distribute_info_items_toplevel2 xs toks filename =
   match xs with
   | [] -> raise Impossible
@@ -572,7 +535,6 @@ let rec distribute_info_items_toplevel2 xs toks filename =
       | Ast_js.St (Ast_js.Nop None) ->
           distribute_info_items_toplevel2 xs toks filename
       | _ ->
-
 
       let ii = Lib_parsing_php.ii_of_any (Ast.Toplevel ast) in
       (* ugly: I use a fakeInfo for lambda f_name, so I have

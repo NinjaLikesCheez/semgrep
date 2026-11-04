@@ -1,10 +1,12 @@
 {
+  "engine_requested": "OSS",
   "errors": [],
   "paths": {
     "scanned": [
       "targets/autofix/django-none-password-default.py"
     ]
   },
+  "profiling_results": [],
   "results": [
     {
       "check_id": "rules.autofix.python.django.security.passwords.use-none-for-password-default.use-none-for-password-default",
@@ -68,5 +70,6 @@
     }
   ],
   "skipped_rules": [],
+  "time": "<masked in tests>",
   "version": "0.42"
 }

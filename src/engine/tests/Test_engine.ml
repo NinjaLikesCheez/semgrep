@@ -43,7 +43,7 @@ module OutJ = Semgrep_output_v1_j
 
 let (analyzers_of_rules : Rule.t list -> Analyzer.t list) =
  fun rs ->
-  rs |> List_.map (fun r -> r.R.target_analyzer) |> List.sort_uniq compare
+  rs |> List.map (fun r -> r.R.target_analyzer) |> List.sort_uniq compare
 
 let first_analyzer_of_rules (rs : Rule.t list) : Analyzer.t =
   match rs with
@@ -85,7 +85,7 @@ let xtarget_of_file (analyzer : Analyzer.t) (target : Fpath.t) : Xtarget.t =
     in
     (ast, skipped_tokens)
   in
-  Xtarget.resolve parser (Target.mk_regular analyzer Product.all (File target))
+  Xtarget.resolve parser (Target.mk_unfilterable_target analyzer target)
 
 (*****************************************************************************)
 (* target helpers *)
@@ -93,28 +93,32 @@ let xtarget_of_file (analyzer : Analyzer.t) (target : Fpath.t) : Xtarget.t =
 
 let find_target_of_yaml_file_opt (file : Fpath.t) : Fpath.t option =
   let d, b, ext = Filename_.dbe_of_filename !!file in
-  Common2.readdir_to_file_list d @ Common2.readdir_to_link_list d
+  let entries = CapFS.read_dir_entries (Fpath.v d) in
+  entries
   |> List_.find_some_opt (fun file2 ->
-         let path2 = Filename.concat d file2 in
-         (* Config files have a single .yaml extension (assumption),
-          * but test files may have multiple extensions, e.g.
-          * ".test.yaml" (YAML test files), ".sites-available.conf",
-          * ... *)
-         match Filename_.dbe_of_filename_many_ext_opt file2 with
-         | None -> None
-         | Some (_, b2, ext2) ->
-             if
-               b = b2 && ext <> ext2
-               (* .yaml.j2 are Jinja2 templates to generate Semgrep files *)
-               && ext2 <> "yaml.j2"
-               (* those are autofix test files that should be skipped *)
-               && (not (ext2 =~ ".*fixed"))
-               (* ugly: jsonnet exclusion below because of some .jsonnet and
-                * .yaml ambiguities in tests/rules
-                *)
-               && ext2 <> "jsonnet"
-             then Some (Fpath.v path2)
-             else None)
+      let path2 = Filename.concat d !!file2 in
+      (* Config files have a single .yaml extension (assumption),
+       * but test files may have multiple extensions, e.g.
+       * ".test.yaml" (YAML test files), ".sites-available.conf",
+       * ... *)
+      match Filename_.dbe_of_filename_many_ext_opt !!file2 with
+      | None -> None
+      | Some (_, b2, ext2) ->
+          if
+            b = b2 && ext <> ext2
+            (* .yaml.j2 are Jinja2 templates to generate Semgrep files *)
+            && ext2 <> "yaml.j2"
+            (* those are autofix test files that should be skipped *)
+            && (not (ext2 =~ ".*fixed"))
+            (* ugly: jsonnet exclusion below because of some .jsonnet and
+             * .yaml ambiguities in tests/rules
+             *)
+            && ext2 <> "jsonnet"
+            (* golden-output sidecars (e.g. foo.taint_sig.expect,
+             * foo.pp_il.expect) are never runnable targets *)
+            && not (String.ends_with ~suffix:".expect" ext2)
+          then Some (Fpath.v path2)
+          else None)
 
 let find_target_of_yaml_file (file : Fpath.t) : Fpath.t =
   match find_target_of_yaml_file_opt file with
@@ -125,13 +129,13 @@ let find_target_of_yaml_file (file : Fpath.t) : Fpath.t =
 (* Other helpers *)
 (*****************************************************************************)
 
-let test_name_for_target ~prepend_lang (langs : Language.t list)
+let test_name_for_target ~prepend_lang (langs : Lang.t list)
     (rule_file : Fpath.t) : string =
   if prepend_lang then
     let langs =
       match langs with
       | [] -> [ "Generic" ]
-      | _ -> List_.map Lang.to_capitalized_alnum langs
+      | _ -> List.map Lang.to_capitalized_alnum langs
     in
     let lang = langs |> String.concat " " in
     spf "%s %s" lang !!rule_file
@@ -157,24 +161,24 @@ let check_profiling (rule_file : Fpath.t) (target : Fpath.t)
   | Some profiling ->
       profiling.p_rule_times
       |> List.iter (fun (rule_time : Core_profiling.rule_profiling) ->
-             if not (rule_time.rule_match_time >= 0.) then
-               (* match_time could be 0.0 if the rule contains no pattern or
+          if not (rule_time.rule_match_time >= 0.) then
+            (* match_time could be 0.0 if the rule contains no pattern or
                   if the rules are skipped. Otherwise it's positive.
                *)
-               failwith
-                 (spf "invalid value for match time: %g (rule: %s, target: %s)"
-                    rule_time.rule_match_time !!rule_file !!target);
-             if not (rule_time.rule_parse_time >= 0.) then
-               (* same for parse time *)
-               failwith
-                 (spf "invalid value for parse time: %g (rule: %s, target: %s)"
-                    rule_time.rule_parse_time !!rule_file !!target))
+            failwith
+              (spf "invalid value for match time: %g (rule: %s, target: %s)"
+                 rule_time.rule_match_time !!rule_file !!target);
+          if not (rule_time.rule_parse_time >= 0.) then
+            (* same for parse time *)
+            failwith
+              (spf "invalid value for parse time: %g (rule: %s, target: %s)"
+                 rule_time.rule_parse_time !!rule_file !!target))
 
 let check_parse_errors (rule_file : Fpath.t) (errors : Core_error.ErrorSet.t) :
     unit =
   if not (E.ErrorSet.is_empty errors) then
     let errors =
-      E.ErrorSet.elements errors |> List_.map Core_error.show
+      E.ErrorSet.elements errors |> List.map Core_error.show
       |> String.concat "-----\n"
     in
     failwith (spf "parsing error(s) on %s:\n%s" !!rule_file errors)
@@ -215,13 +219,48 @@ let read_rules_file ~get_analyzer ?fail_callback rule_file =
       in
       Some (rules, target, analyzer)
 
-let make_test_rule_file ?(fail_callback = fun _i m -> Alcotest.fail m)
+let compare_rule_expectations expectations rules target matches annotated =
+  let ids = List.map (fun (rule : Rule.t) -> fst rule.id) rules in
+  let overrides =
+    Test_expectations.for_rules expectations ids |> fun expectations ->
+    Test_expectations.for_file expectations Test_annotation.OSS target
+  in
+  match overrides with
+  | [] ->
+      TCM.compare_actual_to_expected ~to_location:TCM.location_of_pm matches
+        annotated
+  | _ ->
+      let expected =
+        Test_annotation.annotations target
+        |> Test_annotation.filter_for_engine Test_annotation.OSS
+        |> Test_annotation.group_by_rule_id
+        |> List.filter (fun (id, _) -> not (List.mem_assoc id overrides))
+        |> List.append overrides
+      in
+      List.fold_left
+        (fun result id ->
+          Result.bind result (fun () ->
+              let actual =
+                List.filter
+                  (fun (pm : Core_match.t) -> Rule_ID.equal pm.rule_id.id id)
+                  matches
+              in
+              let lines =
+                List.assoc_opt id expected |> Option.value ~default:[]
+                |> List.map (fun line -> (target, line))
+              in
+              TCM.compare_actual_to_expected ~to_location:TCM.location_of_pm
+                actual lines))
+        (Ok ()) ids
+
+let make_test_rule_file ?(expectations = Test_expectations.empty)
+    ?(fail_callback = fun _i m -> Alcotest.fail m)
     ?(get_analyzer = single_analyzer_from_rules) ?(prepend_lang = false)
     (rule_file : Fpath.t) : Testo.t =
   let test () =
     Logs.info (fun m -> m "processing rules  %s" !!rule_file);
     match read_rules_file ~get_analyzer ~fail_callback rule_file with
-    | None -> ()
+    | None -> failwith (spf "found invalid rules in %s" !!rule_file)
     | Some (rules, target, analyzer) -> (
         (* expected *)
         (* not tororuleid! not ok:! not todook:
@@ -258,12 +297,12 @@ let make_test_rule_file ?(fail_callback = fun _i m -> Alcotest.fail m)
         Test_utils.compare_fixes ~file:target res.matches;
 
         check_profiling rule_file target res;
-        let actual_errors = res.matches |> List_.map TCM.location_of_pm in
+        let actual_errors = res.matches |> List.map TCM.location_of_pm in
         actual_errors
         |> List.iter (fun (_, line) ->
-               Logs.debug (fun m -> m "match at line: %d" line));
+            Logs.debug (fun m -> m "match at line: %d" line));
         match
-          TCM.compare_actual_to_expected ~to_location:Fun.id actual_errors
+          compare_rule_expectations expectations rules target res.matches
             expected_error_lines
         with
         | Ok () -> ()
@@ -295,20 +334,27 @@ let find_rule_files roots =
 (* Entry point *)
 (*****************************************************************************)
 
-(* TODO: do not filter_map, instead fail when we can't parse a rule
- * (or wait that we switch to osemgrep test for our own test infra in which
- * case this whole file will be deleted)
- *)
-let collect_tests ?(get_analyzer = single_analyzer_from_rules)
-    (xs : Fpath.t list) =
-  xs |> find_rule_files
-  |> List_.filter_map (fun rule_file ->
-         let* _rules, target, analyzer =
-           read_rules_file ~get_analyzer rule_file
-         in
-         Some (rule_file, target, analyzer))
+type collected_tests = {
+  valid_test_triples :
+    (Fpath.t (* rule file *) * Fpath.t (* target file *) * Analyzer.t) list;
+  invalid_rule_files : Fpath.t list;
+}
 
-let make_tests ?fail_callback ?get_analyzer ?prepend_lang (xs : Fpath.t list) :
-    Testo.t list =
+let collect_tests ?(get_analyzer = single_analyzer_from_rules)
+    (xs : Fpath.t list) : collected_tests =
+  let all_rule_files = xs |> find_rule_files in
+  let valid_test_triples, invalid_rule_files =
+    all_rule_files
+    |> List.partition_map (fun rule_file ->
+        match read_rules_file ~get_analyzer rule_file with
+        | None -> Right rule_file
+        | Some (_rules, target, analyzer) -> Left (rule_file, target, analyzer))
+  in
+  { valid_test_triples; invalid_rule_files }
+
+let make_tests ?expectations ?fail_callback ?get_analyzer ?prepend_lang
+    (xs : Fpath.t list) : Testo.t list =
   xs |> find_rule_files
-  |> List_.map (make_test_rule_file ?fail_callback ?get_analyzer ?prepend_lang)
+  |> List.map
+       (make_test_rule_file ?expectations ?fail_callback ?get_analyzer
+          ?prepend_lang)

@@ -3,11 +3,12 @@
   "environment": {
     "ci": null,
     "configNamesHash": "d3e03c9938537c0a0668cec7204f37f1e9da87d03e18e8cc444dd7454b36c4d5",
+    "installMethod": "<MASKED>",
     "integrationName": "funkyintegration",
     "isAuthenticated": false,
     "isDiffScan": false,
     "isTranspiledJS": false,
-    "os": "Linux",
+    "os": "<MASKED>",
     "projectHash": null,
     "rulesHash": "7f693c12172d20798fe56ef8555cf42accb11ae6fc115d0d87405f2a988e9805",
     "version": "<MASKED DIGITS>.<MASKED DIGITS>.<MASKED DIGITS>"
@@ -18,6 +19,9 @@
   },
   "event_id": "00000000-0000-0000-0000-000000000000",
   "extension": {},
+  "guardian": {},
+  "install_pro": {},
+  "mcp": {},
   "parse_rate": {
     "csharp": {
       "bytes_parsed": 1492,
@@ -77,11 +81,16 @@
   "sent_at": "2017-03-03T00:00:00+09:00",
   "started_at": "2017-03-03T00:00:00+09:00",
   "value": {
+    "engineConfig": {
+      "analysis_type": "Intraprocedural",
+      "code_config": {},
+      "pro_langs": true
+    },
     "engineRequested": "OSS",
     "features": [
       "cli-flag/config",
       "cli-flag/metrics",
-      "cli-flag/targets",
+      "cli-flag/scanning_roots",
       "cli-flag/time_flag",
       "config/local",
       "language/csharp",

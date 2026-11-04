@@ -1,3 +1,15 @@
+(*
+   Copyright (c) 2021-2025 Semgrep Inc.
+
+   This library is free software; you can redistribute it and/or
+   modify it under the terms of the GNU Lesser General Public License
+   version 2.1 as published by the Free Software Foundation.
+
+   This library is distributed in the hope that it will be useful, but
+   WITHOUT ANY WARRANTY; without even the implied warranty of
+   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the file
+   LICENSE for more details.
+*)
 (* LATER: osemgrep: not needed after osemgrep migration done *)
 type output_format =
   | Text
@@ -11,18 +23,24 @@ type output_format =
 [@@deriving show]
 
 (*
-   'Rule_file' is for the semgrep-core CLI.
+   'Rule_files' is for the semgrep-core CLI. A single rule file is represented
+   as a singleton list; pysemgrep may pass multiple generated shards so core can
+   parse them in parallel.
    'Rules' is for osemgrep or when for some reason the rules had to be
     preparsed.
 *)
-type rule_source = Rule_file of Fpath.t | Rules of Rule.t list
+type rule_source = Rule_files of Fpath.t list | Rules of Rule.t list
 
 (* old: was [@@deriving show] but when using --config p/default
  * the logs were getting too big
  *)
 let pp_rule_source (fmt : Format.formatter) (x : rule_source) : unit =
   match x with
-  | Rule_file x -> Format.fprintf fmt "Rule_file (%a)" Fpath.pp x
+  | Rule_files xs ->
+      let pp_sep fmt () = Format.fprintf fmt ";@ " in
+      Format.fprintf fmt "Rule_files (%a)"
+        (Format.pp_print_list ~pp_sep Fpath.pp)
+        xs
   | Rules xs ->
       (* TODO: we should use Scan_CLI max_log_list_entries
        * and Output.too_much_data, but hard to pass that in
@@ -42,6 +60,35 @@ let pp_rule_source (fmt : Format.formatter) (x : rule_source) : unit =
 type target_source = Target_file of Fpath.t | Targets of Target.t list
 [@@deriving show]
 
+(**
+   Settings for '-j'
+
+   Most scan operations will use the specified number of jobs but
+   some will override the default (e.g. interfile).
+   We need to keep track of whether the setting can be overridden.
+
+   If we wanted to centralize the default settings, the Default case
+   could be extended to contain defaults for different situations e.g.
+     Default of {
+       regular_scan: int;
+       interfile_scan: int;
+       ...
+     }
+*)
+type num_jobs =
+  | Default of int
+      (** Default can be overridden by another Default or
+                       by Force *)
+  | Force of int  (** Force cannot be overridden *)
+[@@deriving show]
+
+(** Convert [num_jobs] into the number of jobs to execute.
+    There's no more overriding after this. *)
+let finalize_num_jobs = function
+  | Default n
+  | Force n ->
+      n
+
 (* This is mostly the flags of the semgrep-core program.
  * LATER: should delete or merge with osemgrep Core_runner.conf
  *)
@@ -49,7 +96,6 @@ type t = {
   (* Main flags, input *)
   rule_source : rule_source;
   target_source : target_source;
-  equivalences_file : Fpath.t option;
   (* output and result tweaking *)
   output_format : output_format;
   report_time : bool;
@@ -72,31 +118,30 @@ type t = {
   timeout_threshold : int;
   max_memory_mb : int;
   max_match_per_file : int;
-  ncores : int;
+  num_jobs : num_jobs;
   (* a.k.a -fast (on by default) *)
   filter_irrelevant_rules : bool;
   (* telemetry *)
-  tracing : Tracing.config option;
+  telemetry : Telemetry.config option;
+  symbol_analysis : bool;
+  fips_mode : bool;
+  (* Rely on a multicore ocaml impl of `-j` v.s Parmap
+   * logic redundancy: par_conf is [Effect _] only if [use_parmap] was
+   * not set to true. *)
+  use_parmap : bool;
+  par_conf : Parallelism_config.t;
 }
 [@@deriving show]
 
-(*
-   Default values for all the semgrep-core command-line arguments and options.
-
+(* Default values for all the semgrep-core command-line arguments and options.
    Its values can be inherited using the 'with' syntax:
-
-    let my_config = {
-      Runner_config.default with
-      debug = true;
-      ncores = 3;
-    }
+      let my_config = { Core_scan_config.default with ncores = 3 }
 *)
 let default =
   {
     (* Main flags *)
     rule_source = Rules [];
     target_source = Targets [];
-    equivalences_file = None;
     (* alt: NoOutput but then would need a -text in Core_CLI.ml *)
     output_format = Text;
     report_time = false;
@@ -105,15 +150,17 @@ let default =
     respect_rule_paths = true;
     file_match_hook = None;
     (* Limits *)
-    (* maximum time to spend running a rule on a single file *)
     timeout = 0.;
-    (* maximum number of rules that can timeout on a file *)
     timeout_threshold = 0;
     max_memory_mb = 0;
     max_match_per_file = 10_000;
-    ncores = 1;
+    num_jobs = Default Resources.resources.cpu.recommended_multicore_domains;
     (* a.k.a -fast, on by default *)
     filter_irrelevant_rules = true;
     (* debugging and telemetry flags *)
-    tracing = None;
+    telemetry = None;
+    symbol_analysis = false;
+    fips_mode = false;
+    use_parmap = false;
+    par_conf = Parallelism_config.Process;
   }

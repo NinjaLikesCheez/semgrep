@@ -1,3 +1,17 @@
+#
+# Copyright (c) 2024-2025 Semgrep Inc.
+#
+# This library is free software; you can redistribute it and/or
+# modify it under the terms of the GNU Lesser General Public License
+# version 2.1 as published by the Free Software Foundation.
+#
+# This library is distributed in the hope that it will be useful, but
+# WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the file
+# LICENSE for more details.
+#
+import functools
+import glob
 from dataclasses import dataclass
 from dataclasses import field
 from fnmatch import fnmatch
@@ -12,11 +26,7 @@ from typing import Union
 
 import semgrep.semgrep_interfaces.semgrep_output_v1 as out
 from semdep.matchers.base import SubprojectMatcher
-from semgrep.subproject import DependencySource
-from semgrep.subproject import LockfileOnlyDependencySource
-from semgrep.subproject import ManifestLockfileDependencySource
-from semgrep.subproject import MultiLockfileDependencySource
-from semgrep.subproject import Subproject
+from semgrep.types import Target
 
 
 @dataclass(frozen=True)
@@ -60,6 +70,20 @@ class PipRequirementsMatcher(SubprojectMatcher):
             or str(path)
             == f"{self.default_manifest_file_base}.{self.manifest_file_extension}"
         )
+
+    @functools.cached_property
+    def subproject_identifying_glob_filters(self) -> FrozenSet[str]:
+        # lockfile patterns based on '_is_requirements_match' above
+        lockfile_patterns = frozenset(
+            f"{self.base_file_pattern}.{ext}"
+            for ext in self.requirements_file_extensions
+        )
+        # manifest patterns based on '_is_manifest_match' above
+        manifest_patterns = [
+            f"{self.base_file_pattern}.{self.manifest_file_extension}",
+            f"{glob.escape(self.default_manifest_file_base)}.{self.manifest_file_extension}",
+        ]
+        return lockfile_patterns.union(manifest_patterns)
 
     def is_match(self, path: Path) -> bool:
         return self._is_manifest_match(path) or self._is_requirements_match(path)
@@ -111,7 +135,7 @@ class PipRequirementsMatcher(SubprojectMatcher):
             return requirements_path.parent
 
     def _filter_manifest_requirements(
-        self, dep_source_files: FrozenSet[Path]
+        self, dep_source_files: FrozenSet[Target]
     ) -> Tuple[Set[Path], Set[Path]]:
         """
         Classifies the provided source files as requirements files, manifests, or neither.
@@ -120,7 +144,8 @@ class PipRequirementsMatcher(SubprojectMatcher):
         """
         requirements_files: Set[Path] = set()
         manifests: Set[Path] = set()
-        for path in dep_source_files:
+        for target in dep_source_files:
+            path = target.fpath
             if self._is_requirements_match(path):
                 requirements_files.add(path)
             if self._is_manifest_match(path):
@@ -128,14 +153,14 @@ class PipRequirementsMatcher(SubprojectMatcher):
         return (manifests, requirements_files)
 
     def make_subprojects(
-        self, dep_source_files: FrozenSet[Path]
-    ) -> Tuple[List[Subproject], FrozenSet[Path]]:
+        self, dep_source_files: FrozenSet[Target]
+    ) -> Tuple[List[out.Subproject], FrozenSet[Path]]:
         # find all manifests and requirements files that we will use to build subprojects
         manifests, requirements_files = self._filter_manifest_requirements(
             dep_source_files
         )
 
-        subprojects: List[Subproject] = []
+        subprojects: List[out.Subproject] = []
 
         # tracks manifests that were accounted for in the first (requirements-based) phase.
         # These manifests should not be used in the second (manifest-only) phase.
@@ -157,13 +182,17 @@ class PipRequirementsMatcher(SubprojectMatcher):
             local_requirements_paths,
         ) in requirements_files_by_root_dir.items():
             lockfile_sources: List[
-                Union[LockfileOnlyDependencySource, ManifestLockfileDependencySource]
+                Union[
+                    out.LockfileOnly,
+                    out.ManifestLockfile,
+                ]
             ] = []
             for req_path in sorted(
                 local_requirements_paths
             ):  # sorting so that there is a deterministic order in tests
+                candidates = frozenset(target.fpath for target in dep_source_files)
                 matching_manifest_path = self._lockfile_to_manifest(
-                    req_path, dep_source_files
+                    req_path, candidates
                 )
                 if matching_manifest_path is not None:
                     paired_manifests.add(matching_manifest_path)
@@ -179,26 +208,34 @@ class PipRequirementsMatcher(SubprojectMatcher):
                 )
 
                 if manifest is not None:
-                    lockfile_sources.append(
-                        ManifestLockfileDependencySource(manifest, lockfile)
-                    )
+                    lockfile_sources.append(out.ManifestLockfile((manifest, lockfile)))
                 else:
-                    lockfile_sources.append(LockfileOnlyDependencySource(lockfile))
+                    lockfile_sources.append(out.LockfileOnly(lockfile))
 
             # use the correct dependency source type depending on the number
             # of lockfiles
-            dep_source: DependencySource
+            dep_source: out.DependencySource
             if len(lockfile_sources) == 1:
-                dep_source = lockfile_sources[0]
+                dep_source = out.DependencySource(lockfile_sources[0])
             else:
-                dep_source = MultiLockfileDependencySource(tuple(lockfile_sources))
+                dep_source = out.DependencySource(
+                    out.MultiLockfile(
+                        [out.DependencySource(x) for x in lockfile_sources]
+                    )
+                )
 
-            subprojects.append(Subproject(root_dir, dep_source, self.ECOSYSTEM))
+            subprojects.append(
+                out.Subproject(
+                    root_dir=out.Fpath(str(root_dir)),
+                    dependency_source=dep_source,
+                    ecosystem=self.ECOSYSTEM,
+                )
+            )
 
         # TODO: (bk) handle lone manifests.
         # there could be lone manifests remaining (manifests - paired_manifests)
         # and this code currently does not handle them. For lockfileless and for
-        # ecosystem reporting, we will need to create ManifestOnlyDependencySources
+        # ecosystem reporting, we will need to create ManifestOnlys
         # from these.
 
         return subprojects, frozenset(manifests | requirements_files)

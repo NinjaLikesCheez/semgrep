@@ -111,7 +111,7 @@ let rec parse ?(parsing_mode = Python) (filename : Fpath.t) =
     (* Call parser *)
     (* -------------------------------------------------- *)
     let xs =
-      Profiling.profile_code "Parser_python.main" (fun () ->
+      Profiling.measure "Parser_python.main" (fun () ->
           Parser_python.main lexer lexbuf_fake)
     in
     { Parsing_result.ast = xs; tokens = toks; stat }
@@ -133,14 +133,14 @@ let rec parse ?(parsing_mode = Python) (filename : Fpath.t) =
         parsing_mode =*= Python
         && tr.Parsing_helpers.passed |> List_.take_safe 10
            |> List.exists (function
-                | T.NAME (("print" | "exec"), _)
-                | T.ASYNC _
-                | T.AWAIT _
-                | T.NONLOCAL _
-                | T.TRUE _
-                | T.FALSE _ ->
-                    true
-                | _ -> false)
+             | T.NAME (("print" | "exec"), _)
+             | T.ASYNC _
+             | T.AWAIT _
+             | T.NONLOCAL _
+             | T.TRUE _
+             | T.FALSE _ ->
+                 true
+             | _ -> false)
       then
         (* note that we cant use tokens as the tokens are actually different
          * in Python2 mode, but we could optimize things a bit and just
@@ -148,10 +148,10 @@ let rec parse ?(parsing_mode = Python) (filename : Fpath.t) =
         parse ~parsing_mode:Python2 filename
       else
         let cur = tr.Parsing_helpers.current in
-        if not !Flag.error_recovery then
+        if not @@ Hook.get Flag.error_recovery then
           raise (Parsing_error.Syntax_error (TH.info_of_tok cur));
 
-        if !Flag.show_parsing_error then (
+        if Hook.get Flag.show_parsing_error then (
           Log.err (fun m -> m "parse error \n = %s" (error_msg_tok cur));
           let filelines = UFile.cat_array filename in
           let checkpoint2 = UFile.cat filename |> List.length in
@@ -172,8 +172,8 @@ let parse_program ?parsing_mode file =
 (* Sub parsers *)
 (*****************************************************************************)
 
-let program_of_string (caps : < Cap.tmp >) (s : string) : AST_python.program =
-  CapTmp.with_temp_file caps#tmp ~contents:s ~suffix:".py" parse_program
+let program_of_string (s : string) : AST_python.program =
+  UTmp.with_temp_file ~contents:s ~suffix:".py" parse_program
 
 let type_of_string ?(parsing_mode = Python) s =
   let lexbuf = Lexing.from_string s in
@@ -188,7 +188,7 @@ let type_of_string ?(parsing_mode = Python) s =
 
 (* for sgrep/spatch *)
 let any_of_string ?(parsing_mode = Python) s =
-  Common.save_excursion Flag_parsing.sgrep_mode true (fun () ->
+  Hook.with_hook_set Flag_parsing.sgrep_mode true (fun () ->
       let toks = tokens parsing_mode (Parsing_helpers.Str s) in
       let toks = Parsing_hacks_python.fix_tokens toks in
       let _tr, lexer, lexbuf_fake =

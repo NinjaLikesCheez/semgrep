@@ -1,88 +1,50 @@
-import subprocess
-from pathlib import Path
-
+#
+# Copyright (c) 2024-2025 Semgrep Inc.
+#
+# This library is free software; you can redistribute it and/or
+# modify it under the terms of the GNU Lesser General Public License
+# version 2.1 as published by the Free Software Foundation.
+#
+# This library is distributed in the hope that it will be useful, but
+# WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the file
+# LICENSE for more details.
+#
 import pytest
 from tests.conftest import mask_times
+from tests.conftest import skip_on_windows
 from tests.fixtures import RunSemgrep
-from tests.semgrep_runner import SEMGREP_BASE_SCAN_COMMAND_STR
 
 from semgrep.constants import OutputFormat
 
 
+# NOTE: We do NOT check the stack size (ulimit -s) ever, since with ocaml 5
+# everything is on the heap essentially, even the stack. So we'd never run into
+# a ulimit issue
 @pytest.mark.osemfail
 @pytest.mark.kinda_slow
-def test_max_memory(run_semgrep_in_tmp: RunSemgrep, snapshot):
+@skip_on_windows  # better backslash replacement logic
+def test_max_memory(run_semgrep_in_tmp: RunSemgrep, posix_snapshot):
     stdout, stderr = run_semgrep_in_tmp(
         "rules/long.yaml",
         options=["--verbose", "--max-memory", "1"],
         target_name="equivalence",
         strict=False,
     )
-    snapshot.assert_match(mask_times(stdout), "results.json")
-    snapshot.assert_match(stderr, "error.txt")
-
-
-@pytest.mark.osemfail
-@pytest.mark.slow
-def test_stack_size(run_semgrep_in_tmp: RunSemgrep, snapshot):
-    """
-    Verify that semgrep raises the soft stack limit if possible
-    when calling semgrep core
-    """
-
-    # long.yaml and equivalence were chosen since they happen to cause
-    # stack exhaustion
-    e2e_dir = Path(__file__).parent
-    targetpath = Path(e2e_dir / "targets").resolve() / "equivalence"
-    rulepath = Path(e2e_dir / "rules").resolve() / "long.yaml"
-
-    # Set the hard as well as the soft stack limit. This should force a stack
-    # overflow. If this fails, the test is broken and needs to be fixed.
-    # Do not just delete this assertion. It means the actual test below does
-    # not accurately verify that we are solving the stack exhaustion
-
-    # NOTE: This test requires some tuning to work on different systems
-    # as we can see a SIGSEGV on macOS and Linux for too small of ulimit sizes.
-    # For too high of ulimit sizes, we will not see a stack overflow.
-    ulimit_size = 384
-
-    # '--x-ignore-semgrepignore-files' is needed since our repo has a
-    # .semgrepignore file that excludes '/tests/'.
-    output = subprocess.run(
-        f"ulimit -s {ulimit_size} && {SEMGREP_BASE_SCAN_COMMAND_STR} --x-ignore-semgrepignore-files --disable-version-check --metrics off --config {rulepath} --jobs 1 --verbose {targetpath}",
-        shell=True,
-        capture_output=True,
-        encoding="utf-8",
-    )
-    print(output.stdout)
-    print(output.stderr)
-    assert (
-        "semgrep-core exit code: -11" in output.stderr
-        or "Stack overflow" in output.stderr
-    )
-
-    # If only set soft limit, semgrep should raise it as necessary so we don't hit soft limit
-    output = subprocess.run(
-        f"ulimit -S -s {ulimit_size} && {SEMGREP_BASE_SCAN_COMMAND_STR} --disable-version-check --metrics off --config {rulepath} --jobs 1 --verbose {targetpath}",
-        shell=True,
-        capture_output=True,
-        encoding="utf-8",
-    )
-    print(output.stderr)
-    # with a soft limit, semgrep should terminate without errors
-    assert "semgrep-core exit code: -11" not in output.stderr
-    assert "Stack overflow" not in output.stderr
-    assert output.returncode == 0
+    posix_snapshot.assert_match(mask_times(stdout), "results.json")
+    posix_snapshot.assert_match(stderr, "error.txt")
 
 
 @pytest.mark.slow
-def test_timeout(run_semgrep_in_tmp: RunSemgrep, snapshot):
+@skip_on_windows  # better backslash replacement logic
+def test_timeout(run_semgrep_in_tmp: RunSemgrep, posix_snapshot):
     # Check that semgrep-core timeouts are properly handled
 
-    snapshot.assert_match(
+    posix_snapshot.assert_match(
         run_semgrep_in_tmp(
             "rules/long.yaml",
-            options=["--timeout", "1"],
+            options=[],
+            timeout=1,
             target_name="equivalence",
             strict=False,
         ).stdout,
@@ -92,36 +54,40 @@ def test_timeout(run_semgrep_in_tmp: RunSemgrep, snapshot):
 
 @pytest.mark.osemfail
 @pytest.mark.slow
-def test_timeout_threshold(run_semgrep_in_tmp: RunSemgrep, snapshot):
+@skip_on_windows  # better backslash replacement logic
+def test_timeout_threshold(run_semgrep_in_tmp: RunSemgrep, posix_snapshot):
     results = run_semgrep_in_tmp(
         "rules/multiple-long.yaml",
-        options=["--verbose", "--timeout", "1", "--timeout-threshold", "1"],
+        options=["--verbose", "--timeout-threshold", "1"],
+        timeout=1,
         target_name="equivalence",
         strict=False,
     ).stdout
-    snapshot.assert_match(
+    posix_snapshot.assert_match(
         mask_times(results),
         "results.json",
     )
 
-    snapshot.assert_match(
+    posix_snapshot.assert_match(
         run_semgrep_in_tmp(
             "rules/multiple-long.yaml",
             output_format=OutputFormat.TEXT,
             force_color=True,
-            options=["--verbose", "--timeout", "1", "--timeout-threshold", "1"],
+            options=["--verbose", "--timeout-threshold", "1"],
+            timeout=1,
             target_name="equivalence",
             strict=False,
         ).stderr,
         "error.txt",
     )
 
-    snapshot.assert_match(
+    posix_snapshot.assert_match(
         run_semgrep_in_tmp(
             "rules/multiple-long.yaml",
             output_format=OutputFormat.TEXT,
             force_color=True,
-            options=["--verbose", "--timeout", "1", "--timeout-threshold", "2"],
+            options=["--verbose", "--timeout-threshold", "2"],
+            timeout=1,
             target_name="equivalence",
             strict=False,
         ).stderr,
@@ -131,7 +97,8 @@ def test_timeout_threshold(run_semgrep_in_tmp: RunSemgrep, snapshot):
 
 @pytest.mark.osemfail
 @pytest.mark.slow
-def test_spacegrep_timeout(run_semgrep_in_tmp: RunSemgrep, snapshot):
+@skip_on_windows  # better backslash replacement logic
+def test_spacegrep_timeout(run_semgrep_in_tmp: RunSemgrep, posix_snapshot):
     # Check that spacegrep timeouts are handled gracefully.
     #
     # The pattern is designed to defeat any optimization that would
@@ -143,10 +110,11 @@ def test_spacegrep_timeout(run_semgrep_in_tmp: RunSemgrep, snapshot):
     stdout, stderr = run_semgrep_in_tmp(
         config=None,
         target_name="spacegrep_timeout/gnu-lgplv2.txt",
-        options=["--lang=generic", "--pattern", pattern, "--timeout=1"],
+        options=["--lang=generic", "--pattern", pattern],
+        timeout=1,
         output_format=OutputFormat.TEXT,
         strict=False,  # don't fail due to timeout
     )
 
-    snapshot.assert_match(stdout, "results.json")
-    snapshot.assert_match(stderr, "error.txt")
+    posix_snapshot.assert_match(stdout, "results.json")
+    posix_snapshot.assert_match(stderr, "error.txt")

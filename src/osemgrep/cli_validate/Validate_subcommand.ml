@@ -41,7 +41,7 @@ module Out = Semgrep_output_v1_t
  *  (3) "Logical" errors, by running Semgrep rules (also called "meta" rules)
  *     on those target rules. We run Semgrep on Semgrep! We detect
  *     those thanks to the 'p/semgrep-rule-lints' ruleset.
- *     (hence the need for the network capability and Core_scan.caps below)
+ *     (hence the need for the network capability and unit below)
  *
  *  (4) TODO Other errors that can't be detected easily using Semgrep rules. We
  *    detect those thanks to Check_rule.ml.
@@ -62,18 +62,7 @@ module Out = Semgrep_output_v1_t
 (* Types and constants *)
 (*****************************************************************************)
 
-(* Cap.stdout + Core_scan.caps + network (we run metachecking rules) *)
-(* TODO: should use stdout, right now we abuse Logs.app
- * TODO? why Cap.tmp?
- *)
-type caps =
-  < Cap.stdout
-  ; Cap.network
-  ; Cap.tmp
-  ; Cap.fork
-  ; Cap.time_limit
-  ; Cap.memory_limit >
-
+(* We use the network to run metachecking rules and call Rule_fetching *)
 (* The "meta" rules are stored in the semgrep-rules public repository here:
  * https://github.com/semgrep/semgrep-rules/tree/develop/yaml/semgrep
  *
@@ -95,8 +84,9 @@ let hook_pro_init : (unit -> unit) Hook.t =
 (*****************************************************************************)
 (* Targeting (finding the semgrep yaml files to validate) *)
 (*****************************************************************************)
-let find_targets_rules (caps : < caps ; .. >) ~(strict : bool) ~token_opt
-    (rules_source : Rules_source.t) : Fpath.t list * int * int * int =
+(* TODO: return a record plz *)
+let find_targets_rules ~(strict : bool) ~token_opt
+    (rules_source : Rules_source.t) : Fppath.t list * int * int * int =
   (* Checking (1) and (2). Parsing the rules is already a form of validation.
    * Before running metachecks on those rules, we make sure we can parse them.
    * TODO: report not only Rule.invalid_rule_errors but all Rule.Error.t for (1)
@@ -110,26 +100,23 @@ let find_targets_rules (caps : < caps ; .. >) ~(strict : bool) ~token_opt
    *)
   let rules_and_origin, fatal_errors =
     Rule_fetching.rules_from_rules_source ~token_opt ~rewrite_rule_ids:true
-      ~strict
-      (caps :> < Cap.network ; Cap.tmp >)
-      rules_source
+      ~strict rules_source
   in
   (* ex: missing toplevel 'rules:' (probably not a semgrep rule file) *)
   fatal_errors
   |> List.iter (fun (err : Rule_error.t) ->
-         (* alt: Error.abort *)
-         Logs.warn (fun m -> m "%s" (Rule_error.string_of_error err)));
+      (* alt: Error.abort *)
+      Logs.warn (fun m -> m "%s" (Rule_error.string_of_error err)));
   let rules, invalid_rules =
     Rule_fetching.partition_rules_and_invalid rules_and_origin
   in
   invalid_rules
   |> List.iter (fun (err : Rule_error.invalid_rule) ->
-         match err with
-         (* to get the "Missing semgrep extension ... install --pro" error *)
-         (* alt: just warn *)
-         | MissingPlugin s, _, _ -> Error.abort s
-         | _ ->
-             Logs.warn (fun m -> m "%s" (Rule_error.string_of_invalid_rule err)));
+      match err with
+      (* to get the "Missing semgrep extension ... install --pro" error *)
+      (* alt: just warn *)
+      | MissingPlugin s, _, _ -> Error.abort s
+      | _ -> Logs.warn (fun m -> m "%s" (Rule_error.string_of_invalid_rule err)));
   (* In a validate context, rules are actually targets of metarules.
    * alt: could also process Configs to compute the targets.
    *)
@@ -142,18 +129,23 @@ let find_targets_rules (caps : < caps ; .. >) ~(strict : bool) ~token_opt
    *)
   let targets =
     rules_and_origin
-    |> List_.filter_map (fun (x : Rule_fetching.rules_and_origin) ->
-           match x.origin with
-           | Local_file path -> Some path
-           | CLI_argument
-           | Registry
-           | App
-           | Untrusted_remote _ ->
-               (* TODO: stricter: warn if we didn't validate since it
-                * wasn't in a local file already (e.g., registry or other
-                * remote URI)
-                *)
-               None)
+    |> List.filter_map (fun (x : Rule_fetching.rules_and_origin) ->
+        match x.origin with
+        | Local_file path ->
+            (* For the sake of honoring include/exclude paths filters
+                  found in rules, we need to provide a path that's relative
+                  to the project root (a ppath). Here, we assume the project
+                  root is the folder containing the file. *)
+            Some (Fppath.of_file_basename path)
+        | CLI_argument
+        | Registry
+        | App
+        | Untrusted_remote _ ->
+            (* TODO: stricter: warn if we didn't validate since it
+             * wasn't in a local file already (e.g., registry or other
+             * remote URI)
+             *)
+            None)
   in
   ( targets,
     List.length rules,
@@ -165,8 +157,7 @@ let find_targets_rules (caps : < caps ; .. >) ~(strict : bool) ~token_opt
 (*****************************************************************************)
 
 (* Checking (3) *)
-let check_targets_rules (caps : < caps ; .. >) ~token_opt targets_rules
-    core_runner_conf =
+let check_targets_rules ~token_opt targets_rules core_runner_conf =
   let in_docker = !Semgrep_envvars.v.in_docker in
   let (config : Rules_config.t) =
     Rules_config.parse_config_string ~in_docker metarules_pack
@@ -175,7 +166,6 @@ let check_targets_rules (caps : < caps ; .. >) ~token_opt targets_rules
   let metarules_and_origin, _errors =
     Rule_fetching.rules_from_dashdash_config ~token_opt
       ~rewrite_rule_ids:true (* default *)
-      (caps :> < Cap.network ; Cap.tmp >)
       config
   in
   let metarules, metaerrors =
@@ -185,9 +175,7 @@ let check_targets_rules (caps : < caps ; .. >) ~token_opt targets_rules
     Error.abort (spf "error in metachecks! please fix %s" metarules_pack);
 
   (* TODO? why using Core_runner instead of directly Core_scan? *)
-  let core_run_func =
-    Core_runner.mk_core_run_for_osemgrep (Core_scan.scan caps)
-  in
+  let core_run_func = Core_runner.mk_core_run_for_osemgrep Core_scan.scan in
   let result_or_exn =
     core_run_func.run core_runner_conf Find_targets.default_conf (metarules, [])
       targets_rules
@@ -200,8 +188,8 @@ let check_targets_rules (caps : < caps ; .. >) ~token_opt targets_rules
         let res = Core_runner.mk_result metarules result in
         (* TODO? sanity check errors below too? *)
         let Out.{ results; errors = _; _ } : Out.cli_output =
-          Cli_json_output.cli_output_of_runner_result ~fixed_lines:false
-            res.core res.hrules res.scanned
+          Cli_json_output.cli_output_of_runner_result ~fips_mode:false
+            ~fixed_lines:false res.core res.hrules res.scanned
         in
         (* TOPORT?
                           ... run -check_rules in semgrep-core ...
@@ -234,9 +222,8 @@ let check_targets_rules (caps : < caps ; .. >) ~token_opt targets_rules
 (* Reporting *)
 (*****************************************************************************)
 
-(* TODO: use CapConsole not Logs.app ? *)
-let report_errors (_caps : < Cap.stdout >) ~metacheck_errors ~num_errors
-    ~num_fatal_errors ~num_rules =
+(* TODO: use UConsole not Logs.app ? *)
+let report_errors ~metacheck_errors ~num_errors ~num_fatal_errors ~num_rules =
   (* was logger.info, but works without --verbose, so Logs.app better *)
   Logs.app (fun m ->
       m
@@ -247,23 +234,24 @@ let report_errors (_caps : < Cap.stdout >) ~metacheck_errors ~num_errors
   (* coupling: with Check_rule.error and use of SemgrepMatchFound *)
   metacheck_errors
   |> List.iter (fun (x : Out.cli_match) ->
-         Logs.err (fun m ->
-             m "Semgrep match found at line %s:%d\n%s" !!(x.path) x.start.line
-               x.extra.message));
+      Logs.err (fun m ->
+          m "Semgrep match found at line %s:%d\n%s" !!(x.path) x.start.line
+            x.extra.message));
   ()
 
 (*****************************************************************************)
 (* Run the conf *)
 (*****************************************************************************)
 
-let run_conf (caps : < caps ; .. >) (conf : Validate_CLI.conf) : Exit_code.t =
-  CLI_common.setup_logging ~force_color:true ~level:conf.common.logging_level;
+let run_conf (conf : Validate_CLI.conf) : Exit_code.t =
   (* Metrics_.configure Metrics_.On; ?? and allow to disable it?
    * semgrep-rules/Makefile is running semgrep --validate with metrics=off
    * (and also --disable-version-check), but maybe because it is used from
    * 'semgrep scan'; in 'osemgrep validate' context, we should not even have
    * those options and we should disable metrics (and version-check) by default.
    *)
+  CLI_common.with_logging ~color:Auto ~level:conf.common.logging_level
+  @@ fun () ->
   Logs.debug (fun m -> m "conf = %s" (Validate_CLI.show_conf conf));
   if conf.pro then (Hook.get hook_pro_init) ();
 
@@ -275,21 +263,19 @@ let run_conf (caps : < caps ; .. >) (conf : Validate_CLI.conf) : Exit_code.t =
 
   (* step1: getting the targets (which contain rules) *)
   let targets_rules, num_rules, num_fatal_errors, num_invalid_rules =
-    find_targets_rules caps ~strict:conf.core_runner_conf.strict ~token_opt
+    find_targets_rules ~strict:conf.core_runner_conf.strict ~token_opt
       conf.rules_source
   in
 
   (* step2: checking the rules *)
   let metacheck_errors =
-    check_targets_rules caps ~token_opt targets_rules conf.core_runner_conf
+    check_targets_rules ~token_opt targets_rules conf.core_runner_conf
   in
 
   (* step3: summarizing findings (errors) *)
   (* alt? care about fatal_errors? usually because not semgrep rule file *)
   let num_errors = num_invalid_rules + List.length metacheck_errors in
-  report_errors
-    (caps :> < Cap.stdout >)
-    ~metacheck_errors ~num_errors ~num_fatal_errors ~num_rules;
+  report_errors ~metacheck_errors ~num_errors ~num_fatal_errors ~num_rules;
 
   (* step4: exit code *)
   match num_errors with
@@ -301,6 +287,6 @@ let run_conf (caps : < caps ; .. >) (conf : Validate_CLI.conf) : Exit_code.t =
 (*****************************************************************************)
 (* Entry point *)
 (*****************************************************************************)
-let main (caps : < caps ; .. >) (argv : string array) : Exit_code.t =
+let main (argv : string array) : Exit_code.t =
   let conf = Validate_CLI.parse_argv argv in
-  run_conf caps conf
+  run_conf conf

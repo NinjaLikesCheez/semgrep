@@ -1,3 +1,15 @@
+(*
+   Copyright (c) 2024-2025 Semgrep Inc.
+
+   This library is free software; you can redistribute it and/or
+   modify it under the terms of the GNU Lesser General Public License
+   version 2.1 as published by the Free Software Foundation.
+
+   This library is distributed in the hope that it will be useful, but
+   WITHOUT ANY WARRANTY; without even the implied warranty of
+   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the file
+   LICENSE for more details.
+*)
 (* Creation of /tmp files, a la gcc
    ex: new_temp_file "cocci" ".c" will create a new tmp file and return
    its name (e.g., "/tmp/cocci-3252-434465.c").
@@ -87,5 +99,12 @@ val replace_named_pipe_by_regular_file_if_needed :
 *)
 val replace_stdin_by_regular_file : ?prefix:string -> unit -> Fpath.t
 
+val temp_dir : ?temp_dir:Fpath.t -> ?perms:int -> string -> string -> Fpath.t
+(** fpath wrapper to Filename.temp_dir *)
+
 (* fpath wrapper to Filename.get_temp_dir_name() *)
 val get_temp_dir_name : unit -> Fpath.t
+
+val get_unique_temp_name : ?prefix:string -> ?suffix:string -> unit -> Fpath.t
+(** [mk_temp_dir ?prefix ?suffix ()] creates a path in the temp directory in the form
+    ["PREFIX-RANDOMBITS-PID"]. It does NOT create the file at the path. *)

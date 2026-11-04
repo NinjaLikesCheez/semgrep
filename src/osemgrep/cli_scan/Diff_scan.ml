@@ -14,7 +14,8 @@
  *)
 open Common
 open Fpath_.Operators
-module SS = Set.Make (String)
+open Sets
+module Fpaths = Set.Make (Fpath)
 
 (*****************************************************************************)
 (* Prelude *)
@@ -34,64 +35,70 @@ module SS = Set.Make (String)
 (*****************************************************************************)
 (* Types *)
 (*****************************************************************************)
-type diff_scan_func =
-  ?diff_config:Differential_scan_config.t ->
-  Fpath.t list ->
-  Rule.rules ->
-  Core_result.result_or_exn
+type diff_scan_func = Fppath.t list -> Rule.rules -> Core_result.result_or_exn
 
 (*****************************************************************************)
 (* Helpers *)
 (*****************************************************************************)
+
+(* TODO: explain what this achieves.
+   It's used by remove_matches_in_baseline below. *)
+let extract_sig renamed (m : Core_match.t) =
+  let rule_id = m.rule_id in
+  let path =
+    m.path.internal_path_to_content |> fun p ->
+    Option.bind renamed
+      (List_.find_some_opt (fun (before, after) ->
+           if Fpath.equal after p then Some before else None))
+    |> Option.value ~default:p
+  in
+  let start_range, end_range = m.range_loc in
+  let path' = m.path.internal_path_to_content in
+  let syntactic_ctx : string list =
+    match
+      UFile.lines_of_file (start_range.pos.line, end_range.pos.line) path'
+    with
+    | Ok xs -> xs
+    | Error err ->
+        Logs.warn (fun m ->
+            m
+              "error on accessing lines of %s; skipping syntactic_ctx (error \
+               was %s)"
+              !!path' err);
+        []
+  in
+  (rule_id, path, syntactic_ctx)
 
 (* This function removes duplicated matches from the results of the
    head commit scan if they are also present in the results of the
    baseline commit scan. Matches are considered identical if the
    tuples containing the rule ID, file path, and matched code snippet
    are equal. *)
-let remove_matches_in_baseline caps (commit : string) (baseline : Core_result.t)
-    (head : Core_result.t)
-    (renamed : (string (* filename *) * string (* filename *)) list) =
-  let extract_sig renamed (m : Core_match.t) =
-    let rule_id = m.rule_id in
-    let path =
-      !!(m.path.internal_path_to_content) |> fun p ->
-      Option.bind renamed
-        (List_.find_some_opt (fun (before, after) ->
-             if after = p then Some before else None))
-      |> Option.value ~default:p
-    in
-    let start_range, end_range = m.range_loc in
-    let path' = m.path.internal_path_to_content in
-    let syntactic_ctx : string list =
-      match
-        UFile.lines_of_file (start_range.pos.line, end_range.pos.line) path'
-      with
-      | Ok xs -> xs
-      | Error err ->
-          Logs.warn (fun m ->
-              m
-                "error on accessing lines of %s; skipping syntactic_ctx (error \
-                 was %s)"
-                !!path' err);
-          []
-    in
-
-    (rule_id, path, syntactic_ctx)
-  in
-  let sigs = Hashtbl.create 10 in
-  Git_wrapper.run_with_worktree caps ~commit (fun () ->
+let remove_matches_in_baseline (commit : string) (baseline : Core_result.t)
+    (head : Core_result.t) (renamed : (Fpath.t * Fpath.t) list) =
+  (* [sigs] counts, per baseline signature, how many baseline matches produced
+     it (a multiset). Consuming a signature decrements its count and drops the
+     entry at 0, so a signature seen N times in the baseline can suppress at
+     most N head matches. *)
+  let sigs = Base.Hashtbl.Poly.create ~size:10 () in
+  Git_wrapper.run_with_worktree_exn ~commit (fun () ->
       List.iter
         (fun ({ pm; _ } : Core_result.processed_match) ->
-          pm |> extract_sig None |> fun x -> Hashtbl.add sigs x true)
+          pm |> extract_sig None |> fun x ->
+          let count = Base.Hashtbl.find sigs x |> Option.value ~default:0 in
+          Base.Hashtbl.set sigs ~key:x ~data:(count + 1))
         baseline.processed_matches);
   let removed = ref 0 in
   let processed_matches =
-    List_.filter_map
+    List.filter_map
       (fun (pm : Core_result.processed_match) ->
         let s = extract_sig (Some renamed) pm.pm in
-        if Hashtbl.mem sigs s then (
-          Hashtbl.remove sigs s;
+        if Base.Hashtbl.mem sigs s then (
+          (match Base.Hashtbl.find sigs s with
+          | Some n when n > 1 -> Base.Hashtbl.set sigs ~key:s ~data:(n - 1)
+          | Some _
+          | None ->
+              Base.Hashtbl.remove sigs s);
           incr removed;
           None)
         else Some pm)
@@ -119,143 +126,103 @@ let remove_matches_in_baseline caps (commit : string) (baseline : Core_result.t)
    the files and rules linked with matches from the head checkout
    scan. Subsequently, eliminate any previously identified matches
    from the results of the head checkout scan. *)
-let scan_baseline_and_remove_duplicates (caps : < Cap.chdir ; Cap.tmp >)
-    (conf : Scan_CLI.conf) (profiler : Profiler.t)
+let scan_baseline_and_remove_duplicates (profiler : Profiler.t)
     (result_or_exn : Core_result.result_or_exn) (rules : Rule.rules)
     (commit : string) (status : Git_wrapper.status)
-    (core :
-      ?diff_config:Differential_scan_config.t ->
-      Fpath.t list ->
-      Rule.rules ->
-      Core_result.result_or_exn) : Core_result.result_or_exn =
+    (diff_scan_func : diff_scan_func) : Core_result.result_or_exn =
   let/ r = result_or_exn in
   if r.processed_matches <> [] then
     let add_renamed paths =
-      List.fold_left (fun x (y, _) -> SS.add y x) paths status.renamed
+      List.fold_left (fun x (y, _) -> Fpaths.add y x) paths status.renamed
     in
     let remove_added paths =
-      List.fold_left (Fun.flip SS.remove) paths status.added
+      List.fold_left (Fun.flip Fpaths.remove) paths status.added
     in
     let rules_in_match =
       r.processed_matches
-      |> List_.map (fun ({ pm; _ } : Core_result.processed_match) ->
-             pm.rule_id.id |> Rule_ID.to_string)
-      |> SS.of_list
+      |> List.map (fun ({ pm; _ } : Core_result.processed_match) ->
+          pm.rule_id.id |> Rule_ID.to_string)
+      |> String_set.of_list
     in
     (* only use the rules that have been identified within the existing
        matches. *)
     let baseline_rules =
       rules
       |> List.filter (fun x ->
-             SS.mem (x.Rule.id |> fst |> Rule_ID.to_string) rules_in_match)
+          String_set.mem (x.Rule.id |> fst |> Rule_ID.to_string) rules_in_match)
     in
     let baseline_result =
       Profiler.record profiler ~name:"baseline_core_time" (fun () ->
-          Git_wrapper.run_with_worktree caps ~commit (fun () ->
+          (* TODO explain this code, break it down into functions and test
+             them.
+             Or delete this code. *)
+          Git_wrapper.run_with_worktree_exn ~commit (fun () ->
               let prepare_targets paths =
-                paths |> SS.of_list |> add_renamed |> remove_added |> SS.to_seq
-                |> Seq.filter_map (fun x ->
-                       if
-                         Sys.file_exists x
-                         &&
-                         match (Unix.lstat x).st_kind with
-                         | S_LNK -> false
-                         | _ -> true
-                       then Some (Fpath.v x)
-                       else None)
+                (* TODO: what's happening here? *)
+                paths |> Fpaths.of_list |> add_renamed |> remove_added
+                |> Fpaths.to_seq
+                |> Seq.filter_map (fun path ->
+                    if
+                      Sys_.file_exists !!path
+                      &&
+                      match UUnix.lstat path with
+                      | Ok { st_kind = S_LNK; _ } -> false
+                      | Ok _ -> true
+                      (* TODO: I have no idea if this is correct. *)
+                      | Error _ -> false
+                    then
+                      (* We assume we don't want these targets to go
+                            any path-based filtering. This prevents the
+                            filtering of rules according to
+                            paths.exclude/include which may be incorrect.
+                         *)
+                      Some (Fppath.unfilterable_DEPRECATED path)
+                    else None)
                 |> List.of_seq
               in
+              (* How come does a match result become a target? *)
               let paths_in_match =
                 r.processed_matches
-                |> List_.map (fun ({ pm; _ } : Core_result.processed_match) ->
-                       !!(pm.path.internal_path_to_content))
+                |> List.map (fun ({ pm; _ } : Core_result.processed_match) ->
+                    pm.path.internal_path_to_content)
                 |> prepare_targets
               in
-              let paths_in_scanned =
-                r.scanned
-                |> List_.map (fun p ->
-                       p |> Target.internal_path |> Fpath.to_string)
-                |> prepare_targets
-              in
-              let baseline_targets, baseline_diff_targets =
-                match conf.engine_type with
-                | PRO Engine_type.{ analysis = Interprocedural; _ } ->
-                    let all_in_baseline, _errors, _skipped =
-                      Find_targets.get_target_fpaths conf.targeting_conf
-                        conf.target_roots
-                    in
-                    (* Performing a scan on the same set of files for the
-                       baseline that were previously scanned for the head.
-                       In Interfile mode, the matches are influenced not
-                       only by the file displaying matches but also by its
-                       dependencies. Hence, merely rescanning files with
-                       matches is insufficient. *)
-                    (all_in_baseline, paths_in_scanned)
-                | _ -> (paths_in_match, [])
-              in
-              core
-                ~diff_config:
-                  (Differential_scan_config.BaseLine baseline_diff_targets)
-                baseline_targets baseline_rules))
+              let baseline_targets = paths_in_match in
+              (* running on baseline (e.g., develop) *)
+              diff_scan_func baseline_targets baseline_rules))
     in
     match baseline_result with
-    | Error _exn -> baseline_result
+    | Error _exn -> (* TODO: don't ignore exceptions *) baseline_result
     | Ok baseline_r ->
-        Ok (remove_matches_in_baseline caps commit baseline_r r status.renamed)
+        Ok (remove_matches_in_baseline commit baseline_r r status.renamed)
   else Ok r
 
 (*****************************************************************************)
 (* Entry point *)
 (*****************************************************************************)
 
-let scan_baseline (caps : < Cap.chdir ; Cap.tmp >) (conf : Scan_CLI.conf)
-    (profiler : Profiler.t) (baseline_commit : string) (targets : Fpath.t list)
+let scan_baseline (profiler : Profiler.t) (baseline_commit : string)
     (rules : Rule.rules) (diff_scan_func : diff_scan_func) :
     Core_result.result_or_exn =
   Logs.info (fun m ->
       m "running differential scan on base commit %s" baseline_commit);
   Metrics_.g.payload.environment.isDiffScan <- true;
-  let commit = Git_wrapper.merge_base baseline_commit in
-  let status = Git_wrapper.status ~cwd:(Fpath.v ".") ~commit () in
-  let diff_depth = Differential_scan_config.default_depth in
-  let targets, diff_targets =
-    let added_or_modified =
-      status.added @ status.modified |> List_.map Fpath.v
-    in
-    match conf.engine_type with
-    | PRO Engine_type.{ analysis = Interfile; _ } -> (targets, added_or_modified)
-    | _ -> (added_or_modified, [])
+  let commit = Git_wrapper.merge_base_exn baseline_commit in
+  let status = Git_wrapper.status_exn ~cwd:(Fpath.v ".") ~commit () in
+  (* What are these files? Are they target files or should they be treated
+     as scan roots? Are Semgrepignore filters being applied? Should they?
+     Fppath.fake_from_fpath_unfilterable makes them unfilterable but it seems
+     wrong.
+     Using Fppath.fake_from_fpath_DEPRECATED on git paths that relative to the git
+     project root might result in correct ppaths but there's no guarantee.
+  *)
+  let added_or_modified =
+    status.added @ status.modified |> List.map Fppath.fake_from_fpath_DEPRECATED
   in
   let (head_scan_result : Core_result.result_or_exn) =
     Profiler.record profiler ~name:"head_core_time" (fun () ->
-        diff_scan_func
-          ~diff_config:
-            (Differential_scan_config.Depth (diff_targets, diff_depth))
-          targets rules)
+        (* running on HEAD *)
+        diff_scan_func added_or_modified rules)
   in
-  (match (head_scan_result, conf.engine_type) with
-  | Ok r, PRO Engine_type.{ analysis = Interfile; _ } ->
-      let count_by_lang = Hashtbl.create 10 in
-      r.scanned
-      |> List.iter (function
-           | Target.Regular { analyzer = L (lang, _); _ } ->
-               let count =
-                 match Hashtbl.find_opt count_by_lang lang with
-                 | Some c -> c
-                 | None -> 0
-               in
-               Hashtbl.replace count_by_lang lang (count + 1)
-           | _ -> ());
-      Metrics_.g.payload.value.proFeatures <-
-        Some
-          {
-            diffDepth = Some diff_depth;
-            numInterfileDiffScanned =
-              Some
-                (count_by_lang |> Hashtbl.to_seq
-                |> Seq.map (fun (lang, count) -> (Lang.to_string lang, count))
-                |> List.of_seq);
-          }
-  | _ -> ());
-  scan_baseline_and_remove_duplicates caps conf profiler head_scan_result rules
-    commit status diff_scan_func
+  scan_baseline_and_remove_duplicates profiler head_scan_result rules commit
+    status diff_scan_func

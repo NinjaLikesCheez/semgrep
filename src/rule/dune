@@ -17,6 +17,8 @@
    atdgen-runtime
 
    ; in libs/
+   base
+   collections
    commons
    glob
    lib_parsing
@@ -34,6 +36,9 @@
    ; because of our use of Rule_options.atd)
    semgrep.configuring
 
+   ; in cli/src/semgrep/semgrep_interfaces/
+   semgrep.interfaces
+
  )
  (preprocess
    (pps
@@ -43,6 +48,7 @@
      ppx_deriving.ord
      ppx_deriving_yojson
      ppx_hash
+     ppx_sexp_conv
    )
  )
 )
@@ -52,31 +58,3 @@
 (env
   (_
     (flags (:standard  -w -30))))
-
-; '-j-defaults' below is for matching the behavior of atdpy so that we can get the
-; same JSON output from pysemgrep and osemgrep. This is useful only for
-; passing end-to-end tests where osemgrep is expected to produce the same
-; output as pysemgrep. This allows us to use '~field: ... list' which is more
-; convenient than '?field: ... list option'.
-;
-(rule
- (targets semgrep_output_v1_j.ml semgrep_output_v1_j.mli)
- (deps    semgrep_output_v1.atd)
- (action  (run atdgen -j -j-std -j-defaults %{deps})))
-
-(rule
- (targets semgrep_output_v1_t.ml semgrep_output_v1_t.mli)
- (deps    semgrep_output_v1.atd)
- (action  (run atdgen -t %{deps})))
-
-; note the use of -j-strict-fields here!
-(rule
- (targets rule_schema_v2_j.ml rule_schema_v2_j.mli)
- (deps    rule_schema_v2.atd)
- (action  (run atdgen -j -j-std -j-defaults -j-strict-fields %{deps})))
-
-; derive show for the type defs
-(rule
- (targets rule_schema_v2_t.ml rule_schema_v2_t.mli)
- (deps    rule_schema_v2.atd)
- (action  (run atdgen -deriving-conv "show{with_path=false}" -t %{deps})))

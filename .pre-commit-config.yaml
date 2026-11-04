@@ -1,5 +1,5 @@
 # coupling: if you add a check in this file, please add it first in
-# the semgrep-proprietary repo
+# the semgrep-proprietary repo !!!!
 #
 # Semgrep pre-commit configuration.
 # See https://pre-commit.com/ for more information.
@@ -9,7 +9,10 @@
 # This config defines also 2 "jobs" with the `stages: [manual]` directive
 # which are only exercised in CI (see .github/workflows/lint.yml).
 
-exclude: "^tests|^cli/tests/default/e2e.*/(targets|snapshots|rules/syntax)|^cli/tests/performance/targets_perf_sca|^cli/src/(semgrep|semdep)/external|^cli/bin|\\binvalid\\b|^libs/ocaml-tree-sitter-core|^libs/testo|^libs/pcre2|^cli/src/semgrep/semgrep_interfaces|languages/.*/semgrep-.*|tests/semgrep-rules"
+# languages/.*/semgrep-.* : vendored grammars, must stay untouched (see scripts/check-vendored-ots)
+# libs/ocaml-tree-sitter-semgrep/{lang,core}: generated/upstream grammars + core
+# OCaml (historical indent); scripts/ follow the same hooks as the rest of OSS.
+exclude: "^tests|^cli/tests/default/e2e.*/(targets|snapshots|rules/syntax)|^cli/tests/performance/targets_perf_sca|^cli/src/(semgrep|semdep)/external|^cli/bin|\\binvalid\\b|^libs/ocaml-tree-sitter-semgrep/(lang|core)/|^libs/testo|^libs/pcre2|^cli/src/semgrep/semgrep_interfaces|languages/.*/semgrep-.*|tests/semgrep-rules|^cli/src/semgrep/semgrep_interfaces"
 
 default_stages: [commit]
 
@@ -32,7 +35,7 @@ repos:
       - id: check-merge-conflict
       - id: check-shebang-scripts-are-executable
       - id: check-symlinks
-        exclude: "^(bin|test|libs/testo/.*test|libs/spacegrep/bin/.*)$"
+        exclude: "^(bin|test|libs/testo/.*test|src/spacegrep/bin/.*)$"
       - id: check-toml
       - id: check-vcs-permalinks
       - id: check-xml
@@ -44,7 +47,7 @@ repos:
       - id: end-of-file-fixer
         # Exclude generated files.
         # coupling: apply the same exclusions in semgrep-proprietary
-        exclude: "^\\.github/workflows/.+|semgrep\\.opam|.gitmodules|.dockerignore$"
+        exclude: "^\\.github/workflows/.+|semgrep\\.opam|opam-lockfiles/.+|.gitmodules|.dockerignore$"
       - id: fix-byte-order-marker
       - id: fix-encoding-pragma
         args: [--remove]
@@ -91,8 +94,8 @@ repos:
     rev: v1.7.1 # PLEASE DO NOT CHANGE [see NOTE "Python"]
     hooks:
       - id: mypy
-        exclude: ^cli/tests/.+$|^setup.py$|^cli/src/semdep/external/packaging/.*$|^cli/src/semgrep/console_scripts/.*$|^cli/src/semdep/external/parsy/.*$|^cli/scripts/.*$|^scripts/.+$|^stats/parsing-stats/.+$|^perf/.+$|^js/language_server/targets/.+$
-        args: [--config, mypy.ini, --show-error-codes, --python-version, "3.11"]
+        exclude: ^cli/tests/.+$|^setup.py$|^cli/src/semdep/external/packaging/.*$|^cli/src/semgrep/console_scripts/.*$|^cli/src/semdep/external/parsy/.*$|^cli/scripts/.*$|^scripts/.+$|^perf/.+$|^js/language_server/targets/.+$|^.github/workflows/libs/bump-uses.py$|^libs/ocaml-tree-sitter-semgrep/scripts/test_.*\.py$
+        args: [--config, mypy.ini, --show-error-codes, --scripts-are-modules, --python-version, "3.11"]
         additional_dependencies: &mypy-deps
           # versions must be manually synced:
           # - cli/setup.py lists dependencies
@@ -100,31 +103,41 @@ repos:
           # - .pre-commit-config.yaml's mypy hooks also list type hint packages
 
           # some packages ship with type definitions
-          - attrs~=21.3
-          # click 8.1.4's new decorator type hints don't seem to work well
-          - click<8.1.4
-          - defusedxml~=0.7.1
+          - attrs>=21.3
+          - click~=8.4.2
           - packaging~=21.0
+          - pydantic~=2.12.2
           - requests~=2.22
           - rich~=13.5.2
           - tomli~=2.0.1
-          - opentelemetry-api~=1.25.0
-          - opentelemetry-sdk~=1.25.0
-          - opentelemetry-exporter-otlp-proto-http~=1.25.0
-          - opentelemetry-instrumentation-requests~=0.46b0
+          - opentelemetry-api~=1.37.0
+          - opentelemetry-sdk~=1.37.0
+          - opentelemetry-exporter-otlp-proto-http~=1.37.0
+          - opentelemetry-instrumentation-requests~=0.58b0
+          - opentelemetry-instrumentation-threading~=0.58b0
           # other packages have separate typings published
           - types-colorama~=0.4.0
           - types-freezegun
           - types-Jinja2
-          - types-jsonschema~=4.6.0
+          - types-jsonschema~=4.25.1.20251009
           - types-python-dateutil
           - types-requests
           - types-setuptools
+          # for tests only:
+          # (ideally, these additional items would go only in the
+          # 'additional_properties' field of 'mypy-test' below but YAML
+          # doesn't provide a trick that allows us to extend an array
+          # from a reference such as *mypy-deps; and using Jsonnet would be
+          # overkill):
+          - appdirs
+          - pytest
+          - pytest-mock
+          - mcp==1.29.0
       - id: mypy
         alias: mypy-test
         name: mypy (test files)
         files: ^cli/tests/.+$
-        args: [--config, mypy-tests.ini, --show-error-codes]
+        args: [--config, mypy-tests.ini, --show-error-codes, --python-version, "3.11"]
         additional_dependencies: *mypy-deps
 
   - repo: https://github.com/PyCQA/flake8
@@ -144,6 +157,11 @@ repos:
         types: [file]  # override `types: [json]`
         files: \.(json|yml|yaml|md)$
 
+  # Reformat jsonnet
+  - repo: https://github.com/google/go-jsonnet
+    rev: v0.20.0
+    hooks:
+      - id: jsonnet-format
   # ----------------------------------------------------------
   # Extra hooks using additional_dependencies
   # ----------------------------------------------------------
@@ -179,8 +197,8 @@ repos:
         types:
           - dockerfile
         exclude: "^scripts/release/linuxbrew[.]Dockerfile$"
-        entry: hadolint/hadolint:v2.8.0-alpine hadolint
-        args: ["--ignore", "DL3008", "--ignore", "DL3018"]
+        entry: hadolint/hadolint:v2.14.0-alpine hadolint
+        args: ["--ignore", "DL3008", "--ignore", "DL3018", "--ignore", "DL3059"]
 
   # ----------------------------------------------------------
   # Local hooks
@@ -196,6 +214,15 @@ repos:
         entry: ./scripts/lint-ocaml
         language: script
         files: "\\.mli?$"
+
+  - repo: local
+    hooks:
+      - id: check-uv-lock
+        name: Check cli/uv.lock is up to date
+        entry: uv lock --check --project cli
+        language: system
+        files: "^cli/(pyproject\\.toml|uv\\.lock)$"
+        pass_filenames: false
 
   # ----------------------------------------------------------
   # Dogfood! running semgrep in pre-commit!
@@ -255,7 +282,7 @@ repos:
   # Use a fixed version of p/python and p/bandit to not get new findings
   # We run `semgrep ci` for our main rulesets
   - repo: https://github.com/semgrep/pre-commit
-    rev: v1.93.0
+    rev: v1.171.0
     hooks:
       - id: semgrep
         name: Semgrep Python
@@ -278,7 +305,7 @@ repos:
     # the 'language: docker_image', the 'entry:' field will then specify
     # which version to use. In the case below, we're actually running
     # returntocorp/semgrep:develop if you look at .pre-commit-hooks.yaml
-    rev: v1.93.0
+    rev: v1.171.0
     hooks:
       - id: semgrep-docker-develop
         name: Semgrep Develop Python

@@ -1,3 +1,15 @@
+(*
+   Copyright (c) 2024-2025 Semgrep Inc.
+
+   This library is free software; you can redistribute it and/or
+   modify it under the terms of the GNU Lesser General Public License
+   version 2.1 as published by the Free Software Foundation.
+
+   This library is distributed in the hope that it will be useful, but
+   WITHOUT ANY WARRANTY; without even the implied warranty of
+   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the file
+   LICENSE for more details.
+*)
 open Fpath_.Operators
 
 let related_file_of_target ?polyglot_pattern_path ~ext file =
@@ -11,14 +23,14 @@ let related_file_of_target ?polyglot_pattern_path ~ext file =
     Error msg
   in
   let candidate1 = Filename_.filename_of_dbe (dirname, basename, ext) in
-  if Sys.file_exists candidate1 then Ok (Fpath.v candidate1)
+  if Sys_.file_exists candidate1 then Ok (Fpath.v candidate1)
   else
     match polyglot_pattern_path with
     | Some polyglot_pattern_path ->
         let candidate2 =
           Filename_.filename_of_dbe (!!polyglot_pattern_path, basename, ext)
         in
-        if Sys.file_exists candidate2 then Ok (Fpath.v candidate2) else fail ()
+        if Sys_.file_exists candidate2 then Ok (Fpath.v candidate2) else fail ()
     | _ -> fail ()
 
 (* Allows the semgrep-core test runner that we use to test matches to also test
@@ -43,7 +55,7 @@ let compare_fixes ?polyglot_pattern_path ~file matches =
     Result.map UFile.read_file expected_fixed_file
   in
   let processed_matches =
-    Autofix.produce_autofixes (List_.map Core_result.mk_processed_match matches)
+    Autofix.produce_autofixes (List.map Core_result.mk_processed_match matches)
   in
   match expected_fixed_text with
   (* if we have no fixes and no .fixed file, no problem *)
@@ -52,8 +64,8 @@ let compare_fixes ?polyglot_pattern_path ~file matches =
   | Ok expected_fixed_text ->
       let fixed_text =
         processed_matches
-        |> List_.filter_map (fun (m : Core_result.processed_match) ->
-               m.autofix_edit)
+        |> List.filter_map (fun (m : Core_result.processed_match) ->
+            m.autofix_edit)
         |> Autofix.apply_fixes_to_file_exn file
       in
       Alcotest.(check string) "applied autofixes" expected_fixed_text fixed_text

@@ -1,5 +1,17 @@
+(*
+   Copyright (c) 2023-2025 Semgrep Inc.
+
+   This library is free software; you can redistribute it and/or
+   modify it under the terms of the GNU Lesser General Public License
+   version 2.1 as published by the Free Software Foundation.
+
+   This library is distributed in the hope that it will be useful, but
+   WITHOUT ANY WARRANTY; without even the implied warranty of
+   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the file
+   LICENSE for more details.
+*)
 (* metavariable name (e.g., "$FOO") *)
-type mvar = Mvar.t [@@deriving show, eq, hash]
+type mvar = Mvar.t [@@deriving eq, hash, ord, sexp, show]
 
 (* metavariable content *)
 type mvalue =
@@ -33,13 +45,13 @@ type mvalue =
      bind arbitrary matches to metavariables.
   *)
   | Any of AST_generic.any
-[@@deriving show, eq]
+[@@deriving eq, ord, show]
 
 (* note that the mvalue acts as the value of the metavar and also
    as its concrete code "witness". You can get position information from it
    (if it is not Tok.Ab(stractPos)).
 *)
-type bindings = (mvar * mvalue) list [@@deriving show, eq]
+type bindings = (mvar * mvalue) list [@@deriving eq, ord, sexp, show]
 
 (* Mvalue equality reduces to equality on ASTs, which ignores the tokens
    and instead compares the structure. It may optionally include the ident

@@ -59,9 +59,9 @@ open Token_views_cpp
  *)
 
 (*****************************************************************************)
-(* Wrappers *)
+(* Logging *)
 (*****************************************************************************)
-let pr2, _pr2_once = Common2.mk_pr2_wrappers Flag.verbose_parsing
+let pr2 s = Printf.eprintf "%s" s
 
 (*****************************************************************************)
 (* Types *)
@@ -102,10 +102,10 @@ let (cpp_engine :
       Parser.token list) =
  fun env xs ->
   xs
-  |> List_.map (fun tok ->
-         match tok with
-         | TIdent (s, _i1) when List.mem_assoc s env -> Common2.assoc s env
-         | x -> [ x ])
+  |> List.map (fun tok ->
+      match tok with
+      | TIdent (s, _i1) when List.mem_assoc s env -> List.assoc s env
+      | x -> [ x ])
   |> List_.flatten
 
 (*
@@ -124,9 +124,9 @@ let apply_macro_defs defs xs =
     | PToken ({ t = TIdent (s, _i1); _ } as id)
       :: Parenthised (xxs, info_parens)
       :: xs
-      when Hashtbl.mem defs s ->
+      when Base.Hashtbl.mem defs s ->
         Hack.pr2_pp ("MACRO: found known macro = " ^ s);
-        (match Hashtbl.find defs s with
+        (match Hashtbl_.Base.find defs s with
         | Either.Left (), bodymacro ->
             pr2 ("macro without param used before parenthize, wierd: " ^ s);
             (* ex: PRINTP("NCR53C400 card%s detected\n" ANDP(((struct ... *)
@@ -136,10 +136,10 @@ let apply_macro_defs defs xs =
             if List.length params =|= List.length xxs then
               let xxs' =
                 xxs
-                |> List_.map (fun x ->
-                       tokens_of_paren_ordered x
-                       |> List_.map (fun x ->
-                              TH.visitor_info_of_tok Ast.make_expanded x.t))
+                |> List.map (fun x ->
+                    tokens_of_paren_ordered x
+                    |> List.map (fun x ->
+                        TH.visitor_info_of_tok Ast.make_expanded x.t))
               in
               id.new_tokens_before <-
                 cpp_engine (Common2.zip params xxs') bodymacro
@@ -154,9 +154,10 @@ let apply_macro_defs defs xs =
             |> iter_token_paren (Hack.set_as_comment Token_cpp.CppMacroExpanded);
             Hack.set_as_comment Token_cpp.CppMacroExpanded id);
         apply_macro_defs xs
-    | PToken ({ t = TIdent (s, _i1); _ } as id) :: xs when Hashtbl.mem defs s ->
+    | PToken ({ t = TIdent (s, _i1); _ } as id) :: xs
+      when Base.Hashtbl.mem defs s ->
         Hack.pr2_pp ("MACRO: found known macro = " ^ s);
-        (match Hashtbl.find defs s with
+        (match Hashtbl_.Base.find defs s with
         | Either.Right _params, _bodymacro ->
             pr2 ("macro with params but no parens found, wierd: " ^ s);
             (* dont apply the macro, perhaps a redefinition *)
@@ -193,33 +194,33 @@ let rec define_parse xs =
       let tokparams, _, xs =
         xs
         |> Common2.split_when (function
-             | TCPar _ -> true
-             | _ -> false)
+          | TCPar _ -> true
+          | _ -> false)
       in
       let body, _, xs =
         xs
         |> Common2.split_when (function
-             | TCommentNewline_DefineEndOfMacro _ -> true
-             | _ -> false)
+          | TCommentNewline_DefineEndOfMacro _ -> true
+          | _ -> false)
       in
       let params =
         tokparams
-        |> List_.filter_map (function
-             | TComma _ -> None
-             | TIdent (s, _) -> Some s
-             | x -> Common2.error_cant_have x)
+        |> List.filter_map (function
+          | TComma _ -> None
+          | TIdent (s, _) -> Some s
+          | x -> Common2.error_cant_have x)
       in
-      let body = body |> List_.map (TH.visitor_info_of_tok Ast.make_expanded) in
+      let body = body |> List.map (TH.visitor_info_of_tok Ast.make_expanded) in
       let def = (s, (Either.Right params, body)) in
       def :: define_parse xs
   | TDefine _i1 :: TIdent_Define (s, _i2) :: xs ->
       let body, _, xs =
         xs
         |> Common2.split_when (function
-             | TCommentNewline_DefineEndOfMacro _ -> true
-             | _ -> false)
+          | TCommentNewline_DefineEndOfMacro _ -> true
+          | _ -> false)
       in
-      let body = body |> List_.map (TH.visitor_info_of_tok Ast.make_expanded) in
+      let body = body |> List.map (TH.visitor_info_of_tok Ast.make_expanded) in
       let def = (s, (Either.Left (), body)) in
       def :: define_parse xs
   | TDefine _i1 :: _ -> raise Impossible

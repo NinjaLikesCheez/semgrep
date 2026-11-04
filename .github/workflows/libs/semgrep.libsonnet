@@ -3,204 +3,64 @@
 // ----------------------------------------------------------------------------
 // Helpers to be able to use 'gh' (and trigger PRs) from a workflow
 // ----------------------------------------------------------------------------
-// 'gh' is one of the github CLIs (another one is 'hub') and it allows
-// to make PRs (and other github stuff) from scripts (and from workflows).
 
-// From infra:
-// "We use the semgrep-ci bot as the auth. The custom (internally-developed)
-// docker image below is used to get a JWT, which is then used by git to
-// fetch the code. Using the built-in secrets.GITHUB_TOKEN won't allow for
-// downstream jobs to fire.
-// See https://docs.github.com/en/enterprise-cloud@latest/actions/using-workflows/triggering-a-workflow#triggering-a-workflow-from-a-workflow
-// for more information"
-//
-// TODO: where is stored/configured/built this semgrep-ci github App?
-// TODO: where is configured this docker://public.ecr.aws/... image below?
-// TODO: How is it built?
-// TODO: if a token is rotated, do we need to update this docker link?
-
+local uses = import './uses.libsonnet';
 local actions = import 'actions.libsonnet';
 local gha = import 'gha.libsonnet';
 
 local github_bot = {
-  get_token_steps: [
-   {
-    name: 'Get JWT for semgrep-ci GitHub App',
-    id: 'jwt',
-    uses: 'docker://public.ecr.aws/y9k7q4m1/devops/cicd:latest',
-    env: {
-      // This is the shortest expiration setting. It ensures that if an
-      // attacker got a hold of these credentials after the job runs,
-      // they're expired.
-      // TODO: how an attacker can access this credential?
-      EXPIRATION: 600,  // in seconds
-      ISSUER: '${{ secrets.SEMGREP_CI_APP_ID }}',
-      PRIVATE_KEY: '${{ secrets.SEMGREP_CI_APP_KEY }}',
-    },
-  },
-  // We are using the standard github-recommended method for short-live
-  // authentification.
-  // See https://docs.github.com/en/developers/apps/building-github-apps/authenticating-with-github-apps#authenticating-as-a-github-app
-  {
+  // If `repositories` is null, the token is scoped to all repos in the
+  // `semgrep` org that the app is installed on. Pass a list of repo names
+  // (e.g. ['semgrep', 'semgrep-proprietary']) to scope the token down.
+  get_token_step(repositories=null): {
     name: 'Get token for semgrep-ci GitHub App',
     id: 'token',
-    run: |||
-      TOKEN="$(curl -X POST \
-      -H "Authorization: Bearer ${{ steps.jwt.outputs.jwt }}" \
-      -H "Accept: application/vnd.github.v3+json" \
-      "https://api.github.com/app/installations/${{ secrets.SEMGREP_CI_APP_INSTALLATION_ID }}/access_tokens" | \
-      jq -r .token)"
-      echo "::add-mask::$TOKEN"
-      echo "token=$TOKEN" >> $GITHUB_OUTPUT
-    |||,
-  }],
-  // Token computed in get_token_steps to be used in the caller
-  token_ref: '${{ steps.token.outputs.token }}',
-};
-
-// ----------------------------------------------------------------------------
-// OPAM caching
-// ----------------------------------------------------------------------------
-
-// The step below uses the actions/cache@v3 GHA extension to cache
-// the ~/.opam directory which speedups a lot the "Install opam dependencies"
-// steps in our workflows, especially the one where we can't use ocaml-layer.
-// See also actions.libsonnet for other GHA caching helpers.
-// Note that actions/setup-ocaml@v2 is using a similar technique.
-//
-// For example, on GHA-hosted macos runners, without caching the osx workflow
-// would run very for 35min instead of 10min with caching.
-// The M1 build runs on fast self-hosted runners where caching does not seem
-// to be necessary.
-// In Linux, we use a special container (returntocorp/ocaml:alpine-xxx) to
-// bring in the required dependencies, which makes 'opam switch create'
-// and 'opam install deps' unnecessary and almost a noop.
-// Still, we are gradually getting rid of ocaml-layer and replace it with
-// this more general caching mechanism (or switch to setup-ocaml@v2).
-//
-// alt:
-//  - use a self-hosted runner where we can save the content of ~/.opam between
-//    runs and do whatever we want. The problem is that the build is then
-//    not "hermetic", and we ran in many issues such as the disk of the
-//    self-hosted runner being full, or some stuff being left from other CI
-//    runs (such as a semgrep install) entering in conflicts with some of our
-//    build steps. This also requires some devops work to create and maintain
-//    those pools of self-hosted runners.
-//  - use a GHA-hosted runner which is nice because we don't have to do
-//    anything, and the build are guaranteed to be hermetic. The only problem
-//    originally was that it was slower, and for unknown reasons ocamlc was
-//    not working well on those macos-12 GHA runners, but caching the ~/.opam
-//    with actions/cache@v3 seems to solve the speed issue (and maybe ocamlc
-//    works now well under macos-12).
-//  - use a technique similar to what we do for Linux with our special
-//    ocaml-layer container, but can this be done for macos?
-//  - use setup-ocaml@v2 which internally uses a GHA cache too, but this
-//    cache just the downloaded package; it still install/compiles the packages
-//    each time.
-//
-// See also https://www.notion.so/semgrep/Caching-the-Opam-Environment-5d7e594203884d289acdac53713fb39f
-// for more information.
-
-// Note that this action does cache read and cache write.
-// See https://docs.github.com/en/actions/using-workflows/caching-dependencies-to-speed-up-workflows
-// for more information on GHA caching.
-//
-// See also https://github.com/organizations/semgrep/settings/actions/caches
-// (requires admin access to github org) to see the GHA cache settings
-// and https://github.com/semgrep/semgrep/actions/caches?query=sort%3Asize-desc
-// to see the actual cache files created and used.
-//
-// Note that from the doc:
-// "Workflow runs cannot restore caches created for child branches or sibling
-//  branches. For example, a cache created for the child feature-b branch would
-//  not be accessible to a workflow run triggered on the parent main branch.
-//  Similarly, a cache created for the feature-a branch with the base main
-//  would not be accessible to its sibling feature-c branch with the base main."
-// This explains why you can see multiple cache entries with the exact same
-// cache key name; it's because they are from different branches.
-
-// Note that this caching works and speedup things because of the way OPAM works
-// and osx-setup-for-release.sh is written. Indeed, this script checks
-// if the opam switch is already created, and if a package is already
-// installed (in ~/.opam), then opam install on this package will do nothing.
-
-// Sometimes the cache key is not precise enough and some external changes
-// do not trigger cache invalidation but should. For example, we use
-// hashFiles('semgrep.opam') in many workflows for the cache key, but
-// semgrep.opam is not a lock file and some updates in the opam repo might
-// trigger the recompilation/installation of packages which would slow
-// down the workflow, even in the presence of the GHA cache, because this
-// cache is not up to date with the opam repo. Same for changes such as
-// an upgrade from opam 2.1 to 2.2 which is not captured in the cache key
-// but which should invalidate the cache.
-// This bump_cache is one way to cope with the limitations of our cache keys.
-// Moreover, GHA itself does not have a big "delete all cache" button like
-// in depot.dev so this bump_cache can act as one too.
-local bump_cache = 1;
-
-local cache_opam = {
-  step(key, path="~/.opam"): {
-    name: 'Set GHA cache for OPAM in ' + path,
-    uses: 'actions/cache@v3',
-    env: {
-      SEGMENT_DOWNLOAD_TIMEOUT_MINS: 2,
-    },
+    uses: uses.actions.create_github_app_token,
     with: {
-      path: path,
-      key: '${{ runner.os }}-${{ runner.arch }}-v%d-opam-%s' % [bump_cache, key],
-    },
-   },
-   // to be used with workflow_dispatch and workflow_call in the workflow
-  inputs(required): {
-    inputs: {
-    'use-cache': {
-      description: 'Use Opam Cache - uncheck the box to disable use of the opam cache, meaning a long-running but completely from-scratch build.',
-      required: required,
-      type: 'boolean',
-      default: true,
-    },
-  }
+      'client-id': '${{ secrets.SEMGREP_CI_CLIENT_ID }}',
+      'private-key': '${{ secrets.SEMGREP_CI_APP_KEY }}',
+      owner: 'semgrep',
+    } + (if repositories != null
+         then { repositories: std.join(', ', repositories) }
+         else {}),
   },
-  if_cache_inputs: {
-    'if': '${{ inputs.use-cache}}'
-  },
+  // Token computed in get_token_step to be used in the caller
+  token_ref: '${{ steps.token.outputs.token }}',
 };
 
 // ----------------------------------------------------------------------------
 // Containers
 // ----------------------------------------------------------------------------
 
+// default one
+local opam_switch = 'ocaml-variants.5.4.0+options,ocaml-option-flambda';
+// also default but needed by another nameso we can use it as a function default arg
+local opam_switch_default = opam_switch;
 local containers = {
   ocaml_alpine: {
     // used in the build-test-osx-xxx jobs but ideally we should get rid
     // of it and rely on opam.lock for caching issues
-    opam_switch: '4.14.0',
-    job: {
+    opam_switch: opam_switch,
+    job(steps): {
       'runs-on': 'ubuntu-latest',
-      container: 'returntocorp/ocaml:alpine-2024-01-18',
+      // coupling: if you change this you must change the dockerfile alpine
+      // version
+      container: 'alpine:3.23',
       // We need this hack because GHA tampers with the HOME in container
       // and this does not play well with 'opam' installed in /root
       env: {
         HOME: '/root',
       },
-     },
+      steps:
+        [
+          {
+            name: 'setup alpine',
+            // needed for ocaml deps
+            run: 'apk add --no-cache git git-lfs bash curl build-base make bubblewrap rsync',
+          },
+        ] + steps,
+    },
   },
-  // ocaml-layer builds an image based on Alpine and another one based on
-  // Ubuntu.
-  // Alpine is necessary in practice for static linking (especially for C++
-  // libraries). Ubuntu is an alternative Linux distribution people may be
-  // more familiar with. It's been cheap to maintain both so far but we could
-  // decide to keep just one if it makes things simpler.
-  ocaml_ubuntu: {
-    opam_switch: '4.14.0',
-    job: {
-      'runs-on': 'ubuntu-latest',
-      container: 'returntocorp/ocaml:ubuntu-2024-01-18',
-      env: {
-        HOME: '/root',
-      },
-      },
-   },
 };
 
 
@@ -210,8 +70,10 @@ local escapeStringJson = function(str)
   std.lstripChars(
     std.rstripChars(
       std.escapeStringJson(str),
-      '"'),
-    '"');
+      '"'
+    ),
+    '"'
+  );
 
 // ----------------------------------------------------------------------------
 // Slack helpers
@@ -227,6 +89,16 @@ local escapeStringJson = function(str)
 //           SLACK_BOT_TOKEN: ${{ secrets.R2C_SLACK_TOKEN }}
 // (but this need R2C_SLACK_TOKEN which was not added to the public semgrep repo)
 
+// Double escape quotes because they are nested in two layers of double quotes. Which still allows string interpolation at the bash level.
+local curl_notify(message) = |||
+  curl --request POST \
+   --url  "$NOTIFICATIONS_URL"  \
+   --header 'content-type: application/json' \
+   --data "{
+     \"text\": \"%s\"
+   }"
+||| % escapeStringJson(escapeStringJson(message));
+
 local slack = {
   // This will post on Slack on the #semgrep-cli-release channel from a
   // 'gha-notification' user.
@@ -235,55 +107,108 @@ local slack = {
   // #semgrep-cli-release at
   // https://semgrepinc.slack.com/apps/A0F7XDUAZ-incoming-webhooks?tab=settings&next_id=0
 
-  // Double escape quotes because they are nested in two layers of double quotes. Which still allows string interpolation at the bash level.
-  curl_notify(message): |||
-      curl --request POST \
-       --url  ${{ secrets.NOTIFICATIONS_URL }} \
-       --header 'content-type: application/json' \
-       --data "{
-         \"text\": \"%s\"
-       }"
-  ||| % escapeStringJson(escapeStringJson(message)),
-
-  notify_failure_job(message): {
-   'runs-on': 'ubuntu-20.04',
-   'if': 'failure()',
-    steps: [
-      {
-        run: slack.curl_notify(message),
-      },
-     ],
+  notify_success_job(message, env={}):
+    (if env == {} then {} else { env: env }) +
+    {
+      'runs-on': 'ubuntu-22.04',
+      'if': 'success()',
+      steps: [
+        {
+          env: { NOTIFICATIONS_URL: '${{ secrets.NOTIFICATIONS_URL }}' },
+          run: curl_notify(message),
+        },
+      ],
+    },
+  notify_failure_job(message, env={}):
+    (if env == {} then {} else { env: env }) +
+    {
+      'runs-on': 'ubuntu-22.04',
+      'if': 'failure()',
+      steps: [
+        {
+          env: { NOTIFICATIONS_URL: '${{ secrets.NOTIFICATIONS_URL}}' },
+          run: curl_notify(message),
+        },
+      ],
     },
 };
 
 
-// default one
-// coupling: with containers above
-local opam_switch = '4.14.0';
+// This is the version of the cache we use below. If you need to invalidate it
+// for some reason then bump this.
+//
+// NOTE: When the compiler fork SHA is bumped, it's very common that you will
+// observe failures in our pipelines that use setup-ocaml's cache.
+//
+// coupling: if you modify the compiler pin sha you will need to bump this
+// prefix (or similar) to invalidate the cache
+local opam_cache_version = 'v8';
+
+// We pin the upstream opam-repository to a commit rather than
+// tracking its HEAD.
+// coupling: bump opam_cache_version above when changing this so the cached
+// opam root (which embeds the repository) is invalidated.
+// coupling: keep this in sync with OPAM_REPOSITORY_PIN in OSS/Makefile.
+local opam_repository_pin = '922f67e068446a8d8e809a40251a259bd0549552';
 
 // this must be done after the checkout as opam installs itself
 // locally in the project folder (/home/runner/work/semgrep/semgrep/_opam)
 // coupling: default is above opam_switch
-local opam_setup = function(opam_switch="4.14.0") {
-      uses: 'ocaml/setup-ocaml@v3',
-      with: {
-        'ocaml-compiler': opam_switch,
-	'opam-pin': false,
-      },
-    };
-
-// We can't use ubuntu-latest (currently 24.04) just yet until
-// https://github.com/ocaml/setup-ocaml/issues/872
-// is fixed.
-local stable_ubuntu_version_for_setup_ocaml = 'ubuntu-22.04';
+//
+// 'checkout_path' is the path the repository was checked out into, relative to
+// the workspace root (e.g. 'semgrep-proprietary' when a workflow checks the
+// repo out into a subdir). It must match the 'path' passed to the checkout
+// step, otherwise the lockfile globs below won't match and the cache prefix
+// silently collapses to a static value (poisoning the cache across switches).
+// Defaults to '' for the common case of checking out at the workspace root.
+//
+// 'cache_profile' names the installed dependency set (format, grammar,
+// semgrep, interfaces, lockfiles). It is part of the opam cache key so
+// those sets never share one switch.
+local opam_setup = function(opam_switch=opam_switch_default, checkout_path='', cache_profile='semgrep') {
+  // normalize to a glob prefix: '' -> '', 'foo' -> 'foo/'
+  local p = if checkout_path == '' then '' else checkout_path + '/',
+  uses: uses.semgrep.setup_ocaml,
+  // OPAM 2.5.0 repository setup failed while traversing the fetched Git tree:
+  // "lstat" failed on /home/runner/.opam/repo/default/.git/objects/maintenance.lock: No such file or directory
+  // [ERROR] Initial repository fetch failed
+  // Disable fetch-triggered Git maintenance so its temporary lock cannot disappear
+  // during traversal. Scope the setting to this action and its subprocesses.
+  env: {
+    GIT_CONFIG_COUNT: '1',
+    GIT_CONFIG_KEY_0: 'maintenance.auto',
+    GIT_CONFIG_VALUE_0: 'false',
+  },
+  with: {
+    'ocaml-compiler': opam_switch,
+    'opam-pin': false,
+    // Pin the opam-repository to a known-good commit for reproducible
+    // resolution (see opam_repository_pin above).
+    'opam-repositories': |||
+      default: https://github.com/ocaml/opam-repository.git#%s
+    ||| % opam_repository_pin,
+    // Save the cache post run instead of after installing the compiler
+    'save-opam-post-run': true,
+    // Different installed dependency sets must never share an immutable cache.
+    'cache-prefix': '%s-%s-${{ hashFiles(%s) }}' % [
+      opam_cache_version,
+      cache_profile,
+      std.join(', ', ["'" + p + tree + file + "'" for tree in ['', 'OSS/'] for file in [
+        'opam-lockfiles/*.locked',
+        '*.opam',
+        'dev/required.opam',
+        'libs/ocaml-tree-sitter-semgrep/core/tree-sitter.opam',
+        'cli/src/semgrep/semgrep_interfaces/semgrep-interfaces.opam',
+      ]]),
+    ],
+  },
+};
 
 local osemgrep_test_steps_after_checkout = [
-  gha.git_safedir,
   {
     name: 'Build semgrep-core',
     run: |||
       eval $(opam env)
-      make install-deps-ALPINE
       make install-deps
       make core
     |||,
@@ -295,17 +220,7 @@ local osemgrep_test_steps_after_checkout = [
       make copy-core-for-cli
     |||,
   },
-   // For '--ignore-installed distlib' below see
-   // https://stackoverflow.com/questions/63515454/why-does-pip3-install-pipenv-give-error-error-cannot-uninstall-distlib
-  //
-  {
-    name: 'Install Python dependencies',
-    run: |||
-      apk add --no-cache python3
-      pip install --no-cache-dir --ignore-installed distlib pipenv==%s
-      (cd cli; pipenv install --dev)
-    ||| % actions.pipenv_version,
-  },
+  actions.setup_python_step(),
   {
     name: 'Run pytest for osemgrep known passing tests',
     'working-directory': 'cli',
@@ -318,37 +233,172 @@ local osemgrep_test_steps_after_checkout = [
 
 local setup_nix_step = [
   {
-    name: "Set up Nix",
-    uses: "DeterminateSystems/nix-installer-action@main",
+    name: 'Set up Nix',
+    uses: uses.DeterminateSystems.nix_installer_action,
     with: {
-      // need to pin until
-      // https://github.com/DeterminateSystems/nix-installer-action/issues/133
-      // is fixed
-      "source-tag": "v0.32.3",
-        // pysemgrep and osemgrep have networking tests that rely on the
-        // actual internet (i.e. semgrep.dev). When sandbox=false nix builds
-        // everything fine, but all networking tests fail. So we set sandbox
-        // to false here so networking tests succeed
-        //
-        // TODO: disable networking tests for nix? that would be the nix way
-        // of doing things
+      // pin for more stability
+      // this is just the version of
+      // https://github.com/DeterminateSystems/nix-installer NOT the nix version
+      // itself
+      'source-tag': 'v3.4.2',
+      // pysemgrep and osemgrep have networking tests that rely on the
+      // actual internet (i.e. semgrep.dev). When sandbox=false nix builds
+      // everything fine, but all networking tests fail. So we set sandbox
+      // to false here so networking tests succeed
+      //
+      // TODO: disable networking tests for nix? that would be the nix way
+      // of doing things
 
-        // extra substituters and public keys use https://app.cachix.org/cache/semgrep
-        // to cache the build dependencies!
-        "extra-conf": "sandbox = false",
+      // extra substituters and public keys use https://app.cachix.org/cache/semgrep
+      // to cache the build dependencies!
+      'extra-conf': 'sandbox = false',
     },
+  },
+  {
+    name: 'Print nix version',
+    run: 'nix --version',
   },
   // This will automatically install cachix and upload to cachix
   {
-      name: "Install Cachix",
-      uses: "cachix/cachix-action@v14",
-      with: {
-          name: "semgrep",
-          authToken: "${{ secrets.CACHIX_AUTH_TOKEN }}",
-      },
-  }
+    name: 'Install Cachix',
+    uses: uses.cachix.cachix_action,
+    'continue-on-error': true,
+    with: {
+      name: 'semgrep',
+      authToken: '${{ secrets.CACHIX_AUTH_TOKEN }}',
+    },
+  },
 ];
 
+local build_bundle_steps =
+  [
+    {
+      name: 'Build osx bundle',
+      run: './scripts/bundle-with-libs.sh && ls -a bundle',
+    },
+  ];
+
+// brew fails re-taking the openssl@3 lock when linking openssl@4 in one process.
+// Run before any `brew install`, incl. opam depexts (`make install-deps`).
+local brew_unlink_openssl_step = {
+  name: 'Unlink openssl@3 (brew lock workaround)',
+  run: 'brew unlink openssl@3 || true',
+};
+
+local build_test_steps(opam_switch=opam_switch_default, name='semgrep-core', build_bundle=false, extra_env={}) =
+  [
+    opam_setup(opam_switch),
+    {
+      name: 'Install dependencies',
+      run: 'opam exec -- make install-deps',
+    },
+    {
+      name: 'Build %s' % name,
+      run: 'opam exec -- make',
+    }
+    + (if extra_env != {} then { env: extra_env } else {}),
+  ] + (if build_bundle then build_bundle_steps else [])
+  + [
+    {
+      name: 'Test %s' % name,
+      run: 'opam exec -- make test',
+    },
+  ];
+
+local is_windows_arch(arch) = std.findSubstr('windows', arch) != [];
+local bin_ext(arch) = if is_windows_arch(arch) then '.exe' else '';
+local wheel_name(arch, pro=false) = 'wheel-%s%s' % [arch, if pro then '-pro' else ''];
+
+//TODO always want to include semgrep pro ...
+local build_wheel_steps(arch, copy_semgrep_pro=false, root='.') =
+  local in_root(p) = if root == '.' then p else '%s/%s' % [root, p];
+  local bin_dir = in_root('cli/src/semgrep/bin');
+  local run_in_root(step) = if root == '.' then step else step { 'working-directory': root };
+  [
+    actions.setup_python_step(),
+  ] +
+  (if !copy_semgrep_pro then [{
+     name: 'Remove pro binary',
+     run: '(rm artifacts/semgrep-core-proprietary%s && rm artifacts/pro-installed-by.txt) || true' % bin_ext(arch),
+   }] else []) +
+  // actions/download-artifact does not preserve the executable bit (the
+  // tar-based flow we replaced did), so restore it before the binary is
+  // executed or packed into the wheel.
+  (if is_windows_arch(arch) then [] else [{
+     name: 'Restore executable bit on artifacts',
+     run: 'chmod +x artifacts/semgrep-core*',
+   }]) +
+  [
+    {
+      name: 'Copy artifacts to wheel',
+      run: 'cp -LR artifacts/* %s' % bin_dir,
+    },
+    {
+      name: 'Clean up old artifacts',
+      run: 'rm -rf artifacts',
+    },
+  ] +
+  (if copy_semgrep_pro then [{
+     name: 'Create pro-installed-by.txt',
+     run: 'test -f %(bin)s/pro-installed-by.txt || %(bin)s/semgrep-core-proprietary%(ext)s -pro_version > %(bin)s/pro-installed-by.txt' % { bin: bin_dir, ext: bin_ext(arch) },
+   }] else []) +
+  [
+    run_in_root({
+      name: 'Build wheel',
+      run: './scripts/build-wheels.sh',
+    }),
+    actions.upload_artifact_step(wheel_name(arch, pro=copy_semgrep_pro), in_root('cli/dist')),
+  ];
+
+// Only retags the SMS image, we have to do this via ecr
+local retag_sms_docker_image_step(version, tag, dry_run=false) = {
+  name: 'Retag SMS docker image from %s to %s' % [version, tag],
+  env: {
+    GITHUB_TOKEN: github_bot.token_ref,
+    SEMGREP_VERSION: version,
+    SEMGREP_TAG: tag,
+    DRY_RUN: dry_run,
+  },
+  // TODO Factor out gh workflow run XYZ
+  run: |||
+    # append dry-run to the tag if needed
+    if [ "$DRY_RUN" == "true" ]; then
+      SEMGREP_TAG="${SEMGREP_TAG}-dry-run"
+    fi
+    echo "Tagging SMS docker image semgrep-app/zcs-agent from $SEMGREP_VERSION to $SEMGREP_TAG"
+    gh workflow run tag-sms-image.yml --repo semgrep/semgrep-app --raw-field version="$SEMGREP_VERSION" --raw-field tag="$SEMGREP_TAG"
+  |||,
+};
+
+local trigger_build_sms_docker_image_step(tag, use_nightly_repo='false') = {
+  name: 'Trigger build SMS docker image from %s' % tag,
+  env: {
+    GITHUB_TOKEN: github_bot.token_ref,
+    SEMGREP_TAG: tag,
+  },
+  // TODO Factor out gh workflow run XYZ with above
+  run: 'gh workflow run build-sms-image.yml --repo semgrep/semgrep-app --raw-field use_nightly_repo=%s --raw-field version="$SEMGREP_TAG"' % use_nightly_repo,
+};
+
+local test_wheel_steps(arch, copy_semgrep_pro=false) = [
+  // caching is hard and why complicate things
+  actions.setup_python_step(cache=false),
+  actions.download_artifact_step(wheel_name(arch, pro=copy_semgrep_pro), path='dist'),
+  {
+    name: 'install package',
+    run: 'uv venv && uv pip install dist/*.whl',
+  },
+  {
+    run: 'uv run semgrep --version',
+  },
+  {
+    name: 'e2e semgrep-core test',
+    run: "echo '1 == 1' | uv run semgrep -l python -e '$X == $X' --strict -",
+  },
+] + (if copy_semgrep_pro then [{
+       name: 'Verify pro engine',
+       run: 'uv run semgrep --pro --version',
+     }] else []);
 // ----------------------------------------------------------------------------
 // Entry point
 // ----------------------------------------------------------------------------
@@ -362,31 +412,43 @@ local setup_nix_step = [
   },
 
   aws_credentials_step(role, session_name): {
-      name: 'Configure AWS credentials for %s' % role,
-      uses: 'aws-actions/configure-aws-credentials@v4',
-      with: {
-        // This seems to be a semgrep specific magic number
-        'role-to-assume': 'arn:aws:iam::338683922796:role/%s' % role,
-        'role-duration-seconds': 900,
-        'role-session-name': session_name,
-        'aws-region': 'us-west-2',
-      },
+    name: 'Configure AWS credentials for %s' % role,
+    uses: uses.aws_actions.configure_aws_credentials,
+    with: {
+      // This seems to be a semgrep specific magic number
+      'role-to-assume': 'arn:aws:iam::338683922796:role/%s' % role,
+      'role-duration-seconds': 900,
+      'role-session-name': session_name,
+      'aws-region': 'us-west-2',
     },
+  },
   // See https://depot.dev/orgs/9ks3jwp44z/projects/fhmxj6w9z8/settings
   depot_project_id: 'fhmxj6w9z8',
   opam_switch: opam_switch,
   opam_setup: opam_setup,
+  build_test_steps: build_test_steps,
+  brew_unlink_openssl_step: brew_unlink_openssl_step,
+  build_wheel_steps: build_wheel_steps,
+  test_wheel_steps: test_wheel_steps,
+  retag_sms_docker_image_step: retag_sms_docker_image_step,
+  trigger_build_sms_docker_image_step: trigger_build_sms_docker_image_step,
+  wheel_name: wheel_name,
   // coupling: cli/setup.py, the matrix in run-cli-tests.libsonnet,
+  // coupling: if you change this field, also specify a specific patch version
+  // for the default_python_patch_version field below!
   // build-test-manylinux-x86.jsonnet in pro, tests.jsonnet in OSS
   // TODO? could switch to higher like 3.11
-  default_python_version: '3.9',
+  default_python_version: '3.10',
+  // this is the patch version, the last part of the version string
+  // this is important when we need to know the specific version
+  // to install, e.g. `3.10.5`, which we will create from this field
+  // and the `default_python_version` field
+  default_python_patch_version: '5',
+  python_version: '3.12',
   containers: containers,
 
   github_bot: github_bot,
-  cache_opam: cache_opam,
   slack: slack,
-
-  stable_ubuntu_version_for_setup_ocaml: stable_ubuntu_version_for_setup_ocaml,
 
   // Reusable sequences of test steps
   osemgrep_test_steps_after_checkout: osemgrep_test_steps_after_checkout,

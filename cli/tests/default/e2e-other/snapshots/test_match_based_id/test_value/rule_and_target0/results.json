@@ -1,4 +1,5 @@
 {
+  "engine_requested": "OSS",
   "errors": [],
   "interfile_languages_used": [],
   "paths": {
@@ -6,6 +7,7 @@
       "targets/basic/stupid.py"
     ]
   },
+  "profiling_results": [],
   "results": [
     {
       "check_id": "rules.eqeq-is-bad",
@@ -51,5 +53,6 @@
     }
   ],
   "skipped_rules": [],
+  "time": "<masked in tests>",
   "version": "0.42"
 }

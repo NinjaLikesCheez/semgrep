@@ -189,7 +189,7 @@ let tokens input_source =
       | Lexer_js.ST_IN_BACKQUOTE -> Lexer_js.backquote lexbuf
     in
     if not (TH.is_comment tok) then
-      Lexer_js._last_non_whitespace_like_token := Some tok;
+      Domain.DLS.set Lexer_js._last_non_whitespace_like_token (Some tok);
     tok
   in
   Parsing_helpers.tokenize_all_and_adjust_pos input_source token
@@ -219,7 +219,7 @@ let parse2 opt_timeout (filename : Fpath.t) =
         (* -------------------------------------------------- *)
         (* Call parser *)
         (* -------------------------------------------------- *)
-        Profiling.profile_code "Parser_js.module_item" (fun () ->
+        Profiling.measure "Parser_js.module_item" (fun () ->
             Parser_js.module_item_or_eof lexer lexbuf_fake)
       in
       (* this seems optional *)
@@ -236,7 +236,7 @@ let parse2 opt_timeout (filename : Fpath.t) =
         (* try Automatic Semicolon Insertion *)
         match asi_opportunity charpos last_charpos_error cur tr with
         | None ->
-            if !Flag.show_parsing_error then
+            if Hook.get Flag.show_parsing_error then
               LogLib.err (fun m -> m "parse error \n = %s" (error_msg_tok cur));
             Right cur
         | Some (passed_before, passed_offending, passed_after) ->
@@ -269,7 +269,7 @@ let parse2 opt_timeout (filename : Fpath.t) =
         x :: aux tr
     | Either.Right err_tok ->
         let max_line = UFile.cat filename |> List.length in
-        (if !Flag.show_parsing_error then
+        (if Hook.get Flag.show_parsing_error then
            let filelines = UFile.cat_array filename in
            let cur = tr.Parsing_helpers.current in
            let line_error = TH.line_of_tok cur in
@@ -278,7 +278,7 @@ let parse2 opt_timeout (filename : Fpath.t) =
                  (Parsing_helpers.show_parse_error_line line_error
                     (line_start, min max_line (line_error + 10))
                     filelines)));
-        if !Flag.error_recovery then (
+        if Hook.get Flag.error_recovery then (
           (* todo? try to recover? call 'aux tr'? but then can be really slow*)
           (* TODO: count a bad line twice? use Hashtbl.length tech instead *)
           stat.PS.error_line_count <-
@@ -288,12 +288,12 @@ let parse2 opt_timeout (filename : Fpath.t) =
   in
   let items =
     match
-      Time_limit.set_timeout_opt ~name:"Parse_js.parse" opt_timeout (fun () ->
-          aux tr)
+      Time_limit.set_timeout_opt ~sigalrm:true ~name:"Parse_js.parse"
+        opt_timeout (fun () -> aux tr)
     with
     | Some res -> res
     | None ->
-        if !Flag.show_parsing_error then
+        if Hook.get Flag.show_parsing_error then
           Log.err (fun m -> m "TIMEOUT on %s" !!filename);
         stat.PS.error_line_count <- stat.PS.total_line_count;
         stat.PS.have_timeout <- true;
@@ -302,14 +302,14 @@ let parse2 opt_timeout (filename : Fpath.t) =
   { Parsing_result.ast = items; tokens = toks; stat }
 
 let parse ?timeout a =
-  Profiling.profile_code "Parse_js.parse" (fun () -> parse2 timeout a)
+  Profiling.measure "Parse_js.parse" (fun () -> parse2 timeout a)
 
 let parse_program file =
   let res = parse file in
   res.Parsing_result.ast
 
-let program_of_string (caps : < Cap.tmp >) (w : string) : Ast.a_program =
-  CapTmp.with_temp_file caps#tmp ~contents:w ~suffix:".js" parse_program
+let program_of_string (w : string) : Ast.a_program =
+  UTmp.with_temp_file ~contents:w ~suffix:".js" parse_program
 
 (*****************************************************************************)
 (* Sub parsers *)
@@ -326,7 +326,7 @@ let type_of_string s =
 
 (* for sgrep/spatch *)
 let any_of_string s =
-  Common.save_excursion Flag_parsing.sgrep_mode true (fun () ->
+  Hook.with_hook_set Flag_parsing.sgrep_mode true (fun () ->
       let toks = tokens (Parsing_helpers.Str s) in
       let toks = Parsing_hacks_js.fix_tokens toks in
       let toks = Parsing_hacks_js.fix_tokens_ASI toks in

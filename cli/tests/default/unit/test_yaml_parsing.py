@@ -1,3 +1,15 @@
+#
+# Copyright (c) 2020-2024 Semgrep Inc.
+#
+# This library is free software; you can redistribute it and/or
+# modify it under the terms of the GNU Lesser General Public License
+# version 2.1 as published by the Free Software Foundation.
+#
+# This library is distributed in the hope that it will be useful, but
+# WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the file
+# LICENSE for more details.
+#
 import io
 from tempfile import NamedTemporaryFile
 from textwrap import dedent
@@ -7,8 +19,6 @@ from ruamel.yaml import YAML
 
 from semgrep.config_resolver import Config
 from semgrep.config_resolver import parse_config_string
-from semgrep.config_resolver import validate_single_rule
-from semgrep.constants import RULES_KEY
 from semgrep.error import InvalidRuleSchemaError
 
 
@@ -45,12 +55,9 @@ def test_parse_taint_rules():
             severity: WARNING
         """
     )
-    yaml, errors = parse_config_string("testfile", yaml_contents, "file.py")
-    config = yaml["testfile"].value
-    rules = config.get(RULES_KEY)
-    for rule_dict in rules.value:
-        validate_single_rule("testfile", rule_dict)
-    assert True
+    result = parse_config_string("testfile", yaml_contents, "file.py")
+    assert len(result.rules) == 3
+    assert len(result.errors) == 0
 
 
 @pytest.mark.quick

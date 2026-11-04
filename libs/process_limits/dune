@@ -9,6 +9,10 @@
  (libraries
    unix
    commons
-   tracing
+   telemetry
+   parallelism
  )
+ (foreign_stubs
+  (language c)
+  (names Time_limit_stubs))
 )

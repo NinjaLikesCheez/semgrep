@@ -27,6 +27,7 @@ open Common
 type ast_stat = { total_node_count : int; untranslated_node_count : int }
 
 type t = {
+  (* TODO: use Fpath.t *)
   filename : string;
   total_line_count : int;
   mutable error_line_count : int;
@@ -70,12 +71,12 @@ let default_stat file =
     ast_stat = None;
   }
 
-let bad_stat file =
-  let stat = default_stat file in
+let bad_stat (file : Fpath.t) =
+  let stat = default_stat (Fpath.to_string file) in
   stat.error_line_count <- stat.total_line_count;
   stat
 
-let correct_stat file = default_stat file
+let correct_stat (file : Fpath.t) = default_stat (Fpath.to_string file)
 
 (*****************************************************************************)
 (* Parsing statistics *)
@@ -106,8 +107,8 @@ let string_of_stats ?(verbose = false) statxs =
       let perfect =
         statxs
         |> List.filter (function
-             | { have_timeout = false; error_line_count = 0; _ } -> true
-             | _ -> false)
+          | { have_timeout = false; error_line_count = 0; _ } -> true
+          | _ -> false)
         |> List.length
       in
 
@@ -118,27 +119,27 @@ let string_of_stats ?(verbose = false) statxs =
         prf "pbs with files:";
         statxs
         |> List.filter (function
-             | { have_timeout = true; _ } -> true
-             | { error_line_count = n; _ } when n > 0 -> true
-             | _ -> false)
+          | { have_timeout = true; _ } -> true
+          | { error_line_count = n; _ } when n > 0 -> true
+          | _ -> false)
         |> List.iter (function
-               | {
-                   filename = file;
-                   have_timeout = timeout;
-                   error_line_count = n;
-                   _;
-                 }
-               -> prf "%s  %s" file (if timeout then "TIMEOUT" else i_to_s n));
+            | {
+                filename = file;
+                have_timeout = timeout;
+                error_line_count = n;
+                _;
+              }
+            -> prf "%s  %s" file (if timeout then "TIMEOUT" else i_to_s n));
 
         prf "\n\n\n";
         prf "files with lots of tokens passed/commentized:";
         let threshold_passed = 100 in
         statxs
         |> List.filter (function
-             | { commentized = n; _ } when n > threshold_passed -> true
-             | _ -> false)
+          | { commentized = n; _ } when n > threshold_passed -> true
+          | _ -> false)
         |> List.iter (function { filename = file; commentized = n; _ } ->
-               prf "%s  %d" file n);
+            prf "%s  %d" file n);
 
         prf "\n\n\n");
 
@@ -163,14 +164,14 @@ let string_of_stats ?(verbose = false) statxs =
         ^ spf "pbs = %d; "
             (statxs
             |> List.filter (function
-                 | { error_line_count = n; _ } when n > 0 -> true
-                 | _ -> false)
+              | { error_line_count = n; _ } when n > 0 -> true
+              | _ -> false)
             |> List.length)
         ^ spf "timeout = %d; "
             (statxs
             |> List.filter (function
-                 | { have_timeout = true; _ } -> true
-                 | _ -> false)
+              | { have_timeout = true; _ } -> true
+              | _ -> false)
             |> List.length)
         ^ spf "=========> %d" (100 * perfect / total)
         ^ "%");
@@ -202,20 +203,21 @@ let regression_information ~ext (xs : Fpath.t list) (newscore : Common2.score) :
       (* TODO Config_pfff.regression_data_dir *)
       (* nosemgrep: not-portable-tmp *)
       let score_path = "/tmp/parsing_stats" in
-      if Sys.file_exists score_path then
+      (* nosemgrep: not-portable-tmp *)
+      if Sys_.file_exists score_path then
         dirname_opt
         |> Option.iter (fun dirname ->
-               prf "------------------------------";
-               prf "regression testing information";
-               prf "------------------------------";
-               let str = Str.global_replace (Str.regexp "/") "__" dirname in
-               let file =
-                 Filename.concat score_path
-                   ("score_parsing__" ^ str ^ ext ^ ".marshalled")
-               in
-               (* nosemgrep: no-logs-in-library *)
-               Logs.info (fun m -> m "saving regression info in %s" file);
-               Common2.regression_testing newscore file)
+            prf "------------------------------";
+            prf "regression testing information";
+            prf "------------------------------";
+            let str = Str.global_replace (Str.regexp "/") "__" dirname in
+            let file =
+              Filename.concat score_path
+                ("score_parsing__" ^ str ^ ext ^ ".marshalled")
+            in
+            (* nosemgrep: no-logs-in-library *)
+            Logs.info (fun m -> m "saving regression info in %s" file);
+            Common2.regression_testing newscore file)
       else prf "no regression info available: %s does not exist" score_path)
 
 (*****************************************************************************)
@@ -238,29 +240,27 @@ let lines_around_error_line ~context (file, line) =
 let recurring_problematic_tokens (xs : t list) : string =
   Buffer_.with_buffer_to_string (fun buf ->
       let prf fmt = Printf.bprintf buf fmt in
-      let h = Hashtbl.create 101 in
+      let h = Base.Hashtbl.Poly.create ~size:101 () in
       xs
       |> List.iter (fun x ->
-             let file = x.filename in
-             x.problematic_lines
-             |> List.iter (fun (xs, line_error) ->
-                    xs
-                    |> List.iter (fun s ->
-                           Common2.hupdate_default s
-                             (fun (old, example) -> (old + 1, example))
-                             (fun () -> (0, (file, line_error)))
-                             h)));
+          let file = x.filename in
+          x.problematic_lines
+          |> List.iter (fun (xs, line_error) ->
+              xs
+              |> List.iter (fun s ->
+                  Hashtbl_.Base.update_default s
+                    (fun (old, example) -> (old + 1, example))
+                    (fun () -> (0, (file, line_error)))
+                    h)));
       prf "-------------------------------";
       prf "maybe 10 most problematic tokens";
       prf "-------------------------------";
-      Hashtbl_.hash_to_list h
+      Hashtbl_.Base.hash_to_list h
       |> List.sort (fun (_k1, (v1, _)) (_k2, (v2, _)) -> compare v2 v1)
       |> List_.take_safe 10
       |> List.iter (fun (k, (i, (file_ex, line_ex))) ->
-             prf "%s: present in %d parsing errors" k i;
-             prf "example: ";
-             let lines =
-               lines_around_error_line ~context:2 (file_ex, line_ex)
-             in
-             lines |> List.iter (fun s -> prf "       %s" s));
+          prf "%s: present in %d parsing errors" k i;
+          prf "example: ";
+          let lines = lines_around_error_line ~context:2 (file_ex, line_ex) in
+          lines |> List.iter (fun s -> prf "       %s" s));
       prf "-------------------------------")

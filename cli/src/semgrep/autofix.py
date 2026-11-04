@@ -1,3 +1,15 @@
+#
+# Copyright (c) 2020-2025 Semgrep Inc.
+#
+# This library is free software; you can redistribute it and/or
+# modify it under the terms of the GNU Lesser General Public License
+# version 2.1 as published by the Free Software Foundation.
+#
+# This library is distributed in the hope that it will be useful, but
+# WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the file
+# LICENSE for more details.
+#
 from typing import List
 from typing import Tuple
 
@@ -71,9 +83,14 @@ def apply_fixes(rule_matches_by_rule: RuleMatchMap, dryrun: bool = False) -> Non
     # to mutate.
     for i, lines in fixed_lines:
         match, _ = matches[i]
-        match.extra["fixed_lines"] = lines  # Monkey patch in fixed lines
+        # ugly: modifying (frozen) match in-place
+        # alt: old: modify match.extra dict (which are mutable), but as ugly
+        # TODO? use evolve() and return new RuleMatchMap
+        object.__setattr__(match, "_fixed_lines", lines)
     if not dryrun:
         if modified_files:
-            logger.info(f"successfully modified {unit_str(modified_files, 'file')}.")
+            logger.info(
+                f"Autofix successfully modified {unit_str(modified_files, 'file')}."
+            )
         else:
-            logger.info(f"no files modified.")
+            logger.info(f"No files modified by autofix.")

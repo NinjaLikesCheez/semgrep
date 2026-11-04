@@ -6,6 +6,10 @@ _build/
 # starting from dune 2.8.2, those are actually not generated anymore
 .merlin
 
+# We won't commit the top-level `semgrep.opam.locked` that is decided by our
+# `pick-lockfile.sh` script, as non of them can satisfy every machine.
+semgrep.opam.locked
+
 # opam files are now generated from dune-project when running 'dune build':
 /*.opam
 # but we keep the one used for installing the project dependencies with
@@ -87,6 +91,7 @@ coverage.xml
 
 # Django stuff:
 *.log
+!cli/tests/**/*.log
 local_settings.py
 db.sqlite3
 db.sqlite3-journal
@@ -219,3 +224,6 @@ result
 .direnv
 # Personal symlink to semgrep-proprietary used by 'make pro'
 /semgrep-proprietary
+
+# Ephemeral grammar clones (fetched via grammar_registry.py; see lang/semgrep-grammars/src/.gitignore).
+libs/ocaml-tree-sitter-semgrep/lang/semgrep-grammars/src/tree-sitter-*

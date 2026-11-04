@@ -14,6 +14,7 @@
  * LICENSE for more details.
  *)
 open Common
+open Maps
 open IL
 module Log = Log_analyzing.Log
 module F = IL (* to be even more similar to controlflow_build.ml *)
@@ -56,7 +57,7 @@ type state = {
   (* When there is a 'return' we need to know the exit node to link to *)
   exiti : F.nodei;
   (* Attaches labels to nodes. *)
-  labels : (label_key, F.nodei) Hashtbl.t;
+  labels : (label_key, F.nodei) Base.Hashtbl.t;
   (* Gotos pending to be resolved, a list of Goto nodes and the label
    * to which they are jumping. *)
   gotos : (nodei * label_key) list ref;
@@ -69,10 +70,10 @@ type state = {
    *)
   throw_destination : F.nodei option;
   (* The CFG of each lambda is kept here separately; it is not part of the
-   * CFG of its enclosing function. Note that an 'IL.fun_cfg' gives you the
+   * CFG of its enclosing function. Note that an 'Fun_CFG.t' gives you the
    * "main" CFG as well as the lambdas' CFGs, and each analysis chooses how to
    * handle the lambdas. *)
-  lambdas_cfgs : IL.lambdas_cfgs ref;
+  lambdas_cfgs : Fun_CFG.lambdas_cfgs ref;
 }
 
 (*****************************************************************************)
@@ -88,8 +89,8 @@ let add_arc_from_opt (starti_opt, nodei) g =
 let add_arc_opt_to_opt (starti_opt, nodei_opt) g =
   starti_opt
   |> Option.iter (fun starti ->
-         nodei_opt
-         |> Option.iter (fun nodei -> g#add_arc ((starti, nodei), F.Direct)))
+      nodei_opt
+      |> Option.iter (fun nodei -> g#add_arc ((starti, nodei), F.Direct)))
 
 let key_of_label ((str, _tok), sid) : label_key = (str, sid)
 
@@ -99,21 +100,21 @@ let add_pending_goto state gotoi label =
 let label_node state labels nodei =
   labels
   |> List.iter (fun label ->
-         Hashtbl.add state.labels (key_of_label label) nodei)
+      Base.Hashtbl.set state.labels ~key:(key_of_label label) ~data:nodei)
 
 let resolve_gotos state =
   !(state.gotos)
   |> List.iter (fun (srci, label_key) ->
-         match Hashtbl.find_opt state.labels label_key with
-         | None ->
-             let loc_str =
-               match state.opt_tok with
-               | None -> ""
-               | Some tok -> spf " (%s)" (Tok.stringpos_of_tok tok)
-             in
-             Log.warn (fun m ->
-                 m ~tags "Could not resolve label: %s%s" (fst label_key) loc_str)
-         | Some dsti -> state.g |> add_arc (srci, dsti));
+      match Base.Hashtbl.find state.labels label_key with
+      | None ->
+          let loc_str =
+            match state.opt_tok with
+            | None -> ""
+            | Some tok -> spf " (%s)" (Tok.stringpos_of_tok tok)
+          in
+          Log.warn (fun m ->
+              m ~tags "Could not resolve label: %s%s" (fst label_key) loc_str)
+      | Some dsti -> state.g |> add_arc (srci, dsti));
   state.gotos := []
 
 (*****************************************************************************)
@@ -166,21 +167,17 @@ let rec cfg_stmt : state -> F.nodei option -> stmt -> cfg_stmt_result =
       let throws =
         match x.i with
         | New _
-        | Call _ ->
+        (* TOOD: CallSpecial too *)
+        | AssignCall (_, { c = Call _; _ }) ->
             (* If we are inside a try-catch, we consider the possibility of this call
-               * raising an exception, then we add a jump to catch-blocks. This could
-               * lead to some false positives when running taint rules (since it's a
-               * may-analysis), but they are probably rare. For constant propagation
-               * this should reduce false positives (since it's a must-analysis).
-               * Ideally we should have a preceeding analysis that infers which calls
-               * may (or may not) raise exceptions. *)
+             * raising an exception, then we add a jump to catch-blocks. This could
+             * lead to some false positives when running taint rules (since it's a
+             * may-analysis), but they are probably rare. For constant propagation
+             * this should reduce false positives (since it's a must-analysis).
+             * Ideally we should have a preceeding analysis that infers which calls
+             * may (or may not) raise exceptions. *)
             state.g |> add_arc_opt_to_opt (Some newi, state.throw_destination);
             true
-        | AssignAnon ({ base = Var name; rev_offset = [] }, Lambda fdef) ->
-            let lambda_cfg = cfg_of_fdef fdef in
-            state.lambdas_cfgs :=
-              IL.NameMap.add name lambda_cfg !(state.lambdas_cfgs);
-            false
         | __else__ -> false
       in
       CfgFirstLast (newi, Some newi, throws)
@@ -336,10 +333,79 @@ let rec cfg_stmt : state -> F.nodei option -> stmt -> cfg_stmt_result =
       state.g |> add_arc_from_opt (previ, newi);
       state.g |> add_arc_opt_to_opt (previ, state.throw_destination);
       CfgFirstLast (newi, None, true)
+  | NestedDef (entity, def_kind) ->
+      (match (entity.name, def_kind) with
+      | EN name, FuncDef fdef ->
+          let lambda_cfg = cfg_of_fdef fdef in
+          state.lambdas_cfgs :=
+            Fun_CFG.record_lambda !(state.lambdas_cfgs) name lambda_cfg
+      | FixmeEntity _tok, FuncDef _fdef ->
+          (* See 'AST_to_IL.map_entity' for how we may get a 'FixmeEntity' here.
+            It may come e.g. from a TO-DO in the translation to Generic. This
+            may happen also when function definitions have an 'IdSpecial', which
+            *could* be the case for Scala constructors like:
+
+                def this(x: Int) = ...
+
+            We need to fix this in AST_to_IL.
+
+            TODO: We don't yet analyze these nested functions in their context,
+            but note that they are visited/analyzed in
+            'Match_tainting_mode.check_rule'. We would need to assign to them
+            some fake name perhaps. *)
+          ()
+      | _entity, ClassDef _cdef ->
+          (* TODO: We don't yet analyze these classes in their context, but
+            note that 'Match_tainting_mode.check_rule' will visit the methods. *)
+          ()
+      | _entity, FixmeDef -> ());
+      (* Create NNestedDef node for the definition *)
+      let newi = state.g#add_node (IL.mk_node (F.NNestedDef entity)) in
+      state.g |> add_arc_from_opt (previ, newi);
+      CfgFirstLast (newi, Some newi, false)
   | MiscStmt x ->
       let newi = state.g#add_node (IL.mk_node (F.NOther x)) in
       state.g |> add_arc_from_opt (previ, newi);
       CfgFirstLast (newi, Some newi, false)
+  | Match { scrutinee; branches } ->
+      let matchi = state.g#add_node (IL.mk_node (F.NMatch scrutinee)) in
+      state.g |> add_arc_from_opt (previ, matchi);
+      let nodes =
+        List.map
+          (fun ({ patterns; body } : IL.pattern_branch) ->
+            (* One 'NCase' per pattern; several patterns are routed through a
+             * 'Join' into a single shared copy of the body. *)
+            let body_previ =
+              match patterns with
+              | [ pattern ] ->
+                  let casei =
+                    state.g#add_node (IL.mk_node (F.NCase (scrutinee, pattern)))
+                  in
+                  state.g |> add_arc (matchi, casei);
+                  casei
+              | patterns ->
+                  let joini = state.g#add_node (IL.mk_node F.Join) in
+                  patterns
+                  |> List.iter (fun pattern ->
+                      let casei =
+                        state.g#add_node
+                          (IL.mk_node (F.NCase (scrutinee, pattern)))
+                      in
+                      state.g |> add_arc (matchi, casei);
+                      state.g |> add_arc (casei, joini));
+                  joini
+            in
+            cfg_stmt_list state (Some body_previ) body)
+          branches
+      in
+      let throws =
+        List.fold_left
+          (fun any_branch_throws (_, throws) -> any_branch_throws || throws)
+          false nodes
+      in
+      let lasti = state.g#add_node (IL.mk_node F.Join) in
+      List.iter (fun (node, _) -> add_arc_from_opt (node, lasti) state.g) nodes;
+      CfgFirstLast (matchi, Some lasti, throws)
   | FixmeStmt _ -> cfg_todo state previ stmt
 
 and cfg_todo state previ stmt =
@@ -390,7 +456,7 @@ and cfg_stmt_list state previ xs =
 
 and mark_at_exit_nodes cfg =
   let rec loop nodei =
-    let node = cfg.CFG.graph#nodes#find nodei in
+    let node = Int_map.find nodei cfg.CFG.graph#nodes in
     match node.n with
     (* Visit ancestor for exit, noop, goto, and join nodes. *)
     | Exit
@@ -405,10 +471,17 @@ and mark_at_exit_nodes cfg =
     | NTodo _ ->
         node.at_exit <- true
     (* Whereas these cannot. *)
+    | NNestedDef _
+    (* NNestedDef:
+      If this is an anonymous lambda/class then it should have been marked
+      by implicit-return previously (if relevant), and for at-exit purposes
+      we will then check the inserted `NReturn`. *)
     | NOther _
     | NCond _
     | TrueNode _
     | FalseNode _
+    | NMatch _
+    | NCase _
     | Enter ->
         ()
   in
@@ -418,7 +491,7 @@ and mark_at_exit_nodes cfg =
 (* Main entry point *)
 (*****************************************************************************)
 
-and cfg_of_stmts ?tok (xs : stmt list) : IL.cfg * IL.lambdas_cfgs =
+and cfg_of_stmts ?tok (xs : stmt list) : IL.cfg * Fun_CFG.lambdas_cfgs =
   (* yes, I sometimes use objects, and even mutable objects in OCaml ... *)
   let g = new Ograph_extended.ograph_mutable in
 
@@ -432,10 +505,10 @@ and cfg_of_stmts ?tok (xs : stmt list) : IL.cfg * IL.lambdas_cfgs =
       opt_tok = tok;
       g;
       exiti;
-      labels = Hashtbl.create 10;
+      labels = Base.Hashtbl.Poly.create ~size:10 ();
       gotos = ref [];
       throw_destination = None;
-      lambdas_cfgs = ref NameMap.empty;
+      lambdas_cfgs = ref Fun_CFG.empty_lambdas;
     }
   in
   let last_node_opt, _ignore_may_throw_ = cfg_stmt_list state (Some newi) xs in
@@ -445,13 +518,26 @@ and cfg_of_stmts ?tok (xs : stmt list) : IL.cfg * IL.lambdas_cfgs =
    * connect last stmt to the exit node
    *)
   g |> add_arc_from_opt (last_node_opt, exiti);
-  let cfg = CFG.make g enteri exiti in
+  let cfg =
+    let cfg = CFG.make g enteri exiti in
+    let nested =
+      (* Nested definitions should always be analyzed (among other reasons due to
+        compatibility with Semgrep CE), so we consider them reachable. *)
+      cfg.graph#nodes |> Int_map.to_seq
+      |> Seq.filter (fun (_nodei, node) ->
+          match node.n with
+          | NNestedDef _ -> true
+          | __else__ -> false)
+      |> Seq.map fst |> CFG.NodeiSet.of_seq
+    in
+    { cfg with reachable = cfg.reachable |> CFG.NodeiSet.union nested }
+  in
   (cfg, !(state.lambdas_cfgs))
 
 and cfg_of_fdef fdef =
   let cfg, lambdas = cfg_of_stmts ~tok:(snd fdef.fkind) fdef.fbody in
   mark_at_exit_nodes cfg;
-  IL.{ params = fdef.fparams; cfg; lambdas }
+  Fun_CFG.{ params = fdef.fparams; fdef = Some fdef; cfg; lambdas }
 
 let cfg_of_gfdef lang ?ctx fdef =
   let fdef_il = AST_to_IL.function_definition lang ?ctx fdef in

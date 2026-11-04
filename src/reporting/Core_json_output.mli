@@ -1,3 +1,15 @@
+(*
+   Copyright (c) 2020-2024 Semgrep Inc.
+
+   This library is free software; you can redistribute it and/or
+   modify it under the terms of the GNU Lesser General Public License
+   version 2.1 as published by the Free Software Foundation.
+
+   This library is distributed in the hope that it will be useful, but
+   WITHOUT ANY WARRANTY; without even the implied warranty of
+   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the file
+   LICENSE for more details.
+*)
 module Out = Semgrep_output_v1_j
 
 (* entry point *)
@@ -22,3 +34,6 @@ val dedup_and_sort : Out.core_match list -> Out.core_match list
 type key [@@deriving show]
 
 val test_core_unique_key : Out.core_match -> key
+
+val export_simple_profiling_results : unit -> Out.profiling_entry list
+(** Export from the Profiling module to JSON *)

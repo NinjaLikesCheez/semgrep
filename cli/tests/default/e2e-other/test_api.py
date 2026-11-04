@@ -1,3 +1,15 @@
+#
+# Copyright (c) 2020-2025 Semgrep Inc.
+#
+# This library is free software; you can redistribute it and/or
+# modify it under the terms of the GNU Lesser General Public License
+# version 2.1 as published by the Free Software Foundation.
+#
+# This library is distributed in the hope that it will be useful, but
+# WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the file
+# LICENSE for more details.
+#
 # TODO: This file should be deleted! The only stable API is to
 # use the semgrep CLI with --json and follow semgrep_output_v1.atd.
 # External users should not rely on any Python API as pysemgrep
@@ -24,8 +36,11 @@ def test_api(unique_home_dir, capsys, run_semgrep_in_tmp: RunSemgrep):
     # unique_home_dir is used to ensure that the test runs with it's own
     # settings.yaml file to avoid reading one corrupted by another concurrent test run.
     output = run_scan_and_return_json(
-        Path("rules/eqeq.yaml"),
-        [Path("targets/bad/invalid_python.py"), Path("targets/basic/stupid.py")],
+        config=Path("rules/eqeq.yaml"),
+        scanning_roots=[
+            Path("targets/bad/invalid_python.py"),
+            Path("targets/basic/stupid.py"),
+        ],
     )
 
     captured = capsys.readouterr()
@@ -49,7 +64,7 @@ def test_api_via_cli(unique_home_dir, run_semgrep_in_tmp: RunSemgrep):
         [
             sys.executable,
             "-c",
-            "from semgrep.run_scan import run_scan_and_return_json; from pathlib import Path; run_scan_and_return_json(Path('rules/eqeq.yaml'),[Path('targets/bad/invalid_python.py'), Path('targets/basic/stupid.py')],)",
+            "from semgrep.run_scan import run_scan_and_return_json; from pathlib import Path; run_scan_and_return_json(config=Path('rules/eqeq.yaml'),scanning_roots=[Path('targets/bad/invalid_python.py'), Path('targets/basic/stupid.py')],)",
         ],
         encoding="utf-8",
         capture_output=True,

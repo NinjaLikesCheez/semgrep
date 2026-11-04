@@ -1,3 +1,15 @@
+#
+# Copyright (c) 2020-2024 Semgrep Inc.
+#
+# This library is free software; you can redistribute it and/or
+# modify it under the terms of the GNU Lesser General Public License
+# version 2.1 as published by the Free Software Foundation.
+#
+# This library is distributed in the hope that it will be useful, but
+# WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the file
+# LICENSE for more details.
+#
 """Ask the Semgrep App server about the latest Semgrep version
 
 This module is for pinging the app to ask for the latest Semgrep release
@@ -255,7 +267,7 @@ def get_no_findings_msg() -> Optional[str]:
     if not state.env.with_new_cli_ux:
         return base_msg
     msg = re.sub("\n(\n+)?", "\\1\n   ", base_msg)
-    groups = re.split(r"\s+(?=https:)", msg, 1)
+    groups = re.split(r"\s+(?=https:)", msg, maxsplit=1)
     if len(groups) == 2:
         pretty_url = with_color(Colors.cyan, f"{groups[1]}", underline=True)
         return f"\n✨ {groups[0]} {pretty_url}"

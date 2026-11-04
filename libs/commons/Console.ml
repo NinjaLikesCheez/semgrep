@@ -32,10 +32,7 @@ open Common
  *  - Ocolor_format.printf
  *  - UCommon.pr
  *  - ...
- *  - and now UConsole.print() and CapConsole.print too :)
- *
- * (See also TCB/forbid_console.jsonnet for the list of functions we
- * want to forbid to enforce instead the use of this module and CapConsole.ml)
+ *  - and now UConsole.print() too :)
  *
  * One of the goal of this module is to provide another way that can be
  * mocked and grepped and redirected more easily. This is useful
@@ -50,8 +47,7 @@ open Common
  *    and we use Common.pr in too many contexts. The use of a separate
  *    UConsole.print() makes it clear this is intended to be the real output
  *    of the program.
- *  - use directly ANSITerminal.ml but again can't be mocked, does not
- *    play well with capabilities so we need to wrap it anyway (CapConsole.ml),
+ *  - use directly ANSITerminal.ml but again can't be mocked
  *    and does not automatically disable colors depending on a highlight config.
  *  - use Fmt but Format pretty printing is too complex for most use cases
  *    and not really needed.
@@ -69,8 +65,7 @@ open Common
  * The 'Logs_' module depends on this module because logging
  * is done on stderr by default.
  *
- * This module contains the shared part between UConsole.ml and
- * CapConsole.ml
+ * This module contains the shared part used by UConsole.ml
  *
  * Some notes on Windows:
  * The default terminal of Windows does not handle ANSI sequences and so
@@ -92,13 +87,30 @@ type highlight_setting = Auto | On | Off [@@deriving show]
 (* The result of applying 'highlight_setting' *)
 type highlight = On | Off [@@deriving show]
 
-(* set by UConsole.setup() *)
+(* nosemgrep: no-ref-declarations-at-top-scope *)
 let highlight_setting : highlight_setting ref = ref Auto
+
+(* nosemgrep: no-ref-declarations-at-top-scope *)
 let highlight : highlight ref = ref (Off : highlight)
 
 (* accessors *)
 let get_highlight_setting () = !highlight_setting
 let get_highlight () = !highlight
+
+let with_highlight_setting ~isatty setting func =
+  let orig_setting = !highlight_setting in
+  let orig_highlight = !highlight in
+  let hl : highlight =
+    match setting with
+    | Auto -> if isatty then On else Off
+    | On -> On
+    | Off -> Off
+  in
+  highlight_setting := setting;
+  highlight := hl;
+  Common.protect func ~finally:(fun () ->
+      highlight_setting := orig_setting;
+      highlight := orig_highlight)
 
 (*****************************************************************************)
 (* Partial copy of ANSITerminal.ml *)
@@ -194,15 +206,15 @@ let layout_table (h1, heading) entries =
     if i =|= 0 then 1 else dec 0 i
   in
   let len1, lengths =
-    let acc = List_.map String.length heading in
+    let acc = List.map String.length heading in
     List.fold_left
       (fun (n1, needed) (c1, curr) ->
         ( max (String.length c1) n1,
-          List_.map2 max needed (List_.map int_size curr) ))
+          List_.map2_exn max needed (List.map int_size curr) ))
       (String.length h1, acc)
       entries
   in
-  let lengths = List_.map (fun i -> i + 3) lengths in
+  let lengths = List.map (fun i -> i + 3) lengths in
   let line = List.fold_left (fun acc w -> acc + w) (len1 + 2) lengths |> line in
   let pad str_size len =
     let to_pad = len - str_size in
@@ -211,15 +223,16 @@ let layout_table (h1, heading) entries =
   String.concat ""
     (List_.flatten
        ([ h1; pad (String.length h1) len1 ]
-       :: List_.map2 (fun h l -> [ pad (String.length h) l; h ]) heading lengths
-       ))
+       :: List_.map2_exn
+            (fun h l -> [ pad (String.length h) l; h ])
+            heading lengths))
   :: line
-  :: List_.map
+  :: List.map
        (fun (e1, entries) ->
          String.concat ""
            (List_.flatten
               ([ e1; pad (String.length e1) len1 ]
-              :: List_.map2
+              :: List_.map2_exn
                    (fun e l -> [ pad (int_size e) l; string_of_int e ])
                    entries lengths)))
        entries
@@ -240,7 +253,7 @@ let table (h1, heading) entries : string =
       let prf fmt = Printf.bprintf buf fmt in
       lines
       |> List.iteri (fun idx line ->
-             prf "%s%s\n" (if idx =|= 1 then " " else "  ") line);
+          prf "%s%s\n" (if idx =|= 1 then " " else "  ") line);
       prf "\n")
 
 (* old: was Fmt_.pp_tables before *)

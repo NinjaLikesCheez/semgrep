@@ -74,20 +74,22 @@ let parse (filename : Fpath.t) =
     let xs = Parser_scala_recursive_descent.parse toks in
     { Parsing_result.ast = xs; tokens = toks; stat }
   with
-  | Parsing_error.Syntax_error cur
-    when !Flag.error_recovery && not !Flag.debug_parser ->
-      if !Flag.show_parsing_error then (
-        Log.err (fun m ->
-            m "parse error \n = %s" (Parsing_helpers.error_message_info cur));
-        let filelines = UFile.cat_array filename in
-        let checkpoint2 = UFile.cat filename |> List.length in
-        let line_error = Tok.line_of_tok cur in
-        Log.err (fun m ->
-            m "%s"
-              (Parsing_helpers.show_parse_error_line line_error (0, checkpoint2)
-                 filelines)));
-      stat.PS.error_line_count <- stat.PS.total_line_count;
-      { Parsing_result.ast = []; tokens = toks; stat }
+  | Parsing_error.Syntax_error cur as exn ->
+      let e = Exception.catch exn in
+      if Hook.get Flag.error_recovery && not (Hook.get Flag.debug_parser) then (
+        if Hook.get Flag.show_parsing_error then (
+          Log.err (fun m ->
+              m "parse error \n = %s" (Parsing_helpers.error_message_info cur));
+          let filelines = UFile.cat_array filename in
+          let checkpoint2 = UFile.cat filename |> List.length in
+          let line_error = Tok.line_of_tok cur in
+          Log.err (fun m ->
+              m "%s"
+                (Parsing_helpers.show_parse_error_line line_error
+                   (0, checkpoint2) filelines)));
+        stat.PS.error_line_count <- stat.PS.total_line_count;
+        { Parsing_result.ast = []; tokens = toks; stat })
+      else Exception.reraise e
 [@@profiling]
 
 let parse_program file =
@@ -99,21 +101,9 @@ let parse_program file =
 (*****************************************************************************)
 (* for semgrep *)
 let any_of_string s =
-  Common.save_excursion Flag_parsing.sgrep_mode true (fun () ->
+  Hook.with_hook_set Flag_parsing.sgrep_mode true (fun () ->
       let toks = tokens (Parsing_helpers.Str s) in
       (* -------------------------------------------------- *)
       (* Call parser *)
       (* -------------------------------------------------- *)
       Parser_scala_recursive_descent.semgrep_pattern toks)
-
-(*****************************************************************************)
-(* Helpers *)
-(*****************************************************************************)
-
-let find_source_files_of_dir_or_files xs =
-  UFile.files_of_dirs_or_files_no_vcs_nofilter xs
-  |> List.filter (fun filename ->
-         match File_type.file_type_of_file filename with
-         | File_type.PL File_type.Scala -> true
-         | _ -> false)
-  |> List_.sort

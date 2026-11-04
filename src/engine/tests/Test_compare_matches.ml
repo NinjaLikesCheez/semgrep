@@ -1,3 +1,15 @@
+(*
+   Copyright (c) 2024-2025 Semgrep Inc.
+
+   This library is free software; you can redistribute it and/or
+   modify it under the terms of the GNU Lesser General Public License
+   version 2.1 as published by the Free Software Foundation.
+
+   This library is distributed in the hope that it will be useful, but
+   WITHOUT ANY WARRANTY; without even the implied warranty of
+   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the file
+   LICENSE for more details.
+*)
 open Common
 open Fpath_.Operators
 
@@ -21,12 +33,12 @@ open Fpath_.Operators
 let default_error_regexp = ".*\\(ERROR\\|MATCH\\):"
 
 let location_of_pm { Core_match.range_loc; _ } =
-  let { Tok.pos = { line; file; _ }; _ }, _ = range_loc in
+  let { Loc.pos = { line; file; _ }; _ }, _ = range_loc in
   (file, line)
 
 let location_of_core_error (err : Core_error.t) =
   match err.loc with
-  | Some loc -> (loc.Tok.pos.file, loc.Tok.pos.line)
+  | Some loc -> (loc.Loc.pos.file, loc.Loc.pos.line)
   (* TODO(andre) Is there something easier to debug, failwith? *)
   | None -> (Fpath_.fake_file, -1)
 
@@ -37,23 +49,23 @@ let (expected_error_lines_of_files :
       (Fpath.t * int) (* line *) list) =
  fun ?(regexp = default_error_regexp) ?ok_regexp test_files ->
   test_files
-  |> List.concat_map (fun file ->
-         UFile.cat file |> List_.index_list_1
-         |> List_.filter_map (fun (s, idx) ->
-                (* Right now we don't care about the actual error messages. We
-                 * don't check if they match. We are just happy to check for
-                 * correct lines error reporting.
-                 *)
-                if
-                  s =~ regexp
-                  (* This is so that we can mark a line differently for OSS/Pro,
+  |> List.concat_map (fun path ->
+      UFile.cat path |> List_.index_list_1
+      |> List.filter_map (fun (s, idx) ->
+          (* Right now we don't care about the actual error messages. We
+           * don't check if they match. We are just happy to check for
+           * correct lines error reporting.
+           *)
+          if
+            s =~ regexp
+            (* This is so that we can mark a line differently for OSS/Pro,
                      e.g. `ruleid: deepok: example_rule_id` *)
-                  && Option.fold ~none:true
-                       ~some:(fun ok_regexp -> not (s =~ ok_regexp))
-                       ok_regexp
-                  (* + 1 because the comment is one line before *)
-                then Some (file, idx + 1)
-                else None))
+            && Option.fold ~none:true
+                 ~some:(fun ok_regexp -> not (s =~ ok_regexp))
+                 ok_regexp
+            (* + 1 because the comment is one line before *)
+          then Some (path, idx + 1)
+          else None))
 
 (*****************************************************************************)
 (* Entry points *)
@@ -63,7 +75,9 @@ let plural n = if n >= 2 then "s" else ""
 
 let compare_actual_to_expected ~to_location actual_findings
     expected_findings_lines =
-  let actual_findings = List_.map to_location actual_findings in
+  let actual_findings : (Fpath.t * int) list =
+    List.map to_location actual_findings
+  in
   (* diff report *)
   let _common, only_in_expected, only_in_actual =
     Common2.diff_set_eff expected_findings_lines actual_findings
@@ -71,10 +85,10 @@ let compare_actual_to_expected ~to_location actual_findings
 
   only_in_expected
   |> List.iter (fun (src, l) ->
-         UCommon.pr2 (spf "this one finding is missing: %s:%d" !!src l));
+      UCommon.pr2 (spf "this one finding is missing: %s:%d" !!src l));
   only_in_actual
   |> List.iter (fun (src, l) ->
-         UCommon.pr2 (spf "this one finding was not expected: %s:%d" !!src l));
+      UCommon.pr2 (spf "this one finding was not expected: %s:%d" !!src l));
   let false_negatives = List.length only_in_expected in
   let false_positives = List.length only_in_actual in
   let num_errors = false_negatives + false_positives in

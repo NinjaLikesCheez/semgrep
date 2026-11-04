@@ -4,19 +4,21 @@
 
 === stdout - plain
 {
+  "engine_requested": "OSS",
   "errors": [],
   "paths": {
     "scanned": [
       "targets/dependency_aware/gradle-direct/gradle.lockfile"
     ]
   },
+  "profiling_results": [],
   "results": [
     {
       "check_id": "rules.dependency_aware.java-gradle-sca",
       "end": {
         "col": 1,
         "line": 7,
-        "offset": 1
+        "offset": 0
       },
       "extra": {
         "engine_kind": "OSS",
@@ -53,11 +55,12 @@
       "start": {
         "col": 1,
         "line": 7,
-        "offset": 1
+        "offset": 0
       }
     }
   ],
   "skipped_rules": [],
+  "time": "<masked in tests>",
   "version": "0.42"
 }
 === end of stdout - plain
@@ -68,20 +71,34 @@
 ┌─────────────┐
 │ Scan Status │
 └─────────────┘
-  Scanning 2 files tracked by git with 0 Code rules, 1 Supply Chain rule:
+  Scanning 2 files tracked by git with 1 Supply Chain rule:
 
 
   CODE RULES
-  Nothing to scan.
+  No code rules to run.
 
   SUPPLY CHAIN RULES
-  Nothing to scan.
+
+  Dependency Sources                                       Resolution Method   Ecosystem   Dependencies   Rules
+ ───────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  targets/dependency_aware/gradle-direct/gradle.lockfile   Lockfile            Maven       35                 1
+
+
+  Analysis   Rules
+ ──────────────────
+  Unknown        1
+
 
 
 ┌──────────────┐
 │ Scan Summary │
 └──────────────┘
-
+✅ Scan completed successfully.
+ • Findings: 1 (0 blocking)
+ • Rules run: 1
+ • Targets scanned: 1
+ • Parsed lines: ~100.0%
+ • No ignore information available
 Ran 1 rule on 1 file: 1 finding.
 
 === end of stderr - plain

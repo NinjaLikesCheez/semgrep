@@ -1,3 +1,15 @@
+#
+# Copyright (c) 2024-2025 Semgrep Inc.
+#
+# This library is free software; you can redistribute it and/or
+# modify it under the terms of the GNU Lesser General Public License
+# version 2.1 as published by the Free Software Foundation.
+#
+# This library is distributed in the hope that it will be useful, but
+# WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the file
+# LICENSE for more details.
+#
 import textwrap
 
 import pytest
@@ -61,39 +73,6 @@ def test_key_value_parser(original, expected) -> None:
 
 
 @pytest.mark.quick
-def test_manifest_deps_parser() -> None:
-    original = textwrap.dedent(
-        """        [tool.poetry.dependencies]
-        python = "^3.9"
-        toml = "^0.10.2"
-        requests = "^2.26.0"
-    """
-    )
-    expected = (["python", "toml", "requests"], "\n")
-    assert poetry.manifest_deps.parse_partial(original) == expected
-
-
-@pytest.mark.quick
-def test_manifest_sections_extra_parser() -> None:
-    original = textwrap.dedent(
-        """        [tool.black]
-        line-length = 120
-        include = '\.pyi?$'
-        exclude = '''
-        (
-        /(\.eggs|\.git|\.hg|\.mypy_cache|\.nox|\.tox|\.venv|_build|buck-out|build|dist)/
-        | .*/pippy/.*
-        | .*_pb2.py
-        | .*_pb2_grpc.py
-        )
-        '''
-    """
-    )
-    expected = (None, "")
-    assert poetry.manifest_sections_extra.parse_partial(original) == expected
-
-
-@pytest.mark.quick
 def test_poetry_dep_extra_parser() -> None:
     original = textwrap.dedent(
         """        [package.extras]
@@ -142,6 +121,7 @@ def test_manifest_parser() -> None:
         | .*_pb2.py
         | .*_pb2_grpc.py
         )
+        '''
 
         [package.extras]
         dev = ["coverage", "django", "flake8", "isort", "pillow", "sqlalchemy", "mongoengine", "wheel (>=0.32.0)", "tox", "zest.releaser"]
@@ -149,7 +129,7 @@ def test_manifest_parser() -> None:
     """
     )
 
-    assert poetry.manifest.parse_partial(original)[0] == {"toml", "python", "requests"}
+    assert poetry.parse_pyproject_toml(original) == {"toml", "python", "requests"}
 
 
 @pytest.mark.quick

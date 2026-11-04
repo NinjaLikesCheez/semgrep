@@ -1,4 +1,5 @@
 {
+  "engine_requested": "OSS",
   "errors": [
     {
       "code": 3,
@@ -51,7 +52,9 @@
       }
     ]
   },
+  "profiling_results": [],
   "results": [],
   "skipped_rules": [],
+  "time": "<masked in tests>",
   "version": "0.42"
 }

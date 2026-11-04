@@ -87,7 +87,7 @@ class ['self] matching_visitor =
       (* As opposed to v_stmts, we don't call v_fields recursively for sublists
        * of xs. Indeed, in semgrep, fields are matched in any order so calling
        * the visitor and matcher on the entire list of fields should also work.
-       * *)
+       *)
       self#visit_list self#visit_field env xs
 
     method v_vardef_as_assign_expr env ventity =
@@ -203,28 +203,27 @@ class ['self] matching_visitor =
           | Dict ->
               v2 |> Tok.unbracket
               |> List.iter (fun e ->
-                     match e.e with
-                     | Container
-                         ( Tuple,
-                           (tok, [ { e = L (String (_, id, _)); _ }; e ], _) )
-                       ->
-                         let t = Tok.fake_tok tok ":" in
-                         self#v_partial ~recurse:false env
-                           (PartialSingleField (id, t, e))
-                     | _ -> ())
+                  match e.e with
+                  | Container
+                      (Tuple, (tok, [ { e = L (String (_, id, _)); _ }; e ], _))
+                    ->
+                      let t = Tok.fake_tok tok ":" in
+                      self#v_partial ~recurse:false env
+                        (PartialSingleField (id, t, e))
+                  | _ -> ())
           (* for Go where we use List for composite literals.
            * TODO? generate Dict in go_to_generic.ml instead directly?
            *)
           | List ->
               v2 |> Tok.unbracket
               |> List.iter (fun e ->
-                     match e.e with
-                     | Container
-                         (Tuple, (tok, [ { e = N (Id (id, _)); _ }; e ], _)) ->
-                         let t = Tok.fake_tok tok ":" in
-                         self#v_partial ~recurse:false env
-                           (PartialSingleField (id, t, e))
-                     | _ -> ())
+                  match e.e with
+                  | Container (Tuple, (tok, [ { e = N (Id (id, _)); _ }; e ], _))
+                    ->
+                      let t = Tok.fake_tok tok ":" in
+                      self#v_partial ~recurse:false env
+                        (PartialSingleField (id, t, e))
+                  | _ -> ())
           | _ -> ());
           let _v1 = self#visit_container_operator env v1
           and _v2 =

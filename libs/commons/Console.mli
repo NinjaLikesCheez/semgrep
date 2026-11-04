@@ -1,11 +1,23 @@
 (*
+   Copyright (c) 2024-2025 Semgrep Inc.
+
+   This library is free software; you can redistribute it and/or
+   modify it under the terms of the GNU Lesser General Public License
+   version 2.1 as published by the Free Software Foundation.
+
+   This library is distributed in the hope that it will be useful, but
+   WITHOUT ANY WARRANTY; without even the implied warranty of
+   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the file
+   LICENSE for more details.
+*)
+(*
    Utilities to help printing user-facing messages with optional color on
    stdout and stderr.
 
    Programs such as Semgrep use both stdout and stderr to display
    human-readable messages.
 
-   See UConsole.ml or better CapConsole.ml to actually print messages.
+   See UConsole.ml to actually print messages.
    This is the shared "safe" part of console management.
 *)
 
@@ -18,9 +30,9 @@ type highlight_setting = Auto | On | Off [@@deriving show]
 (* The result of applying 'highlight_setting' *)
 type highlight = On | Off [@@deriving show]
 
-(* Note that this module use the globals at the end of this file to
+(* Note that this module uses the globals at the end of this file to
  * store the current settings but they should be manipulated only
- * by UConsole.setup() (or CapConsole.setup())
+ * by UConsole.setup()
  *)
 
 type color = ANSITerminal.color =
@@ -115,6 +127,6 @@ val tables :
 val get_highlight_setting : unit -> highlight_setting
 val get_highlight : unit -> highlight
 
-(* internals, you should not change that, only UConsole.setup can *)
-val highlight_setting : highlight_setting ref
-val highlight : highlight ref
+(* Set and restore the global state. *)
+val with_highlight_setting :
+  isatty:bool -> highlight_setting -> (unit -> 'a) -> 'a

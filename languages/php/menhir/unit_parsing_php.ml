@@ -1,4 +1,16 @@
-open Common
+(*
+   Copyright (c) 2022-2025 Semgrep Inc.
+
+   This library is free software; you can redistribute it and/or
+   modify it under the terms of the GNU Lesser General Public License
+   version 2.1 as published by the Free Software Foundation.
+
+   This library is distributed in the hope that it will be useful, but
+   WITHOUT ANY WARRANTY; without even the implied warranty of
+   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the file
+   LICENSE for more details.
+*)
+open Fpath_.Operators
 module Ast = Cst_php
 module Flag = Flag_parsing
 
@@ -13,9 +25,19 @@ let t = Testo.create
 (*****************************************************************************)
 
 (* ran from the root of the semgrep repository *)
-let tests_path = "tests"
+let tests_path = Fpath.v "tests"
 
 let tests =
+  let is_syn_err = function
+    | Parsing_error.Syntax_error _ -> true
+    | _ -> false
+  in
+  let assert_invalid p =
+    Hook.with_hook_set Flag.show_parsing_error false (fun () ->
+        Alcotest.match_raises __LOC__ is_syn_err (fun () ->
+            ignore (Parse_php.program_of_string p)))
+  in
+
   Testo.categorize "parsing_php"
     [
       (* Parsing *)
@@ -27,70 +49,37 @@ let tests =
       t "parsing empty comments" (fun () ->
           let _ast = Parse_php.program_of_string "$a/**/ =1;" in
           ());
-      t "rejecting bad code" (fun () ->
-          Flag.show_parsing_error := false;
-          try
-            let _ = Parse_php.program_of_string "echo 1+" in
-            Alcotest.fail "it should have thrown a Parse_error exception"
-          with
-          | Parsing_error.Syntax_error _ -> ()
-          (* old:
-           * The PHP parser does not return an exception when a PHP file contains
-           * an error, to allow some form of error recovery by not stopping
-           * at the first mistake. Instead it returns a NotParsedCorrectly
-           * AST toplevel element for parts of the code that were not parsed.
-           * Here we check that correctly formed code do not contain such
-           * NotParsedCorrectly element.
-           *
-           *  assert_bool "bad: should have a NotParsedCorrectly"
-           * (List.exists (function NotParsedCorrectly _ -> true | _ -> false) ast)
-           *));
+      t "rejecting bad code" (fun () -> assert_invalid "echo 1+");
+      (* old:
+       * The PHP parser does not return an exception when a PHP file contains
+       * an error, to allow some form of error recovery by not stopping
+       * at the first mistake. Instead it returns a NotParsedCorrectly
+       * AST toplevel element for parts of the code that were not parsed.
+       * Here we check that correctly formed code do not contain such
+       * NotParsedCorrectly element.
+       *
+       *  assert_bool "bad: should have a NotParsedCorrectly"
+       * (List.exists (function NotParsedCorrectly _ -> true | _ -> false) ast)
+       *)
       t "rejecting variadic param with default" (fun () ->
-          Flag.show_parsing_error := false;
-          try
-            let _ =
-              Parse_php.program_of_string "function foo($x, ...$rest=123) {}"
-            in
-            Alcotest.fail "it should have thrown a Parse_error exception"
-          with
-          | Parsing_error.Syntax_error _ -> ());
+          assert_invalid "function foo($x, ...$rest=123) {}");
       t "rejecting multiple variadic params" (fun () ->
-          Flag.show_parsing_error := false;
-          try
-            let _ =
-              Parse_php.program_of_string
-                "function foo($x, ...$rest, ...$another) {}"
-            in
-            Alcotest.fail "it should have thrown a Parse_error exception"
-          with
-          | Parsing_error.Syntax_error _ -> ());
+          assert_invalid "function foo($x, ...$rest, ...$another) {}");
       t "rejecting non-tail variadic param without variable name" (fun () ->
-          Flag.show_parsing_error := false;
-          try
-            let _ =
-              Parse_php.program_of_string "function foo($x, ..., ...$rest) {}"
-            in
-            Alcotest.fail "it should have thrown a Parse_error exception"
-          with
-          | Parsing_error.Syntax_error _ -> ());
+          assert_invalid "function foo($x, ..., ...$rest) {}");
       t "rejecting ellipsis with optional constructs" (fun () ->
-          Flag.show_parsing_error := false;
-          try
-            let _ = Parse_php.program_of_string "function foo(int ...) {}" in
-            Alcotest.fail "it should have thrown a Parse_error exception"
-          with
-          | Parsing_error.Syntax_error _ -> ());
+          assert_invalid "function foo(int ...) {}");
       t "regression files" (fun () ->
-          let dir = Filename.concat tests_path "php/parsing" in
-          let files = Common2.glob (spf "%s/*.php" dir) in
+          let dir = tests_path / "php" / "parsing" in
+          let files = Common2.glob (dir / "*.php") in
           files
           |> List.iter (fun file ->
-                 try
-                   let _ = Parse_php.parse_program (Fpath.v file) in
-                   ()
-                 with
-                 | Parsing_error.Syntax_error _ ->
-                     Alcotest.failf "it should correctly parse %s" file));
+              try
+                let _ = Parse_php.parse_program file in
+                ()
+              with
+              | Parsing_error.Syntax_error _ ->
+                  Alcotest.failf "it should correctly parse %a" Fpath.pp file));
       (*-----------------------------------------------------------------------*)
       (* Types *)
       (*-----------------------------------------------------------------------*)

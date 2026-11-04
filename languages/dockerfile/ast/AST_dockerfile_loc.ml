@@ -55,6 +55,10 @@ let key_or_metavar_loc = function
 let docker_string_loc ((loc, _) : docker_string) = loc
 let heredoc_template_loc (x : heredoc_template) = (x.opening, x.closing)
 
+let shell_fragment_loc = function
+  | Constant_shell_fragment x -> wrap_loc x
+  | Heredoc_template x -> heredoc_template_loc x
+
 let str_or_ellipsis_loc = function
   | Str_str str -> docker_string_loc str
   | Str_template x -> heredoc_template_loc x
@@ -117,6 +121,8 @@ let expose_port_loc = function
   | Expose_semgrep_ellipsis tok -> (tok, tok)
   | Expose_port ((_, tok1), Some (_, tok2)) -> (tok1, tok2)
   | Expose_port ((_, tok), None) -> (tok, tok)
+  | Expose_port_fragment (port, (_, protocol_tok)) ->
+      (fst (docker_string_fragment_loc port), protocol_tok)
   | Expose_fragment x -> docker_string_fragment_loc x
 
 let instruction_loc = function

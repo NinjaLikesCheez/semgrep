@@ -1,12 +1,25 @@
+(*
+   Copyright (c) 2024-2025 Semgrep Inc.
+
+   This library is free software; you can redistribute it and/or
+   modify it under the terms of the GNU Lesser General Public License
+   version 2.1 as published by the Free Software Foundation.
+
+   This library is distributed in the hope that it will be useful, but
+   WITHOUT ANY WARRANTY; without even the implied warranty of
+   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the file
+   LICENSE for more details.
+*)
 open Common
 
 (* Provide hash_* for the core ocaml types *)
 open Ppx_hash_lib.Std.Hash.Builtin
+open Sexplib.Std
 
 (* less: could want to remember the position in the pattern of the metavar
  * for error reporting on pattern itself? so use a 'string AST_generic.wrap'?
  *)
-type t = string [@@deriving show, eq, hash]
+type t = string [@@deriving eq, hash, ord, sexp, show]
 
 (* ex: $X, $FAIL, $VAR2, $_
  * Note that some languages such as PHP or Javascript allows '$' in identifier
@@ -54,8 +67,11 @@ let metavar_ellipsis_regexp_string = "^\\(\\$\\.\\.\\.[A-Z_][A-Z_0-9]*\\)$"
 let is_metavar_ellipsis s = s =~ metavar_ellipsis_regexp_string
 
 let mvars_of_regexp_string s =
-  Pcre2_.pcre_compile s |> Pcre2_.pcre_regexp |> Pcre2.names |> Array.to_list
-  |> Common.(List_.map (fun s -> spf "$%s" s))
+  match Pcre2_.compile ~options:[ `MULTILINE ] s with
+  | Error _ -> []
+  | Ok rex ->
+      Pcre2_.capture_groups rex |> List.map fst
+      |> Common.(List.map (fun s -> spf "$%s" s))
 
 let is_anonymous_metavar s = s =*= "$_"
 

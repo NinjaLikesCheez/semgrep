@@ -4,6 +4,7 @@
 
 === stdout - plain
 {
+  "engine_requested": "OSS",
   "errors": [],
   "paths": {
     "scanned": [
@@ -12,6 +13,7 @@
       "targets/dependency_aware/requirements_pip_folder/requirements/stage.pip"
     ]
   },
+  "profiling_results": [],
   "results": [
     {
       "check_id": "rules.dependency_aware.python-requirements-sca",
@@ -61,6 +63,7 @@
     }
   ],
   "skipped_rules": [],
+  "time": "<masked in tests>",
   "version": "0.42"
 }
 === end of stdout - plain
@@ -71,20 +74,37 @@
 ┌─────────────┐
 │ Scan Status │
 └─────────────┘
-  Scanning 4 files tracked by git with 0 Code rules, 1 Supply Chain rule:
+  Scanning 4 files tracked by git with 1 Supply Chain rule:
 
 
   CODE RULES
-  Nothing to scan.
+  No code rules to run.
 
   SUPPLY CHAIN RULES
-  Scanning 1 file.
+
+  Dependency Sources                                               Resolution Method   Ecosystem   Dependencies   Rules
+ ───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  targets/dependency_aware/requirements_pip_folder/requirements/   Lockfile            Pypi        2                  1
+  prod.pip,
+  targets/dependency_aware/requirements_pip_folder/requirements/
+  stage.pip
+
+
+  Analysis   Rules
+ ──────────────────
+  Unknown        1
+
 
 
 ┌──────────────┐
 │ Scan Summary │
 └──────────────┘
-
+✅ Scan completed successfully.
+ • Findings: 1 (1 blocking)
+ • Rules run: 1
+ • Targets scanned: 3
+ • Parsed lines: ~100.0%
+ • No ignore information available
 Ran 1 rule on 3 files: 1 finding.
 
 === end of stderr - plain

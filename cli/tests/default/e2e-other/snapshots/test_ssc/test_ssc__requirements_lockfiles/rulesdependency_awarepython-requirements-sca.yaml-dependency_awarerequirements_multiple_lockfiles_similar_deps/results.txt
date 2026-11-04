@@ -4,6 +4,7 @@
 
 === stdout - plain
 {
+  "engine_requested": "OSS",
   "errors": [],
   "paths": {
     "scanned": [
@@ -13,6 +14,7 @@
       "targets/dependency_aware/requirements_multiple_lockfiles_similar_deps/requirements.txt"
     ]
   },
+  "profiling_results": [],
   "results": [
     {
       "check_id": "rules.dependency_aware.python-requirements-sca",
@@ -108,6 +110,7 @@
     }
   ],
   "skipped_rules": [],
+  "time": "<masked in tests>",
   "version": "0.42"
 }
 === end of stdout - plain
@@ -118,20 +121,39 @@
 ┌─────────────┐
 │ Scan Status │
 └─────────────┘
-  Scanning 5 files tracked by git with 0 Code rules, 1 Supply Chain rule:
+  Scanning 5 files tracked by git with 1 Supply Chain rule:
 
 
   CODE RULES
-  Nothing to scan.
+  No code rules to run.
 
   SUPPLY CHAIN RULES
-  Scanning 1 file.
+
+  Dependency Sources                                               Resolution Method   Ecosystem   Dependencies   Rules
+ ───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  targets/dependency_aware/requirements_multiple_lockfiles_simil   Lockfile            Pypi        88                 1
+  ar_deps/requirements/prod.txt,
+  targets/dependency_aware/requirements_multiple_lockfiles_simil
+  ar_deps/requirements/stage.txt,
+  targets/dependency_aware/requirements_multiple_lockfiles_simil
+  ar_deps/requirements.txt
+
+
+  Analysis   Rules
+ ──────────────────
+  Unknown        1
+
 
 
 ┌──────────────┐
 │ Scan Summary │
 └──────────────┘
-
+✅ Scan completed successfully.
+ • Findings: 2 (2 blocking)
+ • Rules run: 1
+ • Targets scanned: 4
+ • Parsed lines: ~100.0%
+ • No ignore information available
 Ran 1 rule on 4 files: 2 findings.
 
 === end of stderr - plain

@@ -1,4 +1,16 @@
 (*
+   Copyright (c) 2022-2025 Semgrep Inc.
+
+   This library is free software; you can redistribute it and/or
+   modify it under the terms of the GNU Lesser General Public License
+   version 2.1 as published by the Free Software Foundation.
+
+   This library is distributed in the hope that it will be useful, but
+   WITHOUT ANY WARRANTY; without even the implied warranty of
+   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the file
+   LICENSE for more details.
+*)
+(*
    Exit codes for the semgrep executable.
 
    Partially translated from error.py
@@ -24,6 +36,9 @@ let of_int ~__LOC__:loc ~code ~description = with_log loc { code; description }
 (*
    Legal values. This does not include those created via 'of_int' which
    are deprecated. This module is private so as to force location logging.
+
+   coupling: don't forget to update the 'all' list below for the exit codes
+   to show up in help pages.
 *)
 module Value = struct
   let ok = create 0 "OK"
@@ -42,9 +57,25 @@ module Value = struct
   (* let lexical_error = 11 "lexical error" *)
   (* let too_many_matches = 12 "too many matches" *)
   let invalid_api_key = create 13 "invalid API key"
-  let scan_fail = create 14 "scan failure"
+
+  (* let scan_fail = create 14 "scan failure" *)
   let not_implemented_in_osemgrep = create 99 "not implemented in osemgrep"
 end
+
+let all =
+  Value.
+    [
+      ok;
+      findings;
+      fatal;
+      invalid_code;
+      invalid_pattern;
+      unparseable_yaml;
+      missing_config;
+      invalid_language;
+      invalid_api_key;
+      not_implemented_in_osemgrep;
+    ]
 
 (*
    Exit codes of the semgrep command.
@@ -69,7 +100,6 @@ let unparseable_yaml ~__LOC__:loc = with_log loc Value.unparseable_yaml
 let missing_config ~__LOC__:loc = with_log loc Value.missing_config
 let invalid_language ~__LOC__:loc = with_log loc Value.invalid_language
 let invalid_api_key ~__LOC__:loc = with_log loc Value.invalid_api_key
-let scan_fail ~__LOC__:loc = with_log loc Value.scan_fail
 
 (* Temporary until either osemgrep dies or replaces semgrep. *)
 let not_implemented_in_osemgrep ~__LOC__:loc =
@@ -87,7 +117,6 @@ module Equal = struct
   let missing_config = equal Value.missing_config
   let invalid_language = equal Value.invalid_language
   let invalid_api_key = equal Value.invalid_api_key
-  let scan_fail = equal Value.scan_fail
   let not_implemented_in_osemgrep = equal Value.not_implemented_in_osemgrep
 end
 
@@ -95,18 +124,26 @@ let testable : t Alcotest.testable =
   let print fmt x = Format.fprintf fmt "%i (%s)" x.code x.description in
   Alcotest.testable print equal
 
-let check expected actual = Alcotest.check testable "exit code" expected actual
+let check ?(quiet = true) expected actual =
+  let msg =
+    if quiet then
+      (* suppress the output of "ASSERT <msg>" with tty-dependent color *)
+      ""
+    else "exit code"
+  in
+  Alcotest.check testable msg expected actual
 
 module Check = struct
-  let ok = check Value.ok
-  let findings = check Value.findings
-  let fatal = check Value.fatal
-  let invalid_code = check Value.invalid_code
-  let invalid_pattern = check Value.invalid_pattern
-  let unparseable_yaml = check Value.unparseable_yaml
-  let missing_config = check Value.missing_config
-  let invalid_language = check Value.invalid_language
-  let invalid_api_key = check Value.invalid_api_key
-  let scan_fail = check Value.scan_fail
-  let not_implemented_in_osemgrep = check Value.not_implemented_in_osemgrep
+  let ok ?quiet = check ?quiet Value.ok
+  let findings ?quiet = check ?quiet Value.findings
+  let fatal ?quiet = check ?quiet Value.fatal
+  let invalid_code ?quiet = check ?quiet Value.invalid_code
+  let invalid_pattern ?quiet = check ?quiet Value.invalid_pattern
+  let unparseable_yaml ?quiet = check ?quiet Value.unparseable_yaml
+  let missing_config ?quiet = check ?quiet Value.missing_config
+  let invalid_language ?quiet = check ?quiet Value.invalid_language
+  let invalid_api_key ?quiet = check ?quiet Value.invalid_api_key
+
+  let not_implemented_in_osemgrep ?quiet =
+    check ?quiet Value.not_implemented_in_osemgrep
 end

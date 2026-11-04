@@ -1,3 +1,15 @@
+(*
+   Copyright (c) 2020-2025 Semgrep Inc.
+
+   This library is free software; you can redistribute it and/or
+   modify it under the terms of the GNU Lesser General Public License
+   version 2.1 as published by the Free Software Foundation.
+
+   This library is distributed in the hope that it will be useful, but
+   WITHOUT ANY WARRANTY; without even the implied warranty of
+   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the file
+   LICENSE for more details.
+*)
 (* for these languages, we are sure that $x is an error *)
 let lang_has_no_dollar_ids =
   Lang.(
@@ -9,6 +21,7 @@ let lang_has_no_dollar_ids =
     | Python2
     | Python3
     | Java
+    | Gosu
     | Go
     | C
     | Cpp
@@ -30,7 +43,8 @@ let lang_has_no_dollar_ids =
     | Swift
     | Html
     | Xml
-    | Ql
+    | Fga
+    | Objc
     | Move_on_aptos ->
         true
     | Move_on_sui
@@ -42,6 +56,7 @@ let lang_has_no_dollar_ids =
     | Promql
     | Hack
     | Bash
+    | Powershell
     | Dockerfile
     | Rust
     | Cairo
@@ -56,7 +71,8 @@ class ['self] metavar_checker =
     method! visit_ident (error, lang) id =
       let str, _tok = id in
       if
-        str.[0] = '$'
+        String.length str > 0
+        && str.[0] = '$'
         && (not (Mvar.is_metavar_name str))
         && not (Mvar.is_metavar_ellipsis str)
       then
@@ -68,9 +84,11 @@ class ['self] metavar_checker =
       super#visit_ident (error, lang) id
   end
 
+let metavar_checker = new metavar_checker
+
 let check_pattern_metavars error lang ast =
   if lang_has_no_dollar_ids lang then
-    (new metavar_checker)#visit_any (error, lang) ast
+    metavar_checker#visit_any (error, lang) ast
 
 exception CheckFailure of string
 

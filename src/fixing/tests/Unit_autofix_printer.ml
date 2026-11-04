@@ -1,3 +1,15 @@
+(*
+   Copyright (c) 2022-2025 Semgrep Inc.
+
+   This library is free software; you can redistribute it and/or
+   modify it under the terms of the GNU Lesser General Public License
+   version 2.1 as published by the Free Software Foundation.
+
+   This library is distributed in the hope that it will be useful, but
+   WITHOUT ANY WARRANTY; without even the implied warranty of
+   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the file
+   LICENSE for more details.
+*)
 open Common
 
 type autofix_printer_test_case = {
@@ -34,7 +46,7 @@ let t = Testo.create
  * fixes tested there are correct.
  *)
 let check lang { target; pattern; fix_pattern; expected } =
-  let ext = List_.hd_exn "unexpected empty list" (Lang.ext_of_lang lang) in
+  let ext = List_.hd_exn "unexpected empty list" (Lang.exts_of_lang lang) in
   UTmp.with_temp_file ~contents:target ~suffix:("." ^ ext) (fun target_file ->
       let matches =
         Unit_engine.match_pattern ~lang
@@ -74,7 +86,7 @@ let check lang { target; pattern; fix_pattern; expected } =
       let fix_text =
         match
           Autofix_printer.print_ast ~lang ~metavars
-            ~target_contents:(lazy fake_target_contents)
+            ~target_contents:(lazy_safe fake_target_contents)
             ~fix_pattern_ast ~fix_pattern:fake_fix_pattern fixed_pattern_ast
         with
         | Ok x -> x
@@ -84,8 +96,8 @@ let check lang { target; pattern; fix_pattern; expected } =
       (* Replace the fake target contents with the rendered fix *)
       let start, end_ =
         let start, end_ = match_.range_loc in
-        let _, _, end_charpos = Tok.end_pos_of_loc end_ in
-        (start.Tok.pos.bytepos, end_charpos)
+        let _, _, end_charpos = Loc.end_pos end_ in
+        (start.Loc.pos.bytepos, end_charpos)
       in
       let full_fixed_text =
         let before = Str.first_chars fake_target_contents start in

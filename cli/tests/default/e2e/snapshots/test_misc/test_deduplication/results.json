@@ -1,10 +1,12 @@
 {
+  "engine_requested": "OSS",
   "errors": [],
   "paths": {
     "scanned": [
       "targets/basic/stupid.py"
     ]
   },
+  "profiling_results": [],
   "results": [
     {
       "check_id": "rules.duplicate-eq",
@@ -29,11 +31,6 @@
           "cwe": "CWE-522: Insufficiently Protected Credentials",
           "license": "Commons Clause License Condition v1.0[LGPL-2.1-only]",
           "owasp": "A2: Broken Authentication",
-          "semgrep.policy": {
-            "id": 18613,
-            "name": "Rule Board - Block column",
-            "slug": "rule-board-block"
-          },
           "semgrep.ruleset": "ci",
           "semgrep.ruleset_id": 735,
           "semgrep.url": "https://semgrep.dev/r/javascript.jsonwebtoken.security.jwt-hardcode.hardcoded-jwt-secret",
@@ -77,11 +74,6 @@
           "cwe": "CWE-522: Insufficiently Protected Credentials",
           "license": "Commons Clause License Condition v1.0[LGPL-2.1-only]",
           "owasp": "A2: Broken Authentication",
-          "semgrep.policy": {
-            "id": 18613,
-            "name": "Rule Board - Block column",
-            "slug": "rule-board-block"
-          },
           "semgrep.ruleset": "ci",
           "semgrep.ruleset_id": 735,
           "semgrep.url": "https://semgrep.dev/r/javascript.jsonwebtoken.security.jwt-hardcode.hardcoded-jwt-secret",
@@ -125,11 +117,6 @@
           "cwe": "CWE-522: Insufficiently Protected Credentials",
           "license": "Commons Clause License Condition v1.0[LGPL-2.1-only]",
           "owasp": "A2: Broken Authentication",
-          "semgrep.policy": {
-            "id": 18613,
-            "name": "Rule Board - Block column",
-            "slug": "rule-board-block"
-          },
           "semgrep.ruleset": "ci",
           "semgrep.ruleset_id": 735,
           "semgrep.url": "https://semgrep.dev/r/javascript.jsonwebtoken.security.jwt-hardcode.hardcoded-jwt-secret",
@@ -152,5 +139,6 @@
     }
   ],
   "skipped_rules": [],
+  "time": "<masked in tests>",
   "version": "0.42"
 }

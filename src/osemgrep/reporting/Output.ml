@@ -1,3 +1,15 @@
+(*
+   Copyright (c) 2022-2025 Semgrep Inc.
+
+   This library is free software; you can redistribute it and/or
+   modify it under the terms of the GNU Lesser General Public License
+   version 2.1 as published by the Free Software Foundation.
+
+   This library is distributed in the hope that it will be useful, but
+   WITHOUT ANY WARRANTY; without even the implied warranty of
+   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the file
+   LICENSE for more details.
+*)
 open Common
 open Fpath_.Operators
 module Out = Semgrep_output_v1_j
@@ -10,7 +22,7 @@ module Out = Semgrep_output_v1_j
 
    Partially translated from output.py
 
-   We're using CapConsole.print() below, not Logs.app(), because we want to
+   We're using UConsole.print() below, not Logs.app(), because we want to
    output findings on stdout (Logs.app uses stderr). That also mean semgrep will
    display findings even with --quiet.
 *)
@@ -38,10 +50,15 @@ type conf = {
   strict : bool;
   (* a.k.a. dryrun in Scan_CLI.conf *)
   fixed_lines : bool;
+  fips_mode : bool;
   (* true when using --verbose or --debug in Scan_CLI.ml *)
   skipped_files : bool;
   (* alt: in CLI_common.conf *)
   max_log_list_entries : int;
+  (* Limits characters of match context in output. 0 = unlimited. *)
+  max_match_context_size : int;
+  (* Used when outputting MCP scan results. *)
+  output_mcp_scan_results : bool;
 }
 [@@deriving show]
 
@@ -54,8 +71,11 @@ let default : conf =
     show_dataflow_traces = false;
     strict = false;
     fixed_lines = false;
+    fips_mode = false;
     skipped_files = false;
     max_log_list_entries = 100;
+    max_match_context_size = 0;
+    output_mcp_scan_results = false;
   }
 
 (* used with max_log_list_entries *)
@@ -95,74 +115,66 @@ let format (kind : Output_format.t) (ctx : Out.format_context)
       [ Yojson.Basic.to_string gitlab_secrets_json ]
   | Vim ->
       cli_output.results
-      |> List_.map (fun (m : Out.cli_match) ->
-             match m with
-             | { check_id; path; start; extra = { message; severity; _ }; _ } ->
-                 let parts =
-                   [
-                     !!path;
-                     spf "%d" start.line;
-                     spf "%d" start.col;
-                     (* TOPORT? restrict to just I|E|W ? *)
-                     spf "%c" (string_of_severity severity).[0];
-                     Rule_ID.to_string check_id;
-                     message;
-                   ]
-                 in
-                 String.concat ":" parts)
+      |> List.map (fun (m : Out.cli_match) ->
+          match m with
+          | { check_id; path; start; extra = { message; severity; _ }; _ } ->
+              let parts =
+                [
+                  !!path;
+                  spf "%d" start.line;
+                  spf "%d" start.col;
+                  (* TOPORT? restrict to just I|E|W ? *)
+                  spf "%c" (string_of_severity severity).[0];
+                  Rule_ID.to_string check_id;
+                  message;
+                ]
+              in
+              String.concat ":" parts)
   | Emacs ->
       (* TOPORT? sorted(rule_matches, key=lambda r: (r.path, r.rule_id)) *)
       cli_output.results
-      |> List_.map (fun (m : Out.cli_match) ->
-             match m with
-             | {
-              check_id;
-              path;
-              start;
-              end_;
-              extra = { message; severity; _ };
-              _;
-             } ->
-                 let severity =
-                   String.lowercase_ascii (string_of_severity severity)
-                 in
-                 let severity_and_ruleid =
-                   if check_id =*= Rule_ID.dash_e then severity
-                   else
-                     match Rule_ID.last_elt_opt check_id with
-                     | None -> severity
-                     | Some x -> spf "%s(%s)" severity x
-                 in
-                 let line =
-                   (* ugly: redoing the work done in cli_match_of_core_match.
-                    * we can't use m.extra.lines because this field actually
-                    * contains a string, not a string list.
-                    *)
-                   match
-                     Semgrep_output_utils.lines_of_file_at_range (start, end_)
-                       path
-                   with
-                   | Ok [] -> ""
-                   | Ok (x :: _) -> x (* TOPORT rstrip? *)
-                   | Error s -> failwith s
-                 in
-                 let parts =
-                   [
-                     !!path;
-                     spf "%d" start.line;
-                     spf "%d" start.col;
-                     (* TOPORT? restrict to just I|E|W ? *)
-                     severity_and_ruleid;
-                     line;
-                     message;
-                   ]
-                 in
-                 String.concat ":" parts)
+      |> List.map (fun (m : Out.cli_match) ->
+          match m with
+          | { check_id; path; start; end_; extra = { message; severity; _ }; _ }
+            ->
+              let severity =
+                String.lowercase_ascii (string_of_severity severity)
+              in
+              let severity_and_ruleid =
+                if check_id =*= Rule_ID.dash_e then severity
+                else
+                  match Rule_ID.last_elt_opt check_id with
+                  | None -> severity
+                  | Some x -> spf "%s(%s)" severity x
+              in
+              let line =
+                (* ugly: redoing the work done in cli_match_of_core_match.
+                 * we can't use m.extra.lines because this field actually
+                 * contains a string, not a string list.
+                 *)
+                match
+                  Semgrep_output_utils.lines_of_file_at_range (start, end_) path
+                with
+                | Ok [] -> ""
+                | Ok (x :: _) -> x (* TOPORT rstrip? *)
+                | Error s -> failwith s
+              in
+              let parts =
+                [
+                  !!path;
+                  spf "%d" start.line;
+                  spf "%d" start.col;
+                  (* TOPORT? restrict to just I|E|W ? *)
+                  severity_and_ruleid;
+                  line;
+                  message;
+                ]
+              in
+              String.concat ":" parts)
 
-let dispatch_output_format (caps : < Cap.stdout >) (conf : conf)
-    (ctx : Out.format_context) (cli_output : Out.cli_output)
-    (hrules : Rule.hrules) : unit =
-  let print = CapConsole.print caps#stdout in
+let dispatch_output_format (conf : conf) (ctx : Out.format_context)
+    (cli_output : Out.cli_output) (hrules : Rule.hrules) : unit =
+  let print = UConsole.print in
   match conf.output_format with
   (* matches have already been displayed in a file_match_results_hook *)
   | Incremental -> ()
@@ -173,7 +185,7 @@ let dispatch_output_format (caps : < Cap.stdout >) (conf : conf)
   | Gitlab_secrets -> format Gitlab_secrets ctx cli_output |> List.iter print
   | Json -> format Json ctx cli_output |> List.iter print
   | Text ->
-      CapConsole.print_no_nl caps#stdout
+      UConsole.print_no_nl
         (Text_output.text_output ~max_chars_per_line:conf.max_chars_per_line
            ~max_lines_per_finding:conf.max_lines_per_finding cli_output)
   | Sarif ->
@@ -191,7 +203,7 @@ let dispatch_output_format (caps : < Cap.stdout >) (conf : conf)
       print (Sarif.Sarif_v_2_1_0_j.string_of_sarif_json_schema sarif_json)
   | Files_with_matches ->
       cli_output.results
-      |> List_.map (fun (x : Out.cli_match) -> !!(x.path))
+      |> List.map (fun (x : Out.cli_match) -> !!(x.path))
       |> Set_.of_list |> Set_.elements |> List_.sort |> String.concat "\n"
       |> print
 
@@ -204,11 +216,11 @@ let dispatch_output_format (caps : < Cap.stdout >) (conf : conf)
  * TODO? remove this intermediate? rename postprocess? or just
  * cli_output_of_core_runner ?
  *)
-let preprocess_result ~fixed_lines (res : Core_runner_result.t) : Out.cli_output
-    =
+let preprocess_result ~fips_mode ~fixed_lines (res : Core_runner_result.t) :
+    Out.cli_output =
   let cli_output : Out.cli_output =
-    Cli_json_output.cli_output_of_runner_result ~fixed_lines res.core res.hrules
-      res.scanned
+    Cli_json_output.cli_output_of_runner_result ~fips_mode ~fixed_lines res.core
+      res.hrules res.scanned
   in
   {
     cli_output with
@@ -219,9 +231,8 @@ let preprocess_result ~fixed_lines (res : Core_runner_result.t) : Out.cli_output
 (* python: mix of output.OutputSettings(), output.OutputHandler(), and
  * output.output() all at once.
  *)
-let output_result (caps : < Cap.stdout >) (conf : conf)
-    (runtime_params : Out.format_context) (profiler : Profiler.t)
-    (res : Core_runner_result.t) : Out.cli_output =
+let output_result (conf : conf) (runtime_params : Out.format_context)
+    (profiler : Profiler.t) (res : Core_runner_result.t) : Out.cli_output =
   (* In theory, we should build the JSON CLI output only for the
    * Json conf.output_format, but cli_output contains lots of data-structures
    * that are useful for the other formats (e.g., Vim, Emacs), so we build
@@ -229,7 +240,8 @@ let output_result (caps : < Cap.stdout >) (conf : conf)
    *)
   let (cli_output : Out.cli_output) =
     Profiler.record profiler ~name:"ignores_times" (fun () ->
-        preprocess_result ~fixed_lines:conf.fixed_lines res)
+        preprocess_result ~fips_mode:conf.fips_mode
+          ~fixed_lines:conf.fixed_lines res)
   in
   (* TODO: adjust conf.time *)
   let cli_output =
@@ -240,8 +252,26 @@ let output_result (caps : < Cap.stdout >) (conf : conf)
       }
     else cli_output
   in
+  let cli_output =
+    if conf.output_mcp_scan_results then
+      let total_bytes_scanned =
+        res.scanned |> Fpath_.Fpath_set.elements
+        |> List.map (fun path ->
+            match UFile.filesize path with
+            | Ok n -> n
+            | Error _ -> 0)
+        |> Common2.sum_int
+      in
+      {
+        cli_output with
+        mcp_scan_results =
+          Some
+            { rules = res.hrules |> Rule.rules_of_hrules; total_bytes_scanned };
+      }
+    else cli_output
+  in
   (* the actual output on stdout *)
-  dispatch_output_format caps conf runtime_params cli_output res.hrules;
+  dispatch_output_format conf runtime_params cli_output res.hrules;
   (* we return cli_output as the caller might use it *)
   cli_output
 [@@profiling]

@@ -1,10 +1,12 @@
 {
+  "engine_requested": "OSS",
   "errors": [],
   "paths": {
     "scanned": [
       "targets/message_interpolation/pattern_not_inside_complex.py"
     ]
   },
+  "profiling_results": [],
   "results": [
     {
       "check_id": "rules.message_interpolation.test_rule_id",
@@ -31,5 +33,6 @@
     }
   ],
   "skipped_rules": [],
+  "time": "<masked in tests>",
   "version": "0.42"
 }

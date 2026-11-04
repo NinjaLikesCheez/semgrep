@@ -1,4 +1,16 @@
 (*
+   Copyright (c) 2024-2025 Semgrep Inc.
+
+   This library is free software; you can redistribute it and/or
+   modify it under the terms of the GNU Lesser General Public License
+   version 2.1 as published by the Free Software Foundation.
+
+   This library is distributed in the hope that it will be useful, but
+   WITHOUT ANY WARRANTY; without even the implied warranty of
+   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the file
+   LICENSE for more details.
+*)
+(*
    Types and functions for translating YAML and specifically a Semgrep rule
    into something else.
 *)
@@ -20,12 +32,12 @@ type env = {
 }
 
 type dict = private {
-  (* Do not use directly Hashtbl.find_opt on this field!
+  (* Do not use directly Base.Hashtbl.find on this field!
    * Use instead dict_take_opt() or take_opt_no_env() otherwise
    * warn_if_remaining_unparsed_fields() will not work.
    * This is mutated!
    *)
-  h : (string, key * AST_generic.expr) Hashtbl.t;
+  h : (string, key * AST_generic.expr) Base.Hashtbl.t;
   first_tok : Rule.tok;
 }
 

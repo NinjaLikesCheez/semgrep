@@ -1,3 +1,15 @@
+(*
+   Copyright (c) 2024-2025 Semgrep Inc.
+
+   This library is free software; you can redistribute it and/or
+   modify it under the terms of the GNU Lesser General Public License
+   version 2.1 as published by the Free Software Foundation.
+
+   This library is distributed in the hope that it will be useful, but
+   WITHOUT ANY WARRANTY; without even the implied warranty of
+   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the file
+   LICENSE for more details.
+*)
 (* The order of the functions in this file is mostly the order in which
  * the information is displayed to the user in the terminal and most functions
  * are called from Scan_subcommand.ml:
@@ -24,7 +36,7 @@ val rules : too_many_entries:int -> Rules_source.t -> Rule.t list -> string
 val targets :
   Scanning_root.t list ->
   Semgrep_output_v1_t.skipped_target list ->
-  Fpath.t list ->
+  Fppath.t list ->
   string
 
 val scan_status :
@@ -51,4 +63,5 @@ val scan_summary :
   Maturity.t ->
   Semgrep_output_v1_t.cli_output ->
   Skipped_groups.t ->
+  Logs.level option ->
   string

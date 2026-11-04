@@ -34,7 +34,7 @@ type ('target_content, 'xpattern) t = {
   (* init returns an option to let the matcher the option to skip
    * certain files (e.g., big binary or minified files for spacegrep)
    *)
-  init : Fpath.t -> 'target_content option;
+  init : Fpath.t -> 'target_content option * float option;
   matcher :
     'target_content -> Fpath.t -> 'xpattern -> (match_range * MV.bindings) list;
 }
@@ -63,9 +63,7 @@ let (matches_of_matcher :
  fun xpatterns matcher internal_path origin ->
   if xpatterns =*= [] then Core_result.empty_match_result
   else
-    let target_content_opt, parse_time =
-      Common.with_time (fun () -> matcher.init internal_path)
-    in
+    let target_content_opt, parse_time = matcher.init internal_path in
     match target_content_opt with
     | None ->
         Core_result.empty_match_result (* less: could include parse_time *)
@@ -74,48 +72,44 @@ let (matches_of_matcher :
           Common.with_time (fun () ->
               xpatterns
               |> List.concat_map (fun (xpat, id, pstr) ->
-                     let xs =
-                       matcher.matcher target_content internal_path xpat
-                     in
-                     xs
-                     |> List_.map (fun ((loc1, loc2), env) ->
-                            (* this will be adjusted later *)
-                            let rule_id = Match_env.fake_rule_id (id, pstr) in
-                            {
-                              PM.rule_id;
-                              path =
-                                {
-                                  internal_path_to_content = internal_path;
-                                  origin;
-                                };
-                              range_loc = (loc1, loc2);
-                              env;
-                              taint_trace = None;
-                              ast_node = None;
-                              tokens = lazy [ info_of_token_location loc1 ];
-                              engine_of_match = `OSS;
-                              validation_state = `No_validator;
-                              severity_override = None;
-                              metadata_override = None;
-                              sca_match = None;
-                              fix_text = None;
-                              facts = [];
-                            })))
+                  let xs = matcher.matcher target_content internal_path xpat in
+                  xs
+                  |> List.map (fun ((loc1, loc2), env) ->
+                      (* this will be adjusted later *)
+                      let rule_id = Match_env.fake_rule_id (id, pstr) in
+                      {
+                        PM.rule_id;
+                        path =
+                          { internal_path_to_content = internal_path; origin };
+                        range_loc = (loc1, loc2);
+                        env;
+                        taint_trace = None;
+                        ast_node = None;
+                        tokens = lazy_safe [ info_of_token_location loc1 ];
+                        engine_of_match = `OSS;
+                        validation_state = `No_validator;
+                        severity_override = None;
+                        metadata_override = None;
+                        sca_match = None;
+                        fix_text = None;
+                        facts = [];
+                      })))
         in
         RP.mk_match_result res Core_error.ErrorSet.empty
-          { Core_profiling.parse_time; match_time }
+          { Core_profiling.parse_time = parse_time ||| 0.0; match_time }
 
-let hmemo : (Fpath.t, Pos.bytepos_linecol_converters) Hashtbl.t =
-  Hashtbl.create 101
+let full_convs_cache = SharedMemo.create ()
 
 let () =
   (* nosemgrep: forbid-tmp *)
-  UTmp.register_temp_file_cleanup_hook (fun file -> Hashtbl.remove hmemo file)
+  UTmp.register_temp_file_cleanup_hook (fun file ->
+      SharedMemo.remove full_convs_cache file)
+
+let full_convs_memoed =
+  SharedMemo.make_with_state full_convs_cache Pos.full_converters_large
 
 let line_col_of_charpos (file : Fpath.t) (charpos : int) : int * int =
-  let conv =
-    Common.memoized hmemo file (fun () -> Pos.full_converters_large file)
-  in
+  let conv = full_convs_memoed file in
   conv.bytepos_to_linecol_fun charpos
 
 let mval_of_string str t =

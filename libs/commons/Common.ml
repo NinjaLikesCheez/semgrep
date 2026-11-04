@@ -21,17 +21,9 @@ module Log = Log_commons.Log
 (* if set, certain functions like unwind_protect will not
  * do a try and finalize and instead just call the function, which
  * helps in ocamldebug and also in getting better backtraces.
- * This is also useful to set in a js_of_ocaml (jsoo) context to
- * again get better backtraces.
  *)
+(* nosemgrep: no-ref-declarations-at-top-scope *)
 let debugger = ref false
-
-(* You should set this to true when you run code compiled by js_of_ocaml
- * so some functions can change their implementation and rely
- * less on non-portable API like Unix which does not work well under
- * node or in the browser.
- *)
-let jsoo = ref false
 
 (*****************************************************************************)
 (* Circular dependencies *)
@@ -110,10 +102,17 @@ let before_return f v =
 
 (* Report the time a function takes. *)
 let with_time f =
-  let t1 = UUnix.gettimeofday () in
+  let t1 = Unix.gettimeofday () in
   let res = f () in
-  let t2 = UUnix.gettimeofday () in
+  let t2 = Unix.gettimeofday () in
   (res, t2 -. t1)
+
+let force_lazy_with_time lazy_x =
+  let had_to_force = not (Lazy_safe.is_val lazy_x) in
+  let x, time = with_time (fun () -> Lazy_safe.force lazy_x) in
+  let time = if had_to_force then Some time else None in
+  (x, time)
+[@@profiling]
 
 (*****************************************************************************)
 (* Exn *)
@@ -151,19 +150,19 @@ let save_excursion reference newv f =
   reference := newv;
   finalize f (fun _ -> reference := old)
 
+let save_excursion_atomic atom newv f =
+  let old = Atomic.get atom in
+  Atomic.set atom newv;
+  finalize f (fun _ -> Atomic.set atom old)
+
 let memoized ?(use_cache = true) h k f =
-  if not use_cache then f ()
-  else
-    try Hashtbl.find h k with
-    | Not_found ->
-        let v = f () in
-        Hashtbl.add h k v;
-        v
+  (* TODO(SAF-1940): experiment with weak refs *)
+  if not use_cache then f () else Base.Hashtbl.find_or_add h k ~default:f
 
 exception Todo
 exception Impossible
 exception Multi_found (* to be consistent with Not_found *)
-exception UnixExit of int
+exception UnixExit of (int * string)
 exception ErrorOnFile of string * Fpath.t
 
 let exn_to_s exn = Printexc.to_string exn
@@ -259,6 +258,14 @@ let ( ||| ) a b =
   | Some x -> x
   | None -> b
 
+let combine_opt f opt_a opt_b =
+  match (opt_a, opt_b) with
+  | None, None -> None
+  | Some x, None
+  | None, Some x ->
+      Some x
+  | Some a, Some b -> Some (f a b)
+
 (*****************************************************************************)
 (* Result *)
 (*****************************************************************************)
@@ -294,17 +301,33 @@ let matched7 s =
     matched 6 s,
     matched 7 s )
 
-let _memo_compiled_regexp = Hashtbl.create 101
+let _memo_compiled_regexp = Base.Hashtbl.Poly.create ~size:101 ()
 
-let candidate_match_func s re =
-  (* old: Str.string_match (Str.regexp re) s 0 *)
+(* Ideally this would be a use of a [SharedMemo].  However, TSAN reports possibly-
+ * spurious data races within `strstubs.c` when regexps are shared between threads.
+ * Therefore, we are conservative here and make our backing hashtable per-domain. *)
+let _memo_compiled_regexp =
+  Domain.DLS.new_key (fun () -> Base.Hashtbl.Poly.create ~size:101 ())
+
+let match_func s re =
   let compile_re =
-    memoized _memo_compiled_regexp re (fun () -> Str.regexp re)
+    memoized (Domain.DLS.get _memo_compiled_regexp) re (fun () -> Str.regexp re)
   in
   Str.string_match compile_re s 0
 
-let match_func s re = candidate_match_func s re
 let ( =~ ) s re = match_func s re
+
+let ( =/~ ) (p : Fpath.t) re =
+  let s =
+    if Sys.win32 then
+      (* Replace windows path separaters with '/' for consistent regex matching.
+         E.g., a path `Fpath.v "a\b\c"` is converted to the string '"a/b/c"' so
+         it can be matched against a regex pattern like `.*/b/.*`, just as would
+         a unix path. *)
+      Fpath.segs p |> String.concat "/"
+    else Fpath.to_string p
+  in
+  match_func s re
 
 (*****************************************************************************)
 (* Strings *)
@@ -418,14 +441,6 @@ let input_text_line ic =
 (*****************************************************************************)
 (* Tree *)
 (*****************************************************************************)
-
-(*****************************************************************************)
-(* Maps *)
-(*****************************************************************************)
-
-module SMap = Map.Make (String)
-
-type 'a smap = 'a SMap.t
 
 (*****************************************************************************)
 (* Graph *)

@@ -34,6 +34,7 @@ module Log = Log_semgrep.Log
  * Core_match.t
  * -> Core_result.processed_match (in this file)
  * -> Core_result.matches_single_file (this file)
+ * -> Core_result.matches_single_file_with_time (this file)
  * -> Core_result.t (this file)
  * -> Core_result.result_or_exn (this file)
  * -> Semgrep_output_v1.core_output
@@ -59,13 +60,19 @@ let fmt_errors fmt errors =
 type 'a match_result = {
   matches : Core_match.t list;
   errors : E.ErrorSet.t; [@printer fmt_errors]
+  (* It is just convinient to have 'quick_profiling' and 'profiling' as optional,
+    but we may want to reconsider this if we clean up profiling code. *)
+  quick_profiling : Core_quick_profiling.t option;
   profiling : 'a option;
   explanations : Matching_explanation.t list;
 }
 [@@deriving show]
 
-(* shortcut *)
+(* shortcuts *)
 type matches_single_file = Core_profiling.partial_profiling match_result
+[@@deriving show]
+
+type matches_single_file_with_time = Core_profiling.file_profiling match_result
 [@@deriving show]
 
 (* What is a processsed match?
@@ -99,6 +106,7 @@ type t = {
   (* old: matches : Core_match.t list *)
   processed_matches : processed_match list;
   errors : Core_error.t list;
+  fixpoint_timeouts : Core_error.t list;
   (* A target is scanned when semgrep found some applicable rules.
    * The information is useful to return to pysemgrep/osemgrep to
    * display statistics.
@@ -111,10 +119,13 @@ type t = {
   skipped_rules : Rule_error.invalid_rule list;
   valid_rules : Rule.rule list;
   rules_with_targets : Rule.rule list;
+  quick_profiling : Core_quick_profiling.t option;
   profiling : Core_profiling.t option;
   explanations : Matching_explanation.t list option;
   rules_by_engine : (Rule_ID.t * Engine_kind.t) list;
   interfile_languages_used : Analyzer.t list;
+  (* extra information *)
+  symbol_analysis : Semgrep_output_v1_t.symbol_analysis option;
 }
 [@@deriving show]
 
@@ -130,13 +141,18 @@ let empty_match_result : Core_profiling.times match_result =
   {
     matches = [];
     errors = E.ErrorSet.empty;
+    quick_profiling = None;
     profiling = None;
     explanations = [];
   }
 
 let mk_result_with_just_errors (errors : Core_error.t list) : t =
+  let errors, `Fixpoint_timeouts fixpoint_timeouts =
+    E.split_fixpoint_timeouts errors
+  in
   {
     errors;
+    fixpoint_timeouts;
     (* default values *)
     processed_matches = [];
     valid_rules = [];
@@ -144,10 +160,12 @@ let mk_result_with_just_errors (errors : Core_error.t list) : t =
     skipped_targets = [];
     scanned = [];
     skipped_rules = [];
+    quick_profiling = None;
     profiling = None;
     explanations = None;
     rules_by_engine = [];
     interfile_languages_used = [];
+    symbol_analysis = None;
   }
 
 (* Create a match result *)
@@ -155,7 +173,17 @@ let mk_match_result matches errors profiling =
   {
     matches;
     errors;
-    profiling = Core_profiling.profiling_opt profiling;
+    quick_profiling = None;
+    profiling =
+      (* NOTE "Discarding profiling info":
+
+        Previously we used 'Core_profiling.profiling_opt' here, but now we keep
+        most of the 'profiling' data around, even without `-json_time`. This is
+        because files 'run_time' collected in 'profiling' are later used to
+        calculate whole-program scanning times. Instead, we selectively discard
+        expensive data such as 'Core_profiling.rule_times' e.g. in 'add_run_time',
+        'collate_rule_results', and 'mk_result'. *)
+      Some profiling;
     explanations = [];
   }
 
@@ -163,26 +191,70 @@ let mk_match_result matches errors profiling =
 (* Augment reported information with profiling info *)
 (*****************************************************************************)
 
+let map_quick_profiling (f : Core_quick_profiling.t -> Core_quick_profiling.t)
+    (x : 'a match_result) : 'a match_result =
+  {
+    x with
+    quick_profiling = x.quick_profiling |> Core_quick_profiling.map_opt f;
+  }
+
+let quick_add_parse_time_opt file (parse_time : float option)
+    (match_result : _ match_result) : _ match_result =
+  match parse_time with
+  | None -> match_result
+  | Some parse_time ->
+      match_result
+      |> map_quick_profiling
+           (Core_quick_profiling.add_parse_time file parse_time)
+
+let quick_add_match_time file rule_id match_time (match_result : _ match_result)
+    : _ match_result =
+  match_result
+  |> map_quick_profiling
+       (Core_quick_profiling.add_match_time file rule_id match_time)
+
+let quick_add_taint_stats tainting_stats (match_result : _ match_result) :
+    _ match_result =
+  match_result
+  |> map_quick_profiling (fun (quick_profiling : Core_quick_profiling.t) ->
+      {
+        quick_profiling with
+        tainting_stats =
+          Core_quick_profiling.Tainting_stats.combine
+            quick_profiling.tainting_stats tainting_stats;
+      })
+
 let map_profiling (f : 'a -> 'b) (x : 'a match_result) : 'b match_result =
   { x with profiling = Option.map f x.profiling }
 
-let add_run_time (run_time : float)
-    (match_result : Core_profiling.partial_profiling match_result) :
-    Core_profiling.file_profiling match_result =
-  match_result
-  |> map_profiling (fun { Core_profiling.p_file; p_rule_times } ->
-         { Core_profiling.file = p_file; rule_times = p_rule_times; run_time })
+let add_run_time file (run_time : float option)
+    (match_result : matches_single_file) : matches_single_file_with_time =
+  let match_result =
+    match_result
+    |> map_profiling (fun { Core_profiling.p_file; p_rule_times } ->
+        {
+          Core_profiling.file = p_file;
+          rule_times = Core_profiling.profiling_opt p_rule_times;
+          run_time = run_time ||| 0.0;
+        })
+  in
+  match run_time with
+  | None -> match_result
+  | Some run_time ->
+      (* TODO: If we merged 'profiling' and 'quick_profiling' we could take 'p_file'. *)
+      match_result
+      |> map_quick_profiling (Core_quick_profiling.add_run_time file run_time)
 
 let add_rule (rule : Rule.rule)
     (match_result : Core_profiling.times match_result) :
     Core_profiling.rule_profiling match_result =
   match_result
   |> map_profiling (fun { Core_profiling.parse_time; match_time } ->
-         {
-           Core_profiling.rule_id = fst rule.Rule.id;
-           rule_parse_time = parse_time;
-           rule_match_time = match_time;
-         })
+      {
+        Core_profiling.rule_id = fst rule.Rule.id;
+        rule_parse_time = parse_time;
+        rule_match_time = match_time;
+      })
 
 (*****************************************************************************)
 (* Aggregate *)
@@ -195,23 +267,28 @@ let collate_results (init : 'c) (combine : 'b option -> 'c -> 'c)
     (final : 'c -> 'a option) (results : 'b match_result list) : 'a match_result
     =
   let unzip_results l =
-    let rec unzip all_matches all_errors all_profiling all_explanations
-        (l : _ match_result list) =
+    let rec unzip all_matches all_errors all_quick_profiling all_profiling
+        all_explanations (l : _ match_result list) =
       match l with
-      | { matches; errors; profiling; explanations } :: l ->
+      | { matches; errors; quick_profiling; profiling; explanations } :: l ->
           unzip (matches :: all_matches) (errors :: all_errors)
+            (Core_quick_profiling.combine_opt all_quick_profiling
+               quick_profiling)
             (combine profiling all_profiling)
             (explanations :: all_explanations)
             l
       | [] ->
           ( List.rev all_matches,
             List.rev all_errors,
+            all_quick_profiling,
             all_profiling,
             List.rev all_explanations )
     in
-    unzip [] [] init [] l
+    unzip [] [] None init [] l
   in
-  let matches, errors, profiling, explanations = unzip_results results in
+  let matches, errors, quick_profiling, profiling, explanations =
+    unzip_results results
+  in
   {
     matches = List_.flatten matches;
     (* We deduplicate errors here to avoid repeat PartialParsing errors
@@ -222,6 +299,7 @@ let collate_results (init : 'c) (combine : 'b option -> 'c -> 'c)
        See also the note in semgrep_output_v1.atd.
     *)
     errors = List.fold_left E.ErrorSet.union E.ErrorSet.empty errors;
+    quick_profiling;
     profiling = final profiling;
     explanations = List_.flatten explanations;
   }
@@ -235,7 +313,7 @@ let collate_pattern_results (results : Core_profiling.times match_result list) :
     | None -> all_profiling
     | Some profiling -> Core_profiling.add_times profiling all_profiling
   in
-  let final = Core_profiling.profiling_opt in
+  let final = Option.some in
   collate_results init combine final results
 
 (* Aggregate a list of rule results into one result for the target *)
@@ -250,9 +328,15 @@ let collate_rule_results (file : Fpath.t)
   in
   let final profiling =
     let (p : Core_profiling.partial_profiling) =
-      { p_file = file; p_rule_times = profiling }
+      {
+        p_file = file;
+        p_rule_times =
+          (* Don't want to keep rule times without `-json_time` *)
+          Core_profiling.if_profiling ~default:[] (fun () -> profiling);
+      }
     in
-    Core_profiling.profiling_opt p
+    (* See NOTE "Discarding profiling info". *)
+    Some p
   in
   collate_results init combine final results
 
@@ -261,10 +345,17 @@ let collate_rule_results (file : Fpath.t)
 (*****************************************************************************)
 
 (* Aggregate a list of target results into one final result *)
-let mk_result (results : Core_profiling.file_profiling match_result list)
+let mk_result (results : matches_single_file_with_time list)
     (rules_with_engine : (Rule.t * Engine_kind.t) list)
     (skipped_rules : Rule_error.invalid_rule list) (scanned : Target.t list)
     (interfile_languages_used : Analyzer.t list) ~rules_parse_time : t =
+  let%trace span = "Core_result.mk_result" in
+  (let target_fpaths = List.map Target.internal_path scanned in
+   let all_rule_ids =
+     List.map (fun r -> fst (fst r).Rule.id) rules_with_engine
+     @ List.map (fun (_, id, _) -> id) skipped_rules
+   in
+   Trace_data.record_phase_data ~fpaths:target_fpaths ~rules:all_rule_ids span);
   (* concatenating information from the match_result list *)
   let unprocessed_matches =
     results
@@ -272,26 +363,31 @@ let mk_result (results : Core_profiling.file_profiling match_result list)
     (* These fixes and ignores are initially all unset, and will be populated
        after we run our Pre_post_core_scan
     *)
-    |> List_.map mk_processed_match
+    |> List.map mk_processed_match
   in
   let explanations =
     results |> List.concat_map (fun (x : _ match_result) -> x.explanations)
   in
-  let errors =
+  let errors, `Fixpoint_timeouts fixpoint_timeouts =
     results
-    |> List.concat_map (fun (x : _ match_result) ->
-           x.errors |> E.ErrorSet.elements)
+    |> List.fold_left
+         (fun errors (x : _ match_result) ->
+           errors |> E.ErrorSet.union x.errors)
+         E.ErrorSet.empty
+    |> E.ErrorSet.elements |> E.split_fixpoint_timeouts
   in
 
   let (prof : Core_profiling.t) =
     let file_times =
-      results
-      |> List_.filter_map
-           (fun (result : Core_profiling.file_profiling match_result) ->
-             result.profiling)
+      Core_profiling.if_profiling ~default:[] (fun () ->
+          results
+          |> List.filter_map (fun (result : matches_single_file_with_time) ->
+              result.profiling))
     in
     {
-      rules = List_.map fst rules_with_engine;
+      rules =
+        Core_profiling.if_profiling ~default:None (fun () ->
+            Some (List.map fst rules_with_engine));
       rules_parse_time;
       file_times;
       (* Notably, using the `top_heap_words` does not measure cumulative
@@ -302,10 +398,23 @@ let mk_result (results : Core_profiling.file_profiling match_result list)
       max_memory_bytes = (Gc.quick_stat ()).top_heap_words * Sys.word_size;
     }
   in
-  let profiling = Core_profiling.profiling_opt prof in
+  let quick_profiling =
+    results
+    |> List.fold_left
+         (fun qprof (res : matches_single_file_with_time) ->
+           Core_quick_profiling.combine_opt qprof res.quick_profiling)
+         None
+  in
+  let profiling =
+    (* We always have a 'profiling' record here, but it only carries a cheap
+       subset of the data unless `-json_time` is passed.  *)
+    Some prof
+  in
   {
     processed_matches = unprocessed_matches;
     errors;
+    fixpoint_timeouts;
+    quick_profiling;
     profiling;
     scanned;
     skipped_targets = [];
@@ -314,6 +423,18 @@ let mk_result (results : Core_profiling.file_profiling match_result list)
     rules_with_targets = [];
     explanations = (if explanations =*= [] then None else Some explanations);
     rules_by_engine =
-      rules_with_engine |> List_.map (fun (r, ek) -> (fst r.Rule.id, ek));
+      rules_with_engine |> List.map (fun (r, ek) -> (fst r.Rule.id, ek));
     interfile_languages_used;
+    symbol_analysis = None;
   }
+
+let compare_processed_match (a : processed_match) (b : processed_match) =
+  let c = Core_match.compare a.pm b.pm in
+  if c <> 0 then c
+  else
+    try
+      (* fallback for deterministic results *)
+      Stdlib.compare a b
+    with
+    (* If lazy isn't forced this happens sometimes *)
+    | Invalid_argument _ -> 0

@@ -1,4 +1,5 @@
 {
+  "engine_requested": "OSS",
   "errors": [],
   "interfile_languages_used": [],
   "paths": {
@@ -7,6 +8,7 @@
       "targets/match_based_id/duplicates/duplicate2.py"
     ]
   },
+  "profiling_results": [],
   "results": [
     {
       "check_id": "rules.match_based_id.eqeq-bad",
@@ -322,5 +324,6 @@
     }
   ],
   "skipped_rules": [],
+  "time": "<masked in tests>",
   "version": "0.42"
 }

@@ -17,7 +17,7 @@ let fold :
     ('acc ->
     AST_generic.ident ->
     AST_generic.id_info ->
-    AST_generic.expr option ->
+    IL.param_default option ->
     'acc) ->
     'acc ->
     IL.param list ->
@@ -31,18 +31,22 @@ let fold :
         match par with
         | Param { pname = name; pdefault } ->
             f acc name.ident name.id_info pdefault
+        | ParamRest name -> f acc name.ident name.id_info None
         (* JS: {arg} : type *)
         | PatternParam
             (G.OtherPat
-              ( ("ExprToPattern", _),
-                [
-                  G.E
-                    { e = G.Cast (_, _, { e = G.Record (_, fields, _); _ }); _ };
-                ] ))
+               ( ("ExprToPattern", _),
+                 [
+                   G.E
+                     {
+                       e = G.Cast (_, _, { e = G.Record (_, fields, _); _ });
+                       _;
+                     };
+                 ] ))
         (* JS: {arg} *)
         | PatternParam
             (G.OtherPat
-              (("ExprToPattern", _), [ G.E { e = G.Record (_, fields, _); _ } ]))
+               (("ExprToPattern", _), [ G.E { e = G.Record (_, fields, _); _ } ]))
           ->
             List.fold_left
               (fun acc field ->

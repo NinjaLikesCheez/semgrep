@@ -1,4 +1,16 @@
 (*
+   Copyright (c) 2021-2025 Semgrep Inc.
+
+   This library is free software; you can redistribute it and/or
+   modify it under the terms of the GNU Lesser General Public License
+   version 2.1 as published by the Free Software Foundation.
+
+   This library is distributed in the hope that it will be useful, but
+   WITHOUT ANY WARRANTY; without even the implied warranty of
+   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the file
+   LICENSE for more details.
+*)
+(*
    Guess whether a given file is indeed written in the specified
    programming language.
 *)
@@ -63,9 +75,9 @@ let prepend_period_if_needed s =
    Both '.d.ts' and '.ts' are considered extensions of 'hello.d.ts'.
 *)
 let has_extension extensions =
-  has_suffix (List_.map prepend_period_if_needed extensions)
+  has_suffix (List.map prepend_period_if_needed extensions)
 
-let has_lang_extension lang = has_extension (Lang.ext_of_lang lang)
+let has_lang_extension lang = has_extension (Lang.exts_of_lang lang)
 
 let has_excluded_lang_extension lang =
   has_extension (Lang.excluded_exts_of_lang lang)
@@ -74,16 +86,21 @@ let has_an_extension =
   let f path = Filename.extension !!path <> "" in
   Test_path f
 
+(* TODO: duped logic with `UFile.is_executable`? *)
 let is_executable =
   let f path =
-    Sys.file_exists !!path
+    Sys_.file_exists !!path
     &&
-    let st = Unix.stat !!path in
-    match st.st_kind with
-    | S_REG ->
+    match UUnix.stat path with
+    | Ok { st_kind = S_REG; _ } when Platform.is_windows ->
+        (* File perms cannot tell us whether a file is an executable script
+           on Windows so we only check that a regular file exists. *)
+        true
+    | Ok { st_kind = S_REG; st_perm; _ } ->
         (* at least some user has exec permission *)
-        st.st_perm land 0o111 <> 0
-    | _ -> false
+        st_perm land 0o111 <> 0
+    | Ok _ -> false
+    | Error _ -> false
   in
   (* ".exe" is intended for Windows, although this would be a binary file, not
      a script. *)
@@ -103,8 +120,10 @@ let get_first_block ?(block_size = 4096) path =
       let len = min block_size (in_channel_length ic) in
       really_input_string ic len)
 
-let shebang_re = lazy (Pcre2_.regexp "^#![ \t]*([^ \t]*)[ \t]*([^ \t].*)?$")
-let split_cmd_re = lazy (Pcre2_.regexp "[ \t]+")
+let shebang_re =
+  lazy_safe (Pcre2_.compile_exn "^#![ \t]*([^ \t]*)[ \t]*([^ \t].*)?$")
+
+let split_cmd_re = lazy_safe (Pcre2_.compile_exn "[ \t]+")
 
 (*
    A shebang supports at most the name of the script and one argument:
@@ -130,27 +149,36 @@ let split_cmd_re = lazy (Pcre2_.regexp "[ \t]+")
      "#!/usr/bin/env -S bash -e -u" -> ["/usr/bin/env"; "bash"; "-e"; "-u"]
 *)
 let parse_shebang_line s =
-  let matched = Pcre2_.exec_noerr ~rex:(Lazy.force shebang_re) s in
+  let matched = Pcre2_.captures (Lazy_safe.force shebang_re) s in
   match matched with
-  | None -> None
-  | Some matched -> (
-      match Pcre2.get_substrings matched with
-      | [| _; arg0; "" |] -> Some [ arg0 ]
-      | [| _; "/usr/bin/env" as arg0; arg1 |] -> (
+  | Error _
+  | Ok None ->
+      None
+  | Ok (Some matched) -> (
+      match
+        Pcre2_.
+          ( match_of_captures matched 1 |> Option.map substring_of_match,
+            match_of_captures matched 2 |> Option.map substring_of_match )
+      with
+      | Some arg0, None -> Some [ arg0 ]
+      | Some ("/usr/bin/env" as arg0), Some arg1 -> (
           (* approximate emulation of 'env -S'; should work if the command
              contains no quotes around the arguments. *)
           match string_chop_prefix ~pref:"-S" arg1 with
           | Some packed_args ->
               let args =
-                Pcre2_.split_noerr ~rex:(Lazy.force split_cmd_re)
-                  ~on_error:[ packed_args ] packed_args
+                Pcre2_.split (Lazy_safe.force split_cmd_re) packed_args
+                |> Result.value ~default:[ packed_args ]
                 |> List.filter (fun fragment -> fragment <> "")
               in
               Some (arg0 :: args)
           | None -> Some [ arg0; arg1 ])
-      | [| _; arg0; arg1 |] -> Some [ arg0; arg1 ]
-      | [| _ |] -> None
-      | _ -> assert false)
+      | Some arg0, Some arg1 -> Some [ arg0; arg1 ]
+      | None, None -> None
+      | None, Some _ ->
+          (* Not possible since first group is mandatory, so if we match it
+             will have captured. *)
+          assert false)
 
 let get_shebang_command path = get_first_line path |> parse_shebang_line
 
@@ -170,13 +198,16 @@ let uses_shebang_command_name cmd_names =
    PCRE regexp using the default options.
    In case of an error, the result is false.
  *)
+(* TODO: just silently dropping errors like this seems bad *)
 let regexp pat =
-  let rex = Pcre2_.regexp pat in
-  let f path =
-    let s = get_first_block path in
-    Pcre2_.pmatch_noerr ~rex s
-  in
-  Test_path f
+  match Pcre2_.compile pat with
+  | Ok re ->
+      let f path =
+        let s = get_first_block path in
+        Pcre2_.is_match re s |> Result.value ~default:false
+      in
+      Test_path f
+  | Error _ -> Test_path (Fun.const false)
 
 let is_executable_script cmd_names =
   And
@@ -185,7 +216,7 @@ let is_executable_script cmd_names =
 
 (*
    Matches if either
-   - language has extension in Lang.ext_of_lang
+   - language has extension in Lang.exts_of_lang
    - language is script with shebang in Lang.shebangs_of_lang
 
    General test for a script:
@@ -247,7 +278,9 @@ let inspect_file_p (lang : Lang.t) path =
     | Csharp
     | Dart
     | Elixir
+    | Fga
     | Go
+    | Gosu
     | Html
     | Java
     | Js
@@ -259,13 +292,13 @@ let inspect_file_p (lang : Lang.t) path =
     | Lua
     | Move_on_sui
     | Move_on_aptos
+    | Objc
     | Ocaml
     | Promql
     | Protobuf
     | Python2
     | Python3
     | Python
-    | Ql
     | R
     | Ruby
     | Rust
@@ -277,7 +310,8 @@ let inspect_file_p (lang : Lang.t) path =
     | Ts
     | Vue
     | Xml
-    | Yaml ->
+    | Yaml
+    | Powershell ->
         matches_lang lang
   in
 

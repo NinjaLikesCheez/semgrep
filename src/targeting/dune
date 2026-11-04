@@ -8,6 +8,9 @@
  (name semgrep_targeting)
  (wrapped false)
  (libraries
+   base
+   collections
+
    commons
 
    fpath
@@ -17,14 +20,17 @@
    semgrep.target
    semgrep.core
  )
+ (preprocessor_deps (file default.semgrepignore))
  (preprocess
    (pps
+     ppx_blob
      ppx_profiling
-     tracing.ppx
+     telemetry.ppx
      ppx_deriving.show
      ppx_deriving_yojson
      ppx_deriving.eq
      ppx_hash
+     commons.ppx
    )
  )
 )

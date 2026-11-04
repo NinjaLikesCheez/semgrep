@@ -861,14 +861,14 @@ let fakeInfo ?next_to str = Tok.FakeTok (str, next_to)
 let unwrap = fst
 
 let uncomma xs =
-  List_.filter_map
+  List.filter_map
     (function
       | Either.Left e -> Some e
       | Either.Right _info -> None)
     xs
 
 let uncomma_dots xs =
-  List_.filter_map
+  List.filter_map
     (function
       | Either_.Left3 e -> Some e
       | Either_.Right3 _info
@@ -886,21 +886,21 @@ let unarg arg =
 let unargs xs =
   uncomma xs
   |> Either_.partition (function
-       | Arg e -> Left e
-       | ArgRef (_, e)
-       | ArgUnpack (_, e)
-       | ArgLabel (_, _, e) ->
-           Right e)
+    | Arg e -> Left e
+    | ArgRef (_, e)
+    | ArgUnpack (_, e)
+    | ArgLabel (_, _, e) ->
+        Right e)
 
 let unmodifiers class_vars =
   match class_vars with
   | NoModifiers _ -> []
-  | VModifiers xs -> List_.map unwrap xs
+  | VModifiers xs -> List.map unwrap xs
 
 let map_paren f (lp, x, rp) = (lp, f x, rp)
 
 let map_comma_list f xs =
-  List_.map
+  List.map
     (fun x ->
       match x with
       | Either.Left e -> Either.Left (f e)
@@ -980,9 +980,9 @@ let str_of_name_namespace x =
       Tok.content_of_tok tok
   | XName xs ->
       xs
-      |> List_.map (function
-           | QITok _ -> "\\"
-           | QI id -> str_of_ident id)
+      |> List.map (function
+        | QITok _ -> "\\"
+        | QI id -> str_of_ident id)
       |> String.concat ""
 
 let name_of_class_name x =

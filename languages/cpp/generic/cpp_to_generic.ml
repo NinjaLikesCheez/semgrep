@@ -21,6 +21,7 @@ module G = AST_generic
 module Log = Log_parser_cpp.Log
 
 (* See Parse_cpp_tree_Sitter.recover_when_partial_error *)
+(* nosemgrep: no-ref-declarations-at-top-scope *)
 let recover_when_partial_error = ref true
 
 (*****************************************************************************)
@@ -210,7 +211,7 @@ and map_ident_or_op (env : env) = function
   | IdConverter (v1, v2) ->
       let v1 = map_tok env v1 and v2 = map_type_ env v2 in
       let ii = AST_generic_helpers.ii_of_any (G.T v2) in
-      let s = v1 :: ii |> List_.map Tok.content_of_tok |> String.concat "" in
+      let s = v1 :: ii |> List.map Tok.content_of_tok |> String.concat "" in
       let t = Tok.combine_toks v1 ii in
       let id = (s, t) in
       (id, None)
@@ -218,7 +219,7 @@ and map_ident_or_op (env : env) = function
       (* Just copying the above. *)
       let v1 = map_tok env v1 and v2 = map_expr env v2 in
       let ii = AST_generic_helpers.ii_of_any (G.E v2) in
-      let s = v1 :: ii |> List_.map Tok.content_of_tok |> String.concat "" in
+      let s = v1 :: ii |> List.map Tok.content_of_tok |> String.concat "" in
       let t = Tok.combine_toks v1 ii in
       let id = (s, t) in
       (id, None)
@@ -275,7 +276,7 @@ and map_typeC env x : G.type_ =
       let v1 = map_of_list (map_sized_type env) v1
       and v2 = map_of_option (map_type_ env) v2 in
       let allt = v1 @ Option.to_list v2 in
-      G.OtherType (("TSized", G.fake ""), allt |> List_.map (fun t -> G.T t))
+      G.OtherType (("TSized", G.fake ""), allt |> List.map (fun t -> G.T t))
       |> G.t
   | TPointer (v1, v2, v3) ->
       let v1 = map_tok env v1
@@ -376,7 +377,7 @@ and map_typeC env x : G.type_ =
   | TypeTodo (v1, v2) ->
       let v1 = map_todo_category env v1
       and v2 = map_of_list (map_type_ env) v2 in
-      G.OtherType (v1, v2 |> List_.map (fun t -> G.T t)) |> G.t
+      G.OtherType (v1, v2 |> List.map (fun t -> G.T t)) |> G.t
 
 and map_primitive_type _env = function
   | TVoid -> "void"
@@ -400,7 +401,7 @@ and map_sized_type env (kind, t) : G.type_ =
 and map_type_qualifiers env v : G.attribute list =
   map_of_list (map_qualifier_wrap env) v
 
-and map_qualifier_wrap _env (qu, t) : G.attribute =
+and map_qualifier_wrap env (qu, t) : G.attribute =
   (* old: (map_wrap env (map_type_qualifier env)) *)
   match qu with
   | Const -> G.attr G.Const t
@@ -412,6 +413,12 @@ and map_qualifier_wrap _env (qu, t) : G.attribute =
   | Constinit -> G.unhandled_keywordattr ("ConstInit", t)
   | Consteval -> G.unhandled_keywordattr ("ConstEval", t)
   | NoReturn -> G.unhandled_keywordattr ("noreturn", t)
+  | Nonnull -> G.unhandled_keywordattr ("_Nonnull", t)
+  | StaticArray -> G.unhandled_keywordattr ("static", t)
+  | MsCallQualifier name -> G.unhandled_keywordattr name
+  | AlignAsQualifier (l, arg, r) ->
+      let arg = map_argument env arg in
+      OtherAttribute (("AlignAs", t), [ G.Tk l; G.Ar arg; G.Tk r ])
   | Extension -> G.unhandled_keywordattr ("extension", t)
 
 and map_expr env x : G.expr =
@@ -513,16 +520,15 @@ and map_expr env x : G.expr =
       and lbrace, xs, rbrace =
         map_brace env (map_of_list (map_initialiser env)) v2
       in
-      G.New
-        (lpar, t, G.empty_id_info (), (lbrace, xs |> List_.map G.arg, rbrace))
+      G.New (lpar, t, G.empty_id_info (), (lbrace, xs |> List.map G.arg, rbrace))
       |> G.e
   | Generic (tk, (_l, (e, assocs), _r)) ->
       let e = map_expr env e in
       let cond =
-        G.Cond (Call (IdSpecial (Typeof, tk) |> G.e, fb [ G.Arg e ]) |> G.e)
+        G.Cond (Call (Special (Typeof, tk) |> G.e, fb [ G.Arg e ]) |> G.e)
       in
       let cases =
-        List_.map
+        List.map
           (fun (ty, e) ->
             G.CasesAndBody
               ( [ G.Case (G.fake "", G.PatType (map_type_ env ty)) ],
@@ -631,7 +637,7 @@ and map_expr env x : G.expr =
   *)
   | RequiresExpr (v1, (_l1, v2, _r1), (_l2, v3, _r2)) ->
       let params =
-        v2 |> List_.map (map_parameter env) |> List_.map (fun x -> G.Pa x)
+        v2 |> List.map (map_parameter env) |> List.map (fun x -> G.Pa x)
       in
       let reqs = v3 |> List.concat_map (map_requirement env) in
       G.OtherExpr
@@ -660,15 +666,15 @@ and map_expr env x : G.expr =
   | ExprTodo (v1, v2) ->
       let v1 = map_todo_category env v1
       and v2 = map_of_list (map_expr env) v2 in
-      G.OtherExpr (v1, v2 |> List_.map (fun e -> G.E e)) |> G.e
+      G.OtherExpr (v1, v2 |> List.map (fun e -> G.E e)) |> G.e
 
 and map_special_wrap _env (spec, tk) =
   (match spec with
-  | This -> IdSpecial (G.This, tk)
-  | Defined -> IdSpecial (G.Defined, tk)
-  | SizeOf -> IdSpecial (G.Sizeof, tk)
-  | AlignOf -> N (Id (("alignof", tk), G.empty_id_info ()))
-  | OffsetOf -> N (Id (("offsetof", tk), G.empty_id_info ())))
+    | This -> N (IdSpecial ((G.This, tk), G.empty_id_info ()))
+    | Defined -> Special (G.Defined, tk)
+    | SizeOf -> Special (G.Sizeof, tk)
+    | AlignOf -> N (Id (("alignof", tk), G.empty_id_info ()))
+    | OffsetOf -> N (Id (("offsetof", tk), G.empty_id_info ())))
   |> G.e
 
 and map_argument env x : G.argument =
@@ -691,7 +697,7 @@ and map_action_macro env x : G.any list =
   match x with
   | ActMisc v1 ->
       let v1 = map_of_list (map_tok env) v1 in
-      v1 |> List_.map (fun t -> G.Tk t)
+      v1 |> List.map (fun t -> G.Tk t)
 
 and map_constant env x : G.expr =
   match x with
@@ -761,7 +767,8 @@ and map_arithOp _env = function
   | Div -> G.Div
   | Mod -> G.Mod
   | DecLeft -> G.LSL
-  | DecRight -> G.LSR
+  (* signed >>: ASR by default; see AST_generic.operator *)
+  | DecRight -> G.ASR
   | And -> G.BitAnd
   | Or -> G.BitOr
   | Xor -> G.BitXor
@@ -916,10 +923,10 @@ and map_stmt env x : G.stmt =
         (_l, { a_template; a_outputs; a_inputs; a_clobbers; a_gotos }, _r),
         sc ) ->
       let a_template = [ G.E (map_expr env a_template) ] in
-      let a_outputs = List.concat_map (map_name_asm_operand env) a_outputs in
+      let a_outputs = List.concat_map (map_expr_asm_operand env) a_outputs in
       let a_inputs = List.concat_map (map_expr_asm_operand env) a_inputs in
-      let a_clobbers = List_.map (fun x -> G.I (map_ident env x)) a_clobbers in
-      let a_gotos = List_.map (fun x -> G.I (map_ident env x)) a_gotos in
+      let a_clobbers = List.map (fun x -> G.E (map_expr env x)) a_clobbers in
+      let a_gotos = List.map (fun x -> G.I (map_ident env x)) a_gotos in
       G.OtherStmt
         ( G.OS_Asm,
           [ G.Tk asm_tk ] @ a_template @ a_outputs @ a_inputs @ a_clobbers
@@ -933,12 +940,17 @@ and map_stmt env x : G.stmt =
       and _v2 = map_tok env v2
       and v3 = map_stmt env v3 in
       G.Label (v1, v3) |> G.s
+  | LabelDecl (v1, v2, v3) ->
+      let v1 = map_a_label env v1
+      and _v2 = map_tok env v2
+      and v3 = map_decl env v3 in
+      G.Label (v1, G.Block (fb v3) |> G.s) |> G.s
   (* should be handled in map_cases *)
   | Case _
   | CaseRange _
   | Default _ ->
       let cases, xs = convert_case env x in
-      let anys = cases |> List_.map (fun cs -> G.Cs cs) in
+      let anys = cases |> List.map (fun cs -> G.Cs cs) in
       let sts = map_of_list (map_stmt_or_decl env) xs |> List_.flatten in
       let st = G.stmt1 sts in
       G.OtherStmtWithStmt (OSWS_Todo, anys, st) |> G.s
@@ -997,15 +1009,6 @@ and map_expr_asm_operand env (v1, v2, v3) =
   let _, v3, _ = map_bracket env (map_expr env) v3 in
   v1 @ [ G.I v2 ] @ [ G.E v3 ]
 
-and map_name_asm_operand _env (v1, v2, v3) =
-  let v1 =
-    match v1 with
-    | None -> []
-    | Some (_, n, _) -> [ G.I n ]
-  in
-  let _, v3, _ = v3 in
-  v1 @ [ G.I v2 ] @ [ G.I v3 ]
-
 (* similar to Ast_c_build.cases()
  * TODO: CaseEllipsis?
  *)
@@ -1029,9 +1032,9 @@ and map_cases env tk st : G.case_and_body list =
              *)
             | X
                 (S
-                  (( Case (t, _, _, [])
-                   | CaseRange (t, _, _, _, _, [])
-                   | Default (t, _, []) ) as case1)) -> (
+                   (( Case (t, _, _, [])
+                    | CaseRange (t, _, _, _, _, [])
+                    | Default (t, _, []) ) as case1)) -> (
                 let res = repack_case_with_following_cases env t case1 xs in
                 match res with
                 | Some (case_repack, rest) -> aux (X (S case_repack) :: rest)
@@ -1047,8 +1050,8 @@ and map_cases env tk st : G.case_and_body list =
                 let before_next_case, rest =
                   xs
                   |> List_.span (function
-                       | X (S (Case _ | CaseRange _ | Default _)) -> false
-                       | _ -> true)
+                    | X (S (Case _ | CaseRange _ | Default _)) -> false
+                    | _ -> true)
                 in
                 let case_repack =
                   repack_case_with_following_stmts env case1 before_next_case
@@ -1095,9 +1098,9 @@ and repack_case_with_following_cases env tk (st_case_empty_body : stmt) xs =
       match x with
       | X
           (S
-            (( Case (t, _, _, [])
-             | CaseRange (t, _, _, _, _, [])
-             | Default (t, _, []) ) as case1)) -> (
+             (( Case (t, _, _, [])
+              | CaseRange (t, _, _, _, _, [])
+              | Default (t, _, []) ) as case1)) -> (
           (* recursive call, still got an empty case, need to go deeper *)
           let res = repack_case_with_following_cases env t case1 xs in
           match res with
@@ -1106,9 +1109,9 @@ and repack_case_with_following_cases env tk (st_case_empty_body : stmt) xs =
               Some (repack_empty_case case_repack, rest))
       | X
           (S
-            (( Case (_, _, _, _)
-             | CaseRange (_, _, _, _, _, _)
-             | Default (_, _, _) ) as case1)) ->
+             (( Case (_, _, _, _)
+              | CaseRange (_, _, _, _, _, _)
+              | Default (_, _, _) ) as case1)) ->
           Some (repack_empty_case case1, xs)
       | _ ->
           (* could not find a case, maybe caller knows better *)
@@ -1117,10 +1120,10 @@ and repack_case_with_following_cases env tk (st_case_empty_body : stmt) xs =
 and repack_case_with_following_stmts _env (st_case_only : stmt) sts : stmt =
   let sts =
     sts
-    |> List_.filter_map (function
-         | X x -> Some x
-         (* TODO? skipped directive code? *)
-         | _ -> None)
+    |> List.filter_map (function
+      | X x -> Some x
+      (* TODO? skipped directive code? *)
+      | _ -> None)
   in
   match st_case_only with
   | Case (v1, v2, v3, v4) ->
@@ -1185,7 +1188,7 @@ and map_condition_initializer (env : env) (x : condition_initializer) :
   match x with
   | InitVarsDecl x ->
       let xs, _sc = map_vars_decl env x in
-      xs |> List_.map (fun def -> G.Def def)
+      xs |> List.map (fun def -> G.Def def)
   | InitExprStmt x ->
       let eopt, sc = map_expr_stmt env x in
       [ G.S (G.ExprStmt (expr_option sc eopt, sc) |> G.s) ]
@@ -1208,6 +1211,17 @@ and map_condition_clause env (v1, v2) : G.condition =
       let inits = map_condition_initializer env init in
       OtherCond (("OtherCond", G.fake "OtherCond"), inits @ [ G.E subject ])
 
+(* Used by both variable declarations and range-loop headers. *)
+and map_structured_binding_pattern env ty names : G.pattern =
+  let ty = map_type_ env ty in
+  let l, ids, r = map_bracket env (map_of_list (map_ident env)) names in
+  let pat =
+    G.PatTuple
+      (l, ids |> List.map (fun id -> G.PatId (id, G.empty_id_info ())), r)
+  in
+  (* TODO: the type is the type of all bindings or type of init? *)
+  G.PatTyped (pat, ty)
+
 and map_for_header env = function
   | ForEllipsis v1 -> G.ForEllipsis v1
   | ForClassic (v1, v2, v3) ->
@@ -1215,23 +1229,38 @@ and map_for_header env = function
       and v2 = map_of_option (map_expr env) v2
       and v3 = map_of_option (map_expr env) v3 in
       G.ForClassic (v1, v2, v3)
-  | ForRange (v1, (ty, ent), v3, v4) ->
+  | ForRange (v1, binding, v3, v4) ->
       (* TODO: We cannot accommodate this in the Generic AST at the present. *)
       let _initialiser_TODO =
         map_of_option (map_condition_initializer env) v1
       in
-      let ent = map_entity env ent
-      and ty = map_type_ env ty
-      and v2 = map_tok env v3
-      and v4 = map_initialiser env v4 in
-      (* TODO: use the other stuff in the entity? *)
       let pat =
-        match ent.name with
-        | EN (Id (id, idinfo)) -> G.PatId (id, idinfo) |> G.p
-        | _ -> G.OtherPat (("PatEnt", G.fake "PatEnt"), [ G.En ent ]) |> G.p
+        match binding with
+        | BindingName (ty, ent) ->
+            let ent = map_entity env ent in
+            let ty = map_type_ env ty in
+            (* The entity may also contain declaration specifiers in attrs.
+             * Type qualifiers are already in ty; G.ForEach's pattern has no
+             * place for declaration attributes or storage modifiers.
+             *)
+            let pat =
+              match ent.name with
+              | EN (Id (id, idinfo)) -> G.PatId (id, idinfo) |> G.p
+              | _ ->
+                  G.OtherPat (("PatEnt", G.fake "PatEnt"), [ G.En ent ]) |> G.p
+            in
+            G.PatTyped (pat, ty) |> G.p
+        | BindingStructured (ty, (l, (id, ids), r)) ->
+            map_structured_binding_pattern env ty (l, id :: ids, r)
       in
+      let colon = map_tok env v3 in
+      let iter = map_initialiser env v4 in
+      (* The pattern binds each element obtained from iter. A map yields pairs,
+       * but other ranges can yield arrays or aggregates, so iter remains the
+       * source range expression rather than a synthetic pair expression.
+       *)
       (* less: or ForEach? *)
-      G.ForEach (G.PatTyped (pat, ty) |> G.p, v2, v4)
+      G.ForEach (pat, colon, iter)
 
 and map_a_expr_or_vars (env : env) (v : a_expr_or_vars) : G.for_var_or_expr list
     =
@@ -1243,16 +1272,15 @@ and map_a_expr_or_vars (env : env) (v : a_expr_or_vars) : G.for_var_or_expr list
   | Right xs ->
       let xs, _sc = map_vars_decl env xs in
       xs
-      |> List_.map (fun (ent, def) ->
-             match def with
-             | G.VarDef vdef -> G.ForInitVar (ent, vdef)
-             | _ ->
-                 let e =
-                   G.OtherExpr
-                     (("ForInitNotVar", G.fake ""), [ G.Def (ent, def) ])
-                   |> G.e
-                 in
-                 G.ForInitExpr e)
+      |> List.map (fun (ent, def) ->
+          match def with
+          | G.VarDef vdef -> G.ForInitVar (ent, vdef)
+          | _ ->
+              let e =
+                G.OtherExpr (("ForInitNotVar", G.fake ""), [ G.Def (ent, def) ])
+                |> G.e
+              in
+              G.ForInitExpr e)
 
 and map_a_label env v = map_wrap env map_of_string v
 
@@ -1362,7 +1390,7 @@ and map_decl env x : G.stmt list =
       and _v3 = map_of_option (map_expr env) v3
       and v4 = map_decl env v4 in
       v4
-      |> List_.map
+      |> List.map
            (map_def_in_stmt (fun (ent, def) ->
                 ({ ent with tparams = Some v2 }, def)))
   | TemplateInstanciation (v1, v2, v3) ->
@@ -1375,7 +1403,7 @@ and map_decl env x : G.stmt list =
       and _v2TODO = map_wrap env map_of_string v2
       and v3 = map_decl env v3 in
       v3
-      |> List_.map
+      |> List.map
            (map_def_in_stmt (fun (ent, def) ->
                 let extern = G.attr Extern v1 in
                 ({ ent with attrs = extern :: ent.attrs }, def)))
@@ -1384,7 +1412,7 @@ and map_decl env x : G.stmt list =
       and _v2TODO = map_wrap env map_of_string v2
       and _l, v3, _r = map_declarations env v3 in
       v3
-      |> List_.map
+      |> List.map
            (map_def_in_stmt (fun (ent, def) ->
                 let extern = G.attr Extern v1 in
                 ({ ent with attrs = extern :: ent.attrs }, def)))
@@ -1400,6 +1428,19 @@ and map_decl env x : G.stmt list =
       let dir1 = G.Package (v1, dotted) |> G.d in
       let dir2 = G.PackageEnd r |> G.d in
       [ G.DirectiveStmt dir1 |> G.s ] @ v3 @ [ G.DirectiveStmt dir2 |> G.s ]
+  | NamespaceAttributed (v1, vattr, v2, v3) ->
+      let v1 = map_tok env v1
+      and vattr = map_attribute env vattr
+      and v2 = map_of_option (map_name env) v2
+      and _l, v3, r = map_declarations env v3 in
+      let dotted =
+        match v2 with
+        | None -> []
+        | Some x -> H.dotted_ident_of_name x
+      in
+      let dir1 = { (G.Package (v1, dotted) |> G.d) with d_attrs = [ vattr ] } in
+      let dir2 = G.PackageEnd r |> G.d in
+      ((G.DirectiveStmt dir1 |> G.s) :: v3) @ [ G.DirectiveStmt dir2 |> G.s ]
   | StaticAssert (v1, v2) ->
       let v1 = map_tok env v1
       and v2 = map_paren env (map_of_list (map_argument env)) v2 in
@@ -1407,12 +1448,20 @@ and map_decl env x : G.stmt list =
   | Friend (v1, v2) ->
       let _v1TODO = map_tok env v1 and v2 = map_decl env v2 in
       v2
+  | ConstexprFriend (vconstexpr, v1, v2) ->
+      let _v1TODO = map_tok env v1
+      and attr = map_qualifier_wrap env (Constexpr, vconstexpr)
+      and v2 = map_decl env v2 in
+      v2
+      |> List.map
+           (map_def_in_stmt (fun (ent, def) ->
+                ({ ent with attrs = attr :: ent.attrs }, def)))
   | EmptyDef v1 ->
       let v1 = map_sc env v1 in
       [ G.emptystmt v1 ]
   | NotParsedCorrectly v1 ->
       let v1 = map_of_list (map_tok env) v1 in
-      [ G.OtherStmt (G.OS_Todo, v1 |> List_.map (fun tk -> G.Tk tk)) |> G.s ]
+      [ G.OtherStmt (G.OS_Todo, v1 |> List.map (fun tk -> G.Tk tk)) |> G.s ]
   | Concept (tconcept, id, _tequals, expr, _sc) ->
       let id = map_ident env id in
       let expr = map_expr env expr in
@@ -1465,15 +1514,8 @@ and map_onedecl env x : G.definition list =
       let ent, vardef = map_var_decl env v1 in
       [ (ent, G.VarDef vardef) ]
   | StructuredBinding (v1, v2, v3) ->
-      let v1 = map_type_ env v1 in
-      let l, xs, r = map_bracket env (map_of_list (map_ident env)) v2 in
+      let pat = map_structured_binding_pattern env v1 v2 in
       let v3 = map_init env v3 in
-      let pat =
-        G.PatTuple
-          (l, xs |> List_.map (fun id -> G.PatId (id, G.empty_id_info ())), r)
-      in
-      (* TODO: the type is the type of all bindings or type of init? *)
-      let pat = G.PatTyped (pat, v1) in
       let ent = { G.name = G.EPattern pat; attrs = []; tparams = None } in
       (* TODO? use v1 for vtype? *)
       let def = G.VarDef { G.vinit = Some v3; vtype = None; vtok = G.no_sc } in
@@ -1520,7 +1562,7 @@ and map_var_decl env (ent, { v_init = v_v_init; v_type = v_v_type }) =
         in
         let ent = map_entity env ent in
         let v_v_type = map_type_ env t in
-        let args = params |> List_.filter_map param_to_arg_opt in
+        let args = params |> List.filter_map param_to_arg_opt in
         if List.length params <> List.length args then None
         else
           let v_v_init = map_init env (ObjInit (Args (p1, args, p2))) in
@@ -1547,7 +1589,7 @@ and map_var_decl env (ent, { v_init = v_v_init; v_type = v_v_type }) =
           | _ -> None
         in
         let ent = map_entity env ent in
-        let params = args |> List_.filter_map arg_to_param_opt in
+        let params = args |> List.filter_map arg_to_param_opt in
         if List.length params <> List.length args then None
         else
           let v_v_type =
@@ -1594,7 +1636,7 @@ and map_init env x : G.expr =
   | ObjInit v1 ->
       let l, args, r = map_obj_init env v1 in
       (* TODO? if initializer has designator, should make it a Record? *)
-      G.Container (G.Array, (l, args |> List_.map H.argument_to_expr, r)) |> G.e
+      G.Container (G.Array, (l, args |> List.map H.argument_to_expr, r)) |> G.e
   | Bitfield (v1, v2) ->
       let _v1TODO = map_tok env v1 and v2 = map_a_const_expr env v2 in
       v2
@@ -1608,7 +1650,7 @@ and map_obj_init env x : G.argument list bracket =
       let lbrace, xs, rbraces =
         map_brace env (map_of_list (map_initialiser env)) v1
       in
-      (lbrace, xs |> List_.map G.arg, rbraces)
+      (lbrace, xs |> List.map G.arg, rbraces)
 
 and map_initialiser env x : G.expr = map_initialiser_bis env x
 
@@ -1706,7 +1748,7 @@ and map_parameter env x : G.parameter =
   | ParamTodo (v1, v2) ->
       let v1 = map_todo_category env v1
       and v2 = map_of_list (map_parameter env) v2 in
-      G.OtherParam (v1, v2 |> List_.map (fun x -> G.Pa x))
+      G.OtherParam (v1, v2 |> List.map (fun x -> G.Pa x))
 
 and map_parameter_classic env
     {
@@ -1893,7 +1935,7 @@ and map_class_member env x : (G.field, G.attribute) Either.t list =
       [ Left (G.F st) ]
   | F v1 ->
       let v1 = map_decl env v1 in
-      v1 |> List_.map (fun st -> Left (G.F st))
+      v1 |> List.map (fun st -> Left (G.F st))
 
 and map_template_parameter env x : G.type_parameter =
   match x with
@@ -1920,8 +1962,7 @@ and map_template_parameter env x : G.type_parameter =
       let v1 = map_tok env v1
       and _, v2, _ = map_template_parameters env v2
       and v3 = map_template_parameter env v3 in
-      G.OtherTypeParam
-        (("TPNested", v1), v3 :: v2 |> List_.map (fun x -> G.Tp x))
+      G.OtherTypeParam (("TPNested", v1), v3 :: v2 |> List.map (fun x -> G.Tp x))
 
 and map_template_parameters env v : G.type_parameters =
   map_angle env (map_of_list (map_template_parameter env)) v
@@ -1952,7 +1993,7 @@ and map_attribute env x : G.attribute =
       G.NamedAttr (v1, name, (l1, xs, r1))
   | BracketsAttr v1 ->
       let l, xs, _r = map_bracket env (map_of_list (map_expr env)) v1 in
-      G.OtherAttribute (("BracketsAttr", l), xs |> List_.map (fun e -> G.E e))
+      G.OtherAttribute (("BracketsAttr", l), xs |> List.map (fun e -> G.E e))
   | DeclSpec (v1, v2) ->
       let v1 = map_tok env v1 and l, id, r = map_paren env (map_ident env) v2 in
       let name = H.name_of_id ("__declspec", v1) in
@@ -2148,7 +2189,7 @@ and map_a_cppExpr env v = map_expr env v
 
 (* TODO: ifdef_skipper like in ast_c_build.ml *)
 and map_sequencable :
-      'a. env -> ('a -> G.stmt list) -> 'a sequencable -> G.stmt list =
+    'a. env -> ('a -> G.stmt list) -> 'a sequencable -> G.stmt list =
  fun env _of_a -> function
   | X v1 ->
       let v1 = _of_a v1 in
@@ -2177,11 +2218,11 @@ and map_sequencable :
  * with the field local helper
  *)
 and map_sequencable_for_field :
-      'a.
-      env ->
-      ('a -> (G.field, G.attribute) Either.t list) ->
-      'a sequencable ->
-      (G.field, G.attribute) Either.t list =
+    'a.
+    env ->
+    ('a -> (G.field, G.attribute) Either.t list) ->
+    'a sequencable ->
+    (G.field, G.attribute) Either.t list =
   let field x = Left (G.F x) in
   fun env _of_a -> function
     | X v1 ->
@@ -2208,11 +2249,9 @@ and map_sequencable_for_field :
         [ G.DefStmt (ent, def) |> G.s |> field ]
 
 and map_sequencable_for_or_type :
-      'a.
-      env ->
-      ('a -> G.or_type_element) ->
-      'a sequencable ->
-      G.or_type_element list =
+    'a.
+    env -> ('a -> G.or_type_element) -> 'a sequencable -> G.or_type_element list
+    =
  fun _env _of_a -> function
   | X v1 ->
       let v1 = _of_a v1 in
@@ -2273,7 +2312,7 @@ let map_any env x : G.any =
       G.Name v1
   | OneDecl v1 ->
       let v1 = map_onedecl env v1 in
-      G.Ss (v1 |> List_.map (fun def -> G.DefStmt def |> G.s))
+      G.Ss (v1 |> List.map (fun def -> G.DefStmt def |> G.s))
   | Init v1 ->
       let v1 = map_initialiser env v1 in
       G.E v1
@@ -2298,7 +2337,7 @@ let map_any env x : G.any =
       G.Tk v1
   | InfoList v1 ->
       let v1 = map_of_list (map_tok env) v1 in
-      G.Anys (v1 |> List_.map (fun tk -> G.Tk tk))
+      G.Anys (v1 |> List.map (fun tk -> G.Tk tk))
 
 (*****************************************************************************)
 (* Entry point *)

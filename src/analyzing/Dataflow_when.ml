@@ -1,4 +1,17 @@
+(*
+   Copyright (c) 2024-2025 Semgrep Inc.
+
+   This library is free software; you can redistribute it and/or
+   modify it under the terms of the GNU Lesser General Public License
+   version 2.1 as published by the Free Software Foundation.
+
+   This library is distributed in the hope that it will be useful, but
+   WITHOUT ANY WARRANTY; without even the implied warranty of
+   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the file
+   LICENSE for more details.
+*)
 open AST_generic
+open Maps
 module Log = Log_analyzing.Log
 
 (*****************************************************************************)
@@ -64,6 +77,7 @@ type ctx = facts list
  * true. the functions in this file will only execute if both
  * -deep_intra_file and -path_sensitive are enabled.
  *)
+(* nosemgrep: no-ref-declarations-at-top-scope *)
 let hook_path_sensitive = ref false
 
 (* this visitor is used for annotating an expression and its subexpressions
@@ -144,7 +158,7 @@ let inherit_facts (node : IL.node) facts =
  * continue propagating the facts via the context.
  *)
 let rec annotate_facts_of_node (cfg : IL.cfg) nodei (ctx : ctx) visited =
-  let node = cfg.graph#nodes#find nodei in
+  let node = Int_map.find nodei cfg.graph#nodes in
   if Set_.mem nodei !visited then (* skip if already processed *) ()
   else (
     visited := Set_.add nodei !visited;
@@ -269,6 +283,9 @@ let rec annotate_facts_of_node (cfg : IL.cfg) nodei (ctx : ctx) visited =
         | NGoto _
         | NReturn _
         | NThrow _
+        | NMatch _
+        | NCase _
+        | NNestedDef _
         | NOther _
         | NTodo _ ->
             inherit_facts node facts;
@@ -332,7 +349,7 @@ let facts_satisfy_e (mvars : Metavariable.bindings) (facts : facts) (e : expr) =
   (* when conditions should be in the form of id <op> expr,
    * e.g. x == 0.
    *)
-  | Call ({ e = IdSpecial (Op op, _); _ }, (_, args, _)) -> (
+  | Call ({ e = Special (Op op, _); _ }, (_, args, _)) -> (
       match args with
       (* id <op> expr *)
       | [ Arg { e = N (Id (((en, _) as e_id), _)); _ }; Arg e ] ->

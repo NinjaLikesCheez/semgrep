@@ -1,4 +1,16 @@
 (*
+   Copyright (c) 2023-2025 Semgrep Inc.
+
+   This library is free software; you can redistribute it and/or
+   modify it under the terms of the GNU Lesser General Public License
+   version 2.1 as published by the Free Software Foundation.
+
+   This library is distributed in the hope that it will be useful, but
+   WITHOUT ANY WARRANTY; without even the implied warranty of
+   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the file
+   LICENSE for more details.
+*)
+(*
    Similar to Gitignore_filter but select paths to be kept rather than ignored.
 *)
 
@@ -20,13 +32,14 @@ let check_nonnegated_pattern str =
 let create ~project_root patterns =
   List.iter check_nonnegated_pattern patterns;
   let glob_matchers =
-    List_.map
+    List.map
       (fun pat ->
-        Parse_gitignore.parse_pattern
-          ~source:
-            (Glob.Match.string_loc ~source_name:"include pattern"
-               ~source_kind:(Some "include") pat)
-          ~anchor:Glob.Pattern.root_pattern pat)
+        (Parse_gitignore.parse_pattern
+           ~source:
+             (Glob.Match.string_loc ~source_name:"include pattern"
+                ~source_kind:(Some "include") pat)
+           ~left_anchor:Glob.Pattern.root_pattern pat)
+          .compiled_pattern)
       patterns
   in
   let no_match_loc =

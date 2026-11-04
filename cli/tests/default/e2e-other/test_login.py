@@ -1,3 +1,15 @@
+#
+# Copyright (c) 2021-2024 Semgrep Inc.
+#
+# This library is free software; you can redistribute it and/or
+# modify it under the terms of the GNU Lesser General Public License
+# version 2.1 as published by the Free Software Foundation.
+#
+# This library is distributed in the hope that it will be useful, but
+# WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the file
+# LICENSE for more details.
+#
 import pytest
 from tests.semgrep_runner import SemgrepRunner
 
@@ -60,7 +72,8 @@ def test_login_env_token(tmp_path, mocker):
 
     # Patch Token Validation:
     mocker.patch(
-        "semgrep.app.auth.get_deployment_from_token", return_value="deployment_name"
+        "semgrep.app.auth.get_deployment_from_token",
+        return_value={"id": 1, "name": "deployment_name"},
     )
 
     # Login with env token
@@ -74,30 +87,32 @@ def test_login_env_token(tmp_path, mocker):
     assert result.output.startswith("Saved login token")
     assert "<redacted>" in result.output
 
-    # Login should fail on second call
+    # Login should not fail on second call
     result = runner.invoke(
         cli,
         subcommand="login",
         args=[],
         env={"SEMGREP_APP_TOKEN": alt_key},
     )
-    assert result.exit_code == 2
+    assert result.exit_code == 0
     assert "API token already exists in" in result.output
 
 
 # it should give access to the registry once logged in
 @pytest.mark.slow
 @pytest.mark.osemfail
-def test_login_and_use_registry(tmp_path, mocker):
+def test_login_and_use_registry(tmp_path, mocker, requests_mock):
     runner = SemgrepRunner(
         env={"SEMGREP_SETTINGS_FILE": str(tmp_path / ".settings.yaml")},
         use_click_runner=True,
     )
+    semgrep_url = "https://semgrep.dev"
     fake_key = "key123"
 
     # Patch Token Validation:
     mocker.patch(
-        "semgrep.app.auth.get_deployment_from_token", return_value="deployment_name"
+        "semgrep.app.auth.get_deployment_from_token",
+        return_value={"id": 1, "name": "deployment_name"},
     )
 
     result = runner.invoke(
@@ -109,6 +124,12 @@ def test_login_and_use_registry(tmp_path, mocker):
     assert result.exit_code == 0
     assert result.output.startswith("Saved login token")
 
+    # patch the download of the config to return 401
+    requests_mock.get(
+        f"{semgrep_url}/c/r/python.lang.correctness.useless-eqeq.useless-eqeq",
+        status_code=401,
+        json={"detail": "Invalid API Key"},
+    )
     # Run p/ci
     result = runner.invoke(
         cli,
@@ -118,6 +139,11 @@ def test_login_and_use_registry(tmp_path, mocker):
         result.exit_code == 7
     ), "registry should refuse to send rules to invalid token"
 
+    requests_mock.post(
+        f"{semgrep_url}/api/cli/v2/scans",
+        status_code=401,
+        json={"detail": "Invalid API Key"},
+    )
     # Run policy with bad token -> no associated deployment_id
     result = runner.invoke(
         cli, args=["--config", "policy"], env={"SEMGREP_REPO_NAME": "test-repo"}
@@ -146,4 +172,4 @@ def test_login_and_use_registry(tmp_path, mocker):
     )
     assert result.exit_code == 7
     assert mocked_config.called
-    assert "remote-registry_0 was not a mapping" in result.output
+    assert "remote-registry was not a mapping" in result.output

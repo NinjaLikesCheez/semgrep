@@ -1,29 +1,47 @@
-(* TODO: other options for Windows! *)
+(*
+   Copyright (c) 2023-2025 Semgrep Inc.
+
+   This library is free software; you can redistribute it and/or
+   modify it under the terms of the GNU Lesser General Public License
+   version 2.1 as published by the Free Software Foundation.
+
+   This library is distributed in the hope that it will be useful, but
+   WITHOUT ANY WARRANTY; without even the implied warranty of
+   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the file
+   LICENSE for more details.
+*)
 type arch = Arm | Arm64 | X86_64 | OtherArch of string
-type kernel = Darwin | Linux | OtherKernel of string
+type kernel = Darwin | Linux | Windows | OtherKernel of string
 
-(* TODO: should use CapExec.string_of_run instead of with_open_process_in *)
+module Log = Log_commons.Log
 
-let arch (caps : < Cap.exec >) =
-  CapExec.with_open_process_in caps#exec "uname -m" (fun chan ->
-      let s =
-        In_channel.input_all chan |> String.trim |> String.lowercase_ascii
-      in
-      match s with
+let arch () =
+  (Cmd.Name "uname", [ "-m" ]) |> UCmd.string_of_run ~trim:true |> function
+  | Ok (output, (_, `Exited 0)) -> (
+      match String.lowercase_ascii output with
       | "arm" -> Arm
       | "arm64" -> Arm64
       | "x86_64" -> X86_64
-      | _ -> OtherArch s)
+      | s -> OtherArch s)
+  | Ok (error, (_, _))
+  | Error (`Msg error) ->
+      Log.warn (fun m -> m "Running `uname -m` failed with an error: %s" error);
+      OtherArch "unknown"
 
-let kernel (caps : < Cap.exec >) =
-  CapExec.with_open_process_in caps#exec "uname" (fun chan ->
-      let s =
-        In_channel.input_all chan |> String.trim |> String.lowercase_ascii
-      in
-      match s with
-      | "darwin" -> Darwin
-      | "linux" -> Linux
-      | _ -> OtherKernel s)
-
-(* TODO? || Sys.cygwin? *)
+(* We want to check for [Sys.win32] rather than [Sys.cygwin] because we
+   target native Windows executables without a cygwin dependency. *)
 let is_windows = Sys.win32
+
+let kernel () =
+  if is_windows then Windows
+  else
+    (Cmd.Name "uname", []) |> UCmd.string_of_run ~trim:true |> function
+    | Ok (output, (_, `Exited 0)) -> (
+        match String.lowercase_ascii output with
+        | "darwin" -> Darwin
+        | "linux" -> Linux
+        | s -> OtherKernel s)
+    | Ok (error, (_, _))
+    | Error (`Msg error) ->
+        Log.warn (fun m -> m "Running uname failed with an error: %s" error);
+        OtherKernel "unknown"

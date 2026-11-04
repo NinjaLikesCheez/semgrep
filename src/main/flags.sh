@@ -33,7 +33,6 @@ set -eu
 
 OS="$1"
 TREE_SITTER_LANGS="$2"
-
 >&2 echo "Generating linking flags for OS ${OS} (!!!in case of linking errors, adjust src/main/flags.sh!!!)"
 
 # Force the use of static linking in these scenarios:
@@ -44,11 +43,15 @@ TREE_SITTER_LANGS="$2"
 #   name. It is assumed that the reason we're on alpine is to get
 #   statically-linked executables.
 
-
-# Check if NIX_ENVIRONMENT is not set
+# Check if SEMGREP_NIX_BUILD is not set
 # If it is set, we are in a nix-shell and we should not statically link
 # This is first because opam won't exist in a nix build environment
 if [[ -n "${SEMGREP_NIX_BUILD-}" ]]; then
+    FLAGS=()
+    CCLIB=()
+    CCOPT=()
+elif [[ "${FORCE_DYNLINK-}" == "true" ]]; then
+    >&2 echo "FORCE_DYNLINK set to true; not adding any linking flags"
     FLAGS=()
     CCLIB=()
     CCOPT=()
@@ -67,7 +70,11 @@ else
             # old: was just '--copt -static --copy -no-pie' before we depended
             # on libcurl
             FLAGS=()
-            CCLIB=("-lssl" "-lcrypto" "-lz")
+            # Link libunwind.a and libstdc++.a as a group (obackward needs both);
+            # in sequence, libgcc_eh.a also gets pulled in and redefines
+            # _Unwind_Resume ("multiple definition").
+            CCLIB=("-lssl" "-lcrypto" "-lz"
+                "-Wl,--start-group" "-lunwind" "-lstdc++" "-Wl,--end-group")
             CCOPT=("-static" "-no-pie")
         else
             # On non-Alpine Linux distros (e.g., Ubuntu), we just dynamically
@@ -122,16 +129,17 @@ else
             "-lalcotest_stubs"
             "-lbase_internalhash_types_stubs"
             "-lbase_stubs"
+            "-locaml_intrinsics_kernel_stubs"
             "-lbigstringaf_stubs"
+            "-lobackward_stubs"
             "-lca_certs_stubs"
-            "-lcamlstr"
+            "-lcamlstrnat"
             "-lcheckseum_c_stubs"
+            "-lcomprmarsh"
             "-lcstruct_stubs"
             "-lctypes_stubs"
-            "-lcurl-helper"
+            "-lcurl_stubs"
             "-lintegers_stubs"
-            "-ljs_of_ocaml_stubs"
-            "-ljsoo_runtime_stubs"
             "-llwt_unix_stubs"
             "-lmirage_crypto_ec_stubs"
             "-lmirage_crypto_rng_unix_stubs"
@@ -140,24 +148,30 @@ else
             "-lmurmur3_stubs"
             "-lparmap_stubs"
             "-lpbrt_stubs"
-            "-lpcre_stubs"
             "-lpcre2_stubs"
+            "-lprocess_limits_stubs"
             "-lptime_clock_stubs"
             "-lstdc++"
             "-lterminal_size_stubs"
             "-lthreadsnat"
             "-ltime_now_stubs"
             "-ltree_sitter_bindings_stubs"
-            "-lunix"
+            "-lunixnat"
             "-lyaml_c_stubs"
             "-lyaml_ffi_stubs"
             "-lzarith"
             "-lcurl"
+            # Needed for EIO
+            "-lcamlruntime_eventsnat"
+            "-leio_posix_stubs"
+            "-leio_unix_stubs"
+            "-liomux_stubs"
+
             "$(pkg-config gmp --variable libdir)/libgmp.a"
             "$(pkg-config tree-sitter --variable libdir)/libtree-sitter.a"
-            "$(pkg-config libpcre --variable libdir)/libpcre.a"
             "$(pkg-config libpcre2-8 --variable libdir)/libpcre2-8.a"
-            "-lpthread")
+            "$(brew --prefix dwarfutils)/lib/libdwarf.a"
+            "$(brew --prefix zstd)/lib/libzstd.a")
 
         # Libev does not support pkg-config. See, e.g.,
         # <https://www.mail-archive.com/libev@lists.schmorp.de/msg02088.html>,

@@ -14,21 +14,10 @@
  *)
 
 (* We need deriving 'hash' below because formulas are now hashed
- * in Match_tainting_mode.Formula_tbl and formula contain patterns.
+ * in Formula_cache.Formula_tbl and formula contain patterns.
  *)
 open Ppx_hash_lib.Std.Hash.Builtin
-
-(*****************************************************************************)
-(* Prelude *)
-(*****************************************************************************)
-
-(*****************************************************************************)
-(* Types *)
-(*****************************************************************************)
-
-type compiled_regexp = Pcre2_.t [@@deriving show, eq]
-type regexp_string = string [@@deriving show, eq, hash]
-(* see the NOTE "Regexp" below for the need to have this type *)
+module XpatId = Gensym.MkId ()
 
 (* used in the engine for rule->mini_rule and match_result gymnastic *)
 type pattern_id = int [@@deriving show, eq]
@@ -39,21 +28,21 @@ type xpattern_kind =
   | Sem of Pattern.t * Lang.t (* language used for parsing the pattern *)
   | Spacegrep of Spacegrep.Pattern_AST.t
   | Aliengrep of Aliengrep.Pat_compile.t
-  | Regexp of regexp_string
+  | Regexp of string
       (** NOTE "Regexp":
-      * We used to keep the compiled regexp of type `Regexp_engine.t', but
-      * that is not a pure OCaml data structure and it cannot be serialized.
-      *
-      * This had previously caused weird Semgrep crashes like
-      *
-      *     Invalid_argument "output_value: abstract value (Custom)"
-      *
-      * after PR #5725 (taint labels), see PA-1724.
-      *
-      * When we use -j 2 (or higher) and -json, then Parmap is used, and the result
-      * of `Match_rules.check' (of type `Report.match_result') will contain some
-      * unevaluated thunks. Then Parmap will try to marshal this value and it will
-      * crash if there is any "Custom" block involved.
+        We used to keep the compiled regexp of type `Regexp_engine.t', but
+        that is not a pure OCaml data structure and it cannot be serialized.
+
+        This had previously caused weird Semgrep crashes like
+
+            Invalid_argument "output_value: abstract value (Custom)"
+
+        after PR #5725 (taint labels), see PA-1724.
+
+        When we use -j 2 (or higher) and -json, then Parmap is used, and the result
+        of `Match_rules.check' (of type `Report.match_result') will contain some
+        unevaluated thunks. Then Parmap will try to marshal this value and it will
+        crash if there is any "Custom" block involved.
       *)
 [@@deriving show, eq]
 
@@ -88,15 +77,9 @@ type t = {
    a good enough proxy.
 *)
 
-(*****************************************************************************)
-(* Helpers *)
-(*****************************************************************************)
-
-let count = ref 0
-
 let mk_xpat pat pstr =
-  incr count;
-  { pat; pstr; pid = !count }
+  let pid = XpatId.to_int (XpatId.mk ()) in
+  { pat; pstr; pid }
 
 let is_regexp xpat =
   match xpat.pat with

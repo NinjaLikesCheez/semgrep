@@ -1,10 +1,12 @@
 {
+  "engine_requested": "OSS",
   "errors": [],
   "paths": {
     "scanned": [
       "targets/aliengrep/begin-end.log"
     ]
   },
+  "profiling_results": [],
   "results": [
     {
       "check_id": "rules.aliengrep.begin-end",
@@ -54,5 +56,6 @@
     }
   ],
   "skipped_rules": [],
+  "time": "<masked in tests>",
   "version": "0.42"
 }

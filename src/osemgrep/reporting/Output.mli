@@ -1,3 +1,15 @@
+(*
+   Copyright (c) 2023-2025 Semgrep Inc.
+
+   This library is free software; you can redistribute it and/or
+   modify it under the terms of the GNU Lesser General Public License
+   version 2.1 as published by the Free Software Foundation.
+
+   This library is distributed in the hope that it will be useful, but
+   WITHOUT ANY WARRANTY; without even the implied warranty of
+   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the file
+   LICENSE for more details.
+*)
 module Out = Semgrep_output_v1_j
 
 (* Display options *)
@@ -14,6 +26,7 @@ type conf = {
   strict : bool;
   (* a.k.a. dryrun in Scan_CLI.conf *)
   fixed_lines : bool;
+  fips_mode : bool;
   (* true when using --verbose or --debug in Scan_CLI.ml *)
   skipped_files : bool;
   (* Used when displaying rule ids or skipped files. If above the limit,
@@ -21,6 +34,10 @@ type conf = {
    * in the log output.
    *)
   max_log_list_entries : int;
+  (* Limits characters of match context in output. 0 = unlimited. *)
+  max_match_context_size : int;
+  (* Used when outputting MCP scan results. *)
+  output_mcp_scan_results : bool;
 }
 [@@deriving show]
 
@@ -39,7 +56,6 @@ val too_much_data : string
  * to log in and try Pro.
  *)
 val output_result :
-  < Cap.stdout > ->
   (* derived from CLI flags *)
   conf ->
   (* derived from runtime info *)
@@ -52,7 +68,7 @@ val output_result :
  * This handles nosemgrep, interpolating messages, and more.
  *)
 val preprocess_result :
-  fixed_lines:bool -> Core_runner_result.t -> Out.cli_output
+  fips_mode:bool -> fixed_lines:bool -> Core_runner_result.t -> Out.cli_output
 
 (* Called by pysemgrep via RPC for Vim/Emacs/Junit_xml/Gitlab_xxx formats *)
 val format :

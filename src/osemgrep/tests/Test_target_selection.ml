@@ -1,4 +1,16 @@
 (*
+   Copyright (c) 2023-2025 Semgrep Inc.
+
+   This library is free software; you can redistribute it and/or
+   modify it under the terms of the GNU Lesser General Public License
+   version 2.1 as published by the Free Software Foundation.
+
+   This library is distributed in the hope that it will be useful, but
+   WITHOUT ANY WARRANTY; without even the implied warranty of
+   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the file
+   LICENSE for more details.
+*)
+(*
    Test target selection on git repos with osemgrep.
 *)
 
@@ -17,16 +29,16 @@ let list_targets_internal ?(conf = Find_targets.default_conf) ?roots () =
   printf "Target files:\n";
   selected |> List.iter (fun fpath -> printf "  %s\n" (Fpath.to_string fpath))
 
-let run_osemgrep caps argv =
+let run_osemgrep argv =
   printf "RUN %s\n%!" (argv |> Array.to_list |> String.concat " ");
-  CLI.main caps argv
+  CLI.main argv
 
 (*
    List targets by going through the full semgrep command.
 *)
-let osemgrep_ls caps =
+let osemgrep_ls () =
   let exit_code =
-    run_osemgrep caps [| "semgrep"; "scan"; "--experimental"; "--x-ls"; "." |]
+    run_osemgrep [| "semgrep"; "scan"; "--experimental"; "--x-ls"; "." |]
   in
   Alcotest.(check int) "exit code" 0 (Exit_code.to_int exit_code)
 
@@ -41,18 +53,18 @@ let semgrepignore lines : Testutil_files.t =
 type repo_with_tests = {
   repo_name : string;
   repo_files : Testutil_files.t list;
-  tests : (string * (CLI.caps -> unit)) list;
+  tests : (string * (unit -> unit)) list;
 }
 
 let test_list_from_project_root =
   ( "list target files from project root (internal)",
-    fun _caps -> list_targets_internal () )
+    fun () -> list_targets_internal () )
 
 let test_cli_list_from_project_root =
-  ("list target files from project root", fun caps -> osemgrep_ls caps)
+  ("list target files from project root", fun () -> osemgrep_ls ())
 
 let test_list_targets_from_subdir ?roots cwd =
-  let func _caps =
+  let func () =
     Testutil_files.with_chdir cwd (fun () ->
         printf "cwd: %s\n" (Sys.getcwd ());
         list_targets_internal ?roots ())
@@ -80,10 +92,10 @@ let repos_with_tests : repo_with_tests list =
       tests = [ test_list_from_project_root; test_cli_list_from_project_root ];
     };
     {
-      repo_name = "gitignore-deignore";
+      repo_name = "semgrepignore-deignore";
       repo_files =
         [
-          gitignore [ "bin/*"; "!bin/ignore-me-not" ];
+          semgrepignore [ "bin/*"; "!bin/ignore-me-not" ];
           dir "bin" [ file "ignore-me"; file "ignore-me-not" ];
         ];
       tests = [ test_list_from_project_root; test_cli_list_from_project_root ];
@@ -113,16 +125,17 @@ let normalize =
 (*
    Create a list of tests for each test repo.
 *)
-let tests caps : Testo.t list =
+let tests () : Testo.t list =
   repos_with_tests
-  |> List_.map (fun { repo_name; repo_files; tests } ->
-         tests
-         |> List_.map (fun (test_name, test_func) ->
-                Testo.create
-                  ~category:[ "target selection on real git repos"; repo_name ]
-                  ~checked_output:(Testo.stdout ()) ~normalize test_name
-                  (fun () ->
-                    Testutil_git.with_git_repo ~verbose:true
-                      ~honor_gitignore:false repo_files (fun _cwd ->
-                        test_func caps))))
+  |> List.map (fun { repo_name; repo_files; tests } ->
+      tests
+      |> List.map (fun (test_name, test_func) ->
+          Testo.create ?skipped:Testutil.skip_on_windows
+            ~category:[ "target selection on real git repos"; repo_name ]
+            ~checked_output:(Testo.stdout ()) ~normalize test_name (fun () ->
+              (* Create a temporary git repo and force-add all the
+                       files even if they're gitignored *)
+              Testutil_git.with_git_repo ~verbose:true
+                ~force_add_gitignored_files:true repo_files (fun _cwd ->
+                  test_func ()))))
   |> List_.flatten

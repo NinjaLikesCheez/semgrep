@@ -1,3 +1,15 @@
+#
+# Copyright (c) 2020-2025 Semgrep Inc.
+#
+# This library is free software; you can redistribute it and/or
+# modify it under the terms of the GNU Lesser General Public License
+# version 2.1 as published by the Free Software Foundation.
+#
+# This library is distributed in the hope that it will be useful, but
+# WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the file
+# LICENSE for more details.
+#
 # Define so-called pytest fixtures for our tests.
 #
 # Read about pytest's fixtures if you want to understand where test
@@ -18,6 +30,7 @@
 ##############################################################################
 # Helper functions and classes useful for writing tests.
 import contextlib
+import copy
 import json
 import os
 import re
@@ -31,6 +44,7 @@ from io import StringIO
 from pathlib import Path
 from shutil import copytree
 from typing import Callable
+from typing import cast
 from typing import ContextManager
 from typing import Dict
 from typing import Iterable
@@ -45,20 +59,24 @@ import pytest
 from ruamel.yaml import YAML
 from tests import fixtures
 from tests.semgrep_runner import SemgrepRunner
-from tests.semgrep_runner import USE_OSEMGREP
 
 from semgrep import __VERSION__
 from semgrep.cli import cli
 from semgrep.constants import OutputFormat
+from semgrep.util import IS_WINDOWS
+from semgrep.util import json_win_paths_to_posix
 
 ##############################################################################
 # Constants
 ##############################################################################
 
 TESTS_PATH = Path(__file__).parent
-RULES_PATH = Path(TESTS_PATH / "default" / "e2e" / "rules")
-TARGETS_PATH = Path(TESTS_PATH / "default" / "e2e" / "targets")
-
+RULES_AND_TARGETS_PATH = Path(TESTS_PATH / "default" / "e2e")
+RULES_PATH = Path(RULES_AND_TARGETS_PATH / "rules")
+TARGETS_PATH = Path(RULES_AND_TARGETS_PATH / "targets")
+# We probably shouldn't have per-rule timeouts enabled for all cli tests
+# see: pull/4971
+DEFAULT_PER_RULE_TIMEOUT = 0
 ##############################################################################
 # Pytest hacks
 ##############################################################################
@@ -181,9 +199,11 @@ def _clean_output_if_json(output_json: str, clean_fingerprint: bool) -> str:
     except json.decoder.JSONDecodeError:
         return output_json
 
+    # coupling: tests/cli_e2e/conftest.py
     masked_keys = [
         "tool.driver.semanticVersion",
         "results.*.checks.*.matches",
+        "time",
     ]
     for path in masked_keys:
         mark_masked(output, path)
@@ -245,6 +265,27 @@ def mask_floats(text_output: str) -> str:
     return re.sub(FLOATS, "x.xxx", text_output)
 
 
+# E.g.:
+# [00.14][WARNING](x509.decoding): negative serial number ...
+# [00.16][WARNING](ca-certs): Ignored 3 trust anchors
+CA_CERT_LOG_PATTERN = re.compile(
+    r"\[\d\d\.\d\d\]\[WARNING\]\((?:x509.decoding|ca-certs)\):.*\r?\n?"
+)
+
+
+# Specifically skip recording logs for ca-certs and x509.decoding because they
+# cause issues on Windows. This is because Windows generally, and the github
+# actions runners specifically, include trust anchors with negative serial
+# numbers. E.g., <https://crt.sh/?q=28903A635B5280FAE6774C0B6DA7D6BAA64AF2E8>.
+# See also <https://bugzilla.mozilla.org/show_bug.cgi?id=1797559>,
+# <https://github.com/pyca/cryptography/issues/10247#issuecomment-2626151988>.
+#
+# These logs cannot be skipped because they occur in the default trust anchor,
+# _before_ our logging configuration code is run.
+def remove_cert_warnings(text_output: str) -> str:
+    return CA_CERT_LOG_PATTERN.sub("", text_output)
+
+
 # ProTip: make sure your regexps can't match JSON quotes so as to keep any
 # JSON parseable after a substitution!
 ALWAYS_MASK: Maskers = (
@@ -261,10 +302,11 @@ ALWAYS_MASK: Maskers = (
     # In the future, we may have to hide the temporary folder since it
     # can vary from one OS to another.
     # This regexp masks the tail of a path containing 'tmp' or '/tmp'.
-    re.compile(f"((?:{tempfile.gettempdir()})(?:/[A-Za-z0-9_.-]*)*)"),
+    re.compile(f"((?:{re.escape(tempfile.gettempdir())})(?:[\\/][A-Za-z0-9_.-]*)*)"),
     # osemgrep only. Needed to match the pysemgrep output b/c pysemgrep
     # uses a temporary path to store rules by osemgrep doesn't.
     re.compile(r'"path": *"(rules/[^"]*)"'),
+    remove_cert_warnings,
 )
 
 
@@ -390,6 +432,9 @@ def _run_semgrep(
     strict: bool = False,
     quiet: bool = False,
     env: Optional[Dict[str, str]] = None,
+    use_parmap: bool = False,
+    j: int = 1,
+    timeout: Optional[int] = None,
     assert_exit_code: Union[None, int, Set[int]] = 0,
     force_color: Optional[bool] = None,
     # See e2e/test_dependency_aware_rule.py for why this is here
@@ -419,40 +464,48 @@ def _run_semgrep(
         prepare_workspace()
 
         with context_manager or contextlib.nullcontext():
-            env = {} if not env else env.copy()
+            env_ = cast(dict[str, str | None], {} if not env else env.copy())
 
             if force_color:
-                env["SEMGREP_FORCE_COLOR"] = "true"
-                # NOTE: We should also apply the known color flags to the env
-                env["FORCE_COLOR"] = "1"
-                if "NO_COLOR" in env:
-                    del env["NO_COLOR"]
+                env_["SEMGREP_FORCE_COLOR"] = "true"
+                # NOTE: We should also apply the known color flags to the env_
+                env_["FORCE_COLOR"] = "1"
+                if "NO_COLOR" in env_:
+                    del env_["NO_COLOR"]
 
-            if "SEMGREP_USER_AGENT_APPEND" not in env:
-                env["SEMGREP_USER_AGENT_APPEND"] = "pytest"
+            if "SEMGREP_USER_AGENT_APPEND" not in env_:
+                env_["SEMGREP_USER_AGENT_APPEND"] = "pytest"
 
             # If delete_setting_file is false and a settings file doesnt exist, put a default
             # as we are not testing said setting. Note that if Settings file exists we want to keep it
             # Use a unique settings file so multithreaded pytest works well
-            if "SEMGREP_SETTINGS_FILE" not in env:
+            if "SEMGREP_SETTINGS_FILE" not in env_:
                 unique_settings_file = tempfile.NamedTemporaryFile().name
                 make_settings_file(Path(unique_settings_file))
-                env["SEMGREP_SETTINGS_FILE"] = unique_settings_file
-            if "SEMGREP_VERSION_CACHE_PATH" not in env:
-                env["SEMGREP_VERSION_CACHE_PATH"] = tempfile.TemporaryDirectory().name
-            if "SEMGREP_ENABLE_VERSION_CHECK" not in env:
-                env["SEMGREP_ENABLE_VERSION_CHECK"] = "0"
-            if force_metrics_off and "SEMGREP_SEND_METRICS" not in env:
-                env["SEMGREP_SEND_METRICS"] = "off"
+                env_["SEMGREP_SETTINGS_FILE"] = unique_settings_file
+            if "SEMGREP_VERSION_CACHE_PATH" not in env_:
+                env_["SEMGREP_VERSION_CACHE_PATH"] = tempfile.TemporaryDirectory().name
+            if "SEMGREP_ENABLE_VERSION_CHECK" not in env_:
+                env_["SEMGREP_ENABLE_VERSION_CHECK"] = "0"
+            if force_metrics_off and "SEMGREP_SEND_METRICS" not in env_:
+                env_["SEMGREP_SEND_METRICS"] = "off"
 
             # In https://github.com/semgrep/semgrep-proprietary/pull/2605
             # we started to gate some JSON fields with an is_logged_in check
             # and certain tests needs those JSON fields hence this parameter
-            if is_logged_in_weak and "SEMGREP_APP_TOKEN" not in env:
-                env["SEMGREP_APP_TOKEN"] = "fake_token"
+            if is_logged_in_weak and "SEMGREP_APP_TOKEN" not in env_:
+                env_["SEMGREP_APP_TOKEN"] = "fake_token"
+
+            # We don't want *our* CI environment variables to be picked up
+            # by semgrep, and env only *overrides* environment variables,
+            # so make sure to explicitly delete any ambient CI variables.
+            for var in os.environ:
+                if (var == "CI" or var.startswith("GITHUB_")) and var not in env_:
+                    env_[var] = None
 
             if options is None:
                 options = []
+            options = copy.copy(options)
 
             # This is a hack to make osemgrep's new semgrepignore behavior
             # compatible with pysemgrep when the current folder is not
@@ -463,17 +516,30 @@ def _run_semgrep(
             # In tests, we want to ignore the project-wide's semgrepignore.
             # This is what the '--project-root .' option achieves.
             if (
-                (subcommand is None or subcommand == "scan")
-                and USE_OSEMGREP
-                and osemgrep_force_project_root
-            ):
+                subcommand is None or subcommand == "scan" or subcommand == "ci"
+            ) and osemgrep_force_project_root:
                 options.extend(["--project-root", osemgrep_force_project_root])
+
+            if subcommand is None or subcommand == "scan" or subcommand == "ci":
+                if timeout:
+                    options.extend(["--timeout", str(timeout)])
+                else:
+                    options.extend(["--timeout", str(DEFAULT_PER_RULE_TIMEOUT)])
 
             if strict:
                 options.append("--strict")
 
             if quiet:
                 options.append("--quiet")
+
+            if use_parmap:
+                options.append("--x-parmap")
+                # Currently `semgrep test` does not consume `-j`.  We should contemplate
+                # running those tests in parallel with Concurrent.map, but until then, just
+                # elide the argument.
+                if subcommand is None or subcommand == "scan" or subcommand == "ci":
+                    assert j >= 1
+                    options.extend(["-j", str(j)])
 
             if config is not None:
                 if isinstance(config, list):
@@ -501,10 +567,10 @@ def _run_semgrep(
                     else Path(target_name)
                 )
             args = " ".join(shlex.quote(str(c)) for c in [*options, *targets])
-            env_string = " ".join(f'{k}="{v}"' for k, v in env.items())
+            env_string = " ".join(f'{k}="{v}"' for k, v in env_.items())
 
             runner = SemgrepRunner(
-                env=env, mix_stderr=False, use_click_runner=use_click_runner
+                env=env_, mix_stderr=False, use_click_runner=use_click_runner
             )
             click_result = runner.invoke(
                 cli, subcommand=subcommand, args=args, input=stdin
@@ -569,17 +635,29 @@ def unique_home_dir(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     yield tmp_path
 
 
+def _mk_osemgrep_project_root():
+    """Return the directory containing targets/ and rules/ dirs.
+
+    We run different tests in slightly different setups - either 1)
+    copying `targets/` and `rules/` directories to a temporary folder
+    OR 2) symlinking these directories to a temporary folder OR 3)
+    directly run inside the tests directory. We want to set the
+    project root to the original directory, when 'targets' is a
+    symlink in a temporary folder.
+
+    See `tests/fixtures.py` for more information on why we set the
+    `--project-root`.
+
+    """
+    return str(Path("targets").resolve().parent)
+
+
 # Provide a run_semgrep function with alternate defaults
 _run_strict_semgrep_on_basic_targets_with_json_output: fixtures.RunSemgrep = partial(
     _run_semgrep,
     strict=True,
     target_name="basic",
     output_format=OutputFormat.JSON,
-    # In the setup we use, 'targets' is a symlink in a temporary folder.
-    # It's incompatible with the project root being '.' because
-    # the real path of the project root must be a prefix of the real path
-    # of the scanning root.
-    osemgrep_force_project_root="targets/..",
 )
 
 
@@ -588,29 +666,59 @@ def run_semgrep_in_tmp(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> fixtures.RunSemgrep:
     """
-    Note that this can cause failures if Semgrep pollutes either the targets or rules path
+    [DEPRECATED] Same as 'run_semgrep_on_copied_files' but with symlinks
+    instead of file copies.
+    Symlinks cause complications with target selection which are best
+    avoided if possible.
     """
     (tmp_path / "targets").symlink_to(TARGETS_PATH.resolve())
     (tmp_path / "rules").symlink_to(RULES_PATH.resolve())
     monkeypatch.chdir(tmp_path)
 
-    return _run_strict_semgrep_on_basic_targets_with_json_output
+    return partial(
+        _run_strict_semgrep_on_basic_targets_with_json_output,
+        osemgrep_force_project_root=_mk_osemgrep_project_root(),
+    )
 
 
 @pytest.fixture
 def run_semgrep_on_copied_files(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> fixtures.RunSemgrep:
     """
-    Like run_semgrep_in_tmp, but fully copies rule and target data to avoid
-    directory pollution, also avoids issues with symlink navigation
+    Copy the rules/ and targets/ into a temporary workspace and cd into it.
+    Use this function only if the test leaves dirty data behind.
+    The workspace is a temporary folder that is not inside a git repo.
     """
     copytree(TARGETS_PATH.resolve(), tmp_path / "targets")
     copytree(RULES_PATH.resolve(), tmp_path / "rules")
     monkeypatch.chdir(tmp_path)
 
-    return _run_strict_semgrep_on_basic_targets_with_json_output
+    return partial(
+        _run_strict_semgrep_on_basic_targets_with_json_output,
+        osemgrep_force_project_root=_mk_osemgrep_project_root(),
+    )
+
+
+@pytest.fixture
+def run_semgrep_in_test_folder(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> fixtures.RunSemgrep:
+    """
+    Change the current directory to where targets/ and rules/ exist without
+    copying them. This saves time but is only suitable for read-only tests.
+    In doubt, use 'run_semgrep_in_tmp' which is safe but may be a little
+    slower.
+    This stays within the project which is presumably a git repo. Running
+    semgrep in a git repo causes it to do certain git-specific operations.
+    """
+    monkeypatch.chdir(RULES_AND_TARGETS_PATH)
+
+    return partial(
+        _run_strict_semgrep_on_basic_targets_with_json_output,
+        osemgrep_force_project_root=_mk_osemgrep_project_root(),
+    )
 
 
 @pytest.fixture
@@ -652,3 +760,52 @@ def lockfile_path_in_tmp_for_perf(monkeypatch: pytest.MonkeyPatch, tmp_path: Pat
     )
     (tmp_path / "rules").symlink_to(RULES_PATH.resolve())
     monkeypatch.chdir(tmp_path)
+
+
+class PosixSnapshot:
+    """Wrapper that normalizes paths before assert_match-ing snapshots."""
+
+    def __init__(self, snapshot):
+        self.snapshot = snapshot
+
+    def assert_match(self, output: str, filename: str, **kwargs):
+        """Assert output matches the stored snapshot, after normalizing paths.
+
+        If the output is valid JSON, convert any Windows-style paths to POSIX
+        paths. If not JSON, convert any Windows-style paths like 'targets/...'
+        present on lines starting with those paths.
+
+        """
+        try:
+            parsed = json.loads(output)
+        except json.JSONDecodeError:
+            dir_names = ("targets\\", "dir_one\\", "dir_two\\")
+            lines = [
+                (
+                    line.replace("\\", "/")
+                    if line.strip().startswith(dir_names)
+                    else line
+                )
+                for line in output.splitlines(keepends=True)
+            ]
+            result = "".join(lines)
+        else:
+            posix_parsed = json_win_paths_to_posix(parsed)
+            result = json.dumps(posix_parsed, indent=2)
+
+        # pytest-snapshot explicitly changes the line endings based on the OS,
+        # when using a string argument to `snapshot.assert_match`. So, we
+        # convert the string to bytes before passing it to
+        # `snapshot.assert_match`.
+        self.snapshot.assert_match(result.encode("utf-8"), filename, **kwargs)
+
+
+@pytest.fixture
+def posix_snapshot(snapshot):
+    """Fixture wrapping pytest-snapshot to be usable on Windows and POSIX."""
+    return PosixSnapshot(snapshot) if IS_WINDOWS else snapshot
+
+
+# Used to mark tests that are failing in Windows due to non-portable test
+# logic.
+skip_on_windows = pytest.mark.skipif(IS_WINDOWS, reason="Failing on Windows")

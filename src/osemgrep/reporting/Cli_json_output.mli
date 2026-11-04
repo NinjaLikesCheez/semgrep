@@ -1,3 +1,15 @@
+(*
+   Copyright (c) 2023-2025 Semgrep Inc.
+
+   This library is free software; you can redistribute it and/or
+   modify it under the terms of the GNU Lesser General Public License
+   version 2.1 as published by the Free Software Foundation.
+
+   This library is distributed in the hope that it will be useful, but
+   WITHOUT ANY WARRANTY; without even the implied warranty of
+   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the file
+   LICENSE for more details.
+*)
 module Out = Semgrep_output_v1_j
 
 (* Entry point *)
@@ -8,12 +20,14 @@ val json_output : Out.format_context -> Out.cli_output -> string
  * When fixed_lines is true, the JSON output contains the fixed lines
  * (and in Scan_subcommand.ml we do not apply the autofix on the files).
  *)
+(* XXX: should this perhaps consume an Output.conf ? *)
 val cli_output_of_runner_result :
+  fips_mode:bool ->
   fixed_lines:bool ->
   (* those 3 parameters are essentially Core_runner.result *)
   Out.core_output ->
   Rule.hrules ->
-  Fpath.t Set_.t ->
+  Fpath_.Fpath_set.t ->
   Out.cli_output
 
 (* internals used in Scan_subcommand.ml *)
@@ -24,14 +38,14 @@ val exit_code_of_error_type : Out.error_type -> Exit_code.t
  * cli_match. This depends on whether an overlapping fix was already included in
  * an earlier cli_match in the same list of matches. *)
 val cli_match_of_core_match :
-  fixed_lines:bool ->
-  Fixed_lines.env ->
-  Rule.hrules ->
+  fips_mode:bool ->
+  Fixed_lines.env option ->
+  Rule.t ->
   Out.core_match ->
   Out.cli_match
 
 val index_match_based_ids : Out.cli_match list -> Out.cli_match list
 (** [index_match_based_ids matches] will append an index to the match based id
-  * where the index is what # finding of the same rule kind in the same file
-  * it is. This is needed for the App to do deduplication
+    where the index is what # finding of the same rule kind in the same file
+    it is. This is needed for the App to do deduplication
   *)

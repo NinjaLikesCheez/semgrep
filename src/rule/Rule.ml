@@ -58,7 +58,7 @@ type 'a loc = {
  * less? enforce invariant that Not can only appear in And?
  *
  * We use 'deriving hash' for formula because of the
- * Match_tainting_mode.Formula_tbl formula cache.
+ * Formula_cache.Formula_tbl formula cache.
  *)
 type formula = {
   f : formula_kind;
@@ -126,8 +126,7 @@ and metavar_cond =
    * update: this is also useful to keep separate from CondEval for
    * the "regexpizer" optimizer (see Analyze_rule.ml).
    *)
-  | CondRegexp of
-      Mvar.t * Xpattern.regexp_string * bool (* constant-propagation *)
+  | CondRegexp of Mvar.t * string * bool (* constant-propagation *)
   | CondType of
       Mvar.t
       * Analyzer.t option
@@ -155,6 +154,7 @@ and metavar_cond_name = {
         be `com.foo.bar`, but less important since those patterns may be able
         to be written directly.
   *)
+  fqns : string list option;
 }
 
 and metavar_analysis_kind =
@@ -188,8 +188,8 @@ let f kind = mk_formula kind
  * want to migrate to Critical/High/Medium/Low/Info as explained in
  * https://linear.app/semgrep/issue/FIND-1240/unified-severity-levels-across-productslocations
  *)
-type severity = Out.match_severity [@@deriving show, eq]
-type validation_state = Out.validation_state [@@deriving show, eq]
+type severity = Out.match_severity [@@deriving eq, ord, show]
+type validation_state = Out.validation_state [@@deriving eq, ord, show]
 
 (*****************************************************************************)
 (* Taint-specific types *)
@@ -204,15 +204,49 @@ type precondition =
   | PAnd of precondition list
   | POr of precondition list
   | PNot of precondition
-[@@deriving show, ord]
+[@@deriving show, ord, eq]
+
+let rec show_precondition (p : precondition) : string =
+  match p with
+  | PLabel s -> s
+  | PBool b -> string_of_bool b
+  | PAnd preds ->
+      "(" ^ String.concat " and " (List.map show_precondition preds) ^ ")"
+  | POr preds ->
+      "(" ^ String.concat " or " (List.map show_precondition preds) ^ ")"
+  | PNot pred -> "not " ^ show_precondition pred
 
 type precondition_with_range = {
   precondition : precondition;
   range : (Tok.location * Tok.location) option;
+      (** Range used to extract the actual text of the precondition for rule translation. *)
 }
-[@@deriving show]
+[@@deriving show, eq]
 
-type by_side_effect = Only | Yes | No [@@deriving show]
+type sink_requires =
+  | UniReq of precondition_with_range
+  | MultiReq of (Mvar.t wrap * precondition_with_range) list  (** non-empty *)
+[@@deriving show, eq]
+
+type by_side_effect = Only | Yes | No [@@deriving show, eq]
+
+type taint_spec_id = string [@@deriving show, eq]
+(** A unique identifier for a taint spec pattern (source, sink, sanitizer, or
+    propagator). See e.g. 'Parse_rule.parse_taint_source'. *)
+
+type byte_range = { start : int; end_ : int } [@@deriving show, eq]
+(** A byte-range in a file: [(start_bytepos, end_bytepos)].
+    Isomorphic to [Range.t] but defined here to avoid a dependency on
+    [semgrep.core] from [semgrep.rule]. *)
+
+(** A formula field in a taint spec entry (source, sink, sanitizer).
+    Either a normal pattern formula, or a list of precomputed file/range
+    pairs that bypass formula evaluation (used by the taint_ranges
+    experiment).  taint_propagator is excluded — see note below. *)
+type taint_formula =
+  | Formula of formula
+  | Ranges of (Fpath.t * byte_range) list
+[@@deriving show, eq]
 
 (* The sources/sanitizers/sinks used to be a simple 'formula list',
  * but with taint labels things are bit more complicated.
@@ -225,13 +259,13 @@ type taint_spec = {
 }
 
 and taint_source = {
-  source_id : string;  (** See 'Parse_rule.parse_taint_source'. *)
-  source_formula : formula;
+  source_id : taint_spec_id;
+  source_formula : taint_formula;
   source_exact : bool;
       (** If 'false' (the default), if the formula were e.g. `source(...)`, then the
-      * `ok` inside `source(sink(ok))` is considered tainted, and `sink(ok)` is
-      * reported. If 'true', only the entire `source(sink(ok))` expression will be
-      * considered tainted, and `sink(ok)` is fine. *)
+        `ok` inside `source(sink(ok))` is considered tainted, and `sink(ok)` is
+        reported. If 'true', only the entire `source(sink(ok))` expression will be
+        considered tainted, and `sink(ok)` is fine. *)
   source_by_side_effect : by_side_effect;
   source_control : bool;
   label : string;
@@ -260,14 +294,14 @@ and taint_source = {
  * because they are a bit confusing to use sometimes.
  *)
 and taint_sanitizer = {
-  sanitizer_id : string;
-  sanitizer_formula : formula;
+  sanitizer_id : taint_spec_id;
+  sanitizer_formula : taint_formula;
   sanitizer_exact : bool;
       (** If 'false' (the default), if the formula were e.g. `sanitize(...)`, then
-      * the `tainted` inside `sanitize(sink(tainted))` is considered sanitized,
-      * and `sink(tainted)` is fine. If 'true', only the entire expression
-      * `sanitize(sink(tainted))` will be considered sanitized, and `sink(tainted)`
-      * will be reported. *)
+        the `tainted` inside `sanitize(sink(tainted))` is considered sanitized,
+        and `sink(tainted)` is fine. If 'true', only the entire expression
+        `sanitize(sink(tainted))` will be considered sanitized, and `sink(tainted)`
+        will be reported. *)
   sanitizer_by_side_effect : bool;
   not_conflicting : bool;
       (* If [not_conflicting] is enabled, the sanitizer cannot conflict with
@@ -286,15 +320,15 @@ and taint_sanitizer = {
 }
 
 and taint_sink = {
-  sink_id : string;  (** See 'Parse_rule.parse_taint_sink'. *)
-  sink_formula : formula;
+  sink_id : taint_spec_id;
+  sink_formula : taint_formula;
   sink_exact : bool;
       (** If 'true' (the default), if the formula were e.g. `sink(...)`, then the
-      * `tainted` inside `sink(if tainted then ok1 else ok2)` is not considered a
-      * sink, and nothing is reported. If 'false', then every subexpression in
-      * `sink(if tainted then ok1 else ok2)` is considered a sink, and we report
-      * a finding due to `tainted`. *)
-  sink_requires : precondition_with_range option;
+        `tainted` inside `sink(if tainted then ok1 else ok2)` is not considered a
+        sink, and nothing is reported. If 'false', then every subexpression in
+        `sink(if tainted then ok1 else ok2)` is considered a sink, and we report
+        a finding due to `tainted`. *)
+  sink_requires : sink_requires option;
       (* A Boolean expression over taint labels. See also 'taint_source'.
        * The sink will only trigger a finding if the data that reaches it
        * has a set of labels attached that satisfies the 'requires'.
@@ -316,7 +350,7 @@ and taint_sink = {
  * will also be marked as tainted.
  *)
 and taint_propagator = {
-  propagator_id : string;
+  propagator_id : taint_spec_id;
   propagator_formula : formula;
   propagator_by_side_effect : bool;
   from : Mvar.t wrap;
@@ -339,7 +373,7 @@ and taint_propagator = {
          received.
       *)
 }
-[@@deriving show]
+[@@deriving show, eq]
 
 let default_source_label = "__SOURCE__"
 let default_source_requires = PBool true
@@ -348,16 +382,6 @@ let default_propagator_requires = PBool true
 let get_source_precondition { source_requires; _ } =
   match source_requires with
   | None -> default_source_requires
-  | Some { precondition; _ } -> precondition
-
-let get_propagator_precondition { propagator_requires; _ } =
-  match propagator_requires with
-  | None -> default_propagator_requires
-  | Some { precondition; _ } -> precondition
-
-let get_sink_requires { sink_requires; _ } =
-  match sink_requires with
-  | None -> PLabel default_source_label
   | Some { precondition; _ } -> precondition
 
 (* Check if a formula has "focus" (i.e., `focus-metavariable` in syntax 1.0)
@@ -423,7 +447,7 @@ and extract_transform = NoTransform | Unquote | ConcatJsonArray
     - either treat them as separate files; or
     - concatentate them together
 *)
-and extract_reduction = Separate | Concat [@@deriving show]
+and extract_reduction = Separate | Concat [@@deriving show, eq]
 
 (*****************************************************************************)
 (* secrets mode (Pro-only) *)
@@ -448,8 +472,8 @@ and extract_reduction = Separate | Concat [@@deriving show]
  * it to not be abstract for metavariable substitution.
  *)
 
-type header = { name : string; value : string } [@@deriving show]
-type meth = [ `DELETE | `GET | `POST | `HEAD | `PUT ] [@@deriving show]
+type header = { name : string; value : string } [@@deriving show, eq]
+type meth = [ `DELETE | `GET | `POST | `HEAD | `PUT ] [@@deriving show, eq]
 
 (* Used to request additional auth headers are computed and added automatically,
  * e.g., because they depend on other headers and/or body
@@ -471,7 +495,7 @@ type auth =
       service : string;
       region : string;
     }
-[@@deriving show]
+[@@deriving show, eq]
 
 type aws_request = {
   secret_access_key : string;
@@ -479,7 +503,7 @@ type aws_request = {
   region : string;
   session_token : string option;
 }
-[@@deriving show]
+[@@deriving show, eq]
 
 (* why is url : string? metavariables (i.e http://$X) are present at parsing; which
  * if parsed with Uri.of_string translates it to http://%24x
@@ -491,14 +515,11 @@ type request = {
   body : string option;
   auth : auth option;
 }
-[@@deriving show]
+[@@deriving show, eq]
 
 (* Used to match on the returned response of some request *)
-type response = {
-  return_code : Parsed_int.t;
-  regex : Xpattern.regexp_string option;
-}
-[@@deriving show]
+type response = { return_code : Parsed_int.t; regex : string option }
+[@@deriving show, eq]
 
 type http_match_clause = {
   status_code : Parsed_int.t option;
@@ -506,7 +527,7 @@ type http_match_clause = {
   headers : header list;
   content : (formula * Analyzer.t) option;
 }
-[@@deriving show]
+[@@deriving show, eq]
 
 type http_matcher = {
   match_conditions : http_match_clause list;
@@ -516,30 +537,38 @@ type http_matcher = {
   metadata : JSON.t option;
   message : string option;
 }
-[@@deriving show]
+[@@deriving show, eq]
 
 type validator =
   | HTTP of { request : request; response : http_matcher list }
   | AWS of { request : aws_request; response : http_matcher list }
-[@@deriving show]
+[@@deriving show, eq]
 
 (*****************************************************************************)
 (* Paths *)
 (*****************************************************************************)
 
-(* TODO? store also the compiled glob directly? but we preprocess the pattern
- * in Filter_target.filter_paths, so we would need to recompile it anyway,
- * or call Filter_target.filter_paths preprocessing in Parse_rule.ml
- *)
-type glob = string (* original string *) * Glob.Pattern.t (* parsed glob *)
+(*
+   Gitignore/Semgrepignore-compliant glob matching. The compiled pattern
+   is not right-anchored e.g. pattern 'a' will match path 'a' but also 'a/b'.
+   The patterns are left-anchored or not based on Gitignore conventions.
+*)
+type glob = {
+  source_pattern : string;
+  compiled_pattern : Glob.Match.compiled_pattern;
+}
 [@@deriving show]
+
+(* compiled_pattern is abstract and has no equal; equality of source_pattern
+   is sufficient since the same source compiles to an equivalent pattern. *)
+let equal_glob a b = String.equal a.source_pattern b.source_pattern
 
 (* TODO? should we provide a pattern-filename: Xpattern to combine
  * with other Xpattern instead of adhoc paths: extra field in the rule?
  * TODO? should we remove this field and opt for a more powerful and general
  * Target_selector.t type?
  *)
-type paths = {
+type path_filter = {
   (* If not empty, list of file path patterns (globs) that
    * the file path must at least match once to be considered for the rule.
    * Called 'include' in our doc but really it is a 'require'.
@@ -549,14 +578,14 @@ type paths = {
   (* List of file path patterns we want to exclude. *)
   exclude : glob list;
 }
-[@@deriving show]
+[@@deriving show, eq]
 
 (*****************************************************************************)
 (* Misc *)
 (*****************************************************************************)
 
 type fix_regexp = {
-  regexp : Xpattern.regexp_string;
+  regexp : string;
   (* Not using Parsed_int here, because we would rather fail early at rule
      parsing time if we have to apply a regexp more times than we can
      represent.
@@ -565,25 +594,25 @@ type fix_regexp = {
   count : int option;
   replacement : string;
 }
-[@@deriving show, eq, hash]
+[@@deriving eq, hash, ord, show]
 
 (*****************************************************************************)
 (* Shared mode definitions *)
 (*****************************************************************************)
 
-(* Polymorhic variants used to improve type checking of rules (see below) *)
-type search_mode = [ `Search of formula ] [@@deriving show]
-type taint_mode = [ `Taint of taint_spec ] [@@deriving show]
-type extract_mode = [ `Extract of extract ] [@@deriving show]
+(* Polymorphic variants used to improve type checking of rules (see below) *)
+type search_mode = [ `Search of formula ] [@@deriving show, eq]
+type taint_mode = [ `Taint of taint_spec ] [@@deriving show, eq]
+type extract_mode = [ `Extract of extract ] [@@deriving show, eq]
 
 (* a.k.a parity rules, that is for SCA rules without a pattern *)
-type sca_mode = [ `SCA of sca_dependency_formula ] [@@deriving show]
+type sca_mode = [ `SCA of sca_dependency_formula ] [@@deriving show, eq]
 
 (* Steps mode includes rules that use search_mode and taint_mode.
  * Later, if we keep it, we might want to make all rules have steps,
  * but for the experiment this is easier to remove.
  *)
-type steps_mode = [ `Steps of step list ] [@@deriving show]
+type steps_mode = [ `Steps of step list ] [@@deriving show, eq]
 
 (*****************************************************************************)
 (* Steps mode (Pro-only) *)
@@ -592,10 +621,28 @@ and step = {
   step_mode : mode_for_step;
   step_selector : Target_selector.t option;
   step_analyzer : Analyzer.t;
-  step_paths : paths option;
+  step_paths : path_filter option;
 }
 
-and mode_for_step = [ search_mode | taint_mode ] [@@deriving show]
+and mode_for_step = [ search_mode | taint_mode ] [@@deriving show, eq]
+
+(*****************************************************************************)
+(* Join mode (parsing support only)*)
+(*****************************************************************************)
+(* TODO: Join mode is to be deprecated in favor of steps mode. The parsing has
+   been implemented to allow for RPC validation of join mode files. *)
+(*****************************************************************************)
+
+type join_mode = [ `Join of join ] [@@deriving show, eq]
+
+and join = { refs : join_ref list; rules : join_inline list; on : string list }
+[@@deriving show, eq]
+
+and join_ref = { rule : string; as_ : string option; renames : rename list }
+[@@deriving show, eq]
+
+and join_inline = step [@@deriving show, eq]
+and rename = { from_ : string; to_ : string } [@@deriving show, eq]
 
 (*****************************************************************************)
 (* The rule *)
@@ -668,10 +715,6 @@ type 'mode rule_info = {
   (* OPTIONAL fields *)
   (* --------------------------------- *)
   options : Rule_options.t option;
-  (* deprecated? or should we resurrect the feature?
-   * TODO: if we resurrect the feature, we should parse the string
-   *)
-  equivalences : string list option;
   (* Optional replacement pattern, a.k.a autofix.
    *
    * Note that the pattern string is passed through String.trim() during rule
@@ -693,7 +736,7 @@ type 'mode rule_info = {
   (* TODO: we should get rid of this and instead provide a more general
    * Xpattern.Filename feature that integrates well with the xpatterns.
    *)
-  paths : paths option;
+  paths : path_filter option;
   (* This is not a concrete field in the rule, but it's derived from
    * other fields (e.g., metadata, mode) in Parse_rule.ml
    *)
@@ -725,22 +768,23 @@ type 'mode rule_info = {
   min_version : Semver_.t option;
   max_version : Semver_.t option;
 }
-[@@deriving show]
+[@@deriving show, eq]
 
 (* Step mode includes rules that use search_mode and taint_mode *)
 (* Later, if we keep it, we might want to make all rules have steps,
    but for the experiment this is easier to remove *)
 
-type mode = [ search_mode | taint_mode | extract_mode | steps_mode | sca_mode ]
-[@@deriving show]
+type mode =
+  [ search_mode | taint_mode | extract_mode | steps_mode | sca_mode | join_mode ]
+[@@deriving show, eq]
 
 (* the general type *)
-type rule = mode rule_info [@@deriving show]
+type rule = mode rule_info [@@deriving show, eq]
 
 (* aliases *)
-type t = rule [@@deriving show]
-type rules = rule list [@@deriving show]
-type hrules = (Rule_ID.t, t) Hashtbl.t
+type t = rule [@@deriving show, eq]
+type rules = rule list [@@deriving show, eq]
+type hrules = (Rule_ID.t, t) Base.Hashtbl.t
 
 (* If you know your function accepts only a certain kind of rule,
  * you can use those precise types below.
@@ -749,6 +793,7 @@ type search_rule = search_mode rule_info [@@deriving show]
 type taint_rule = taint_mode rule_info [@@deriving show]
 type extract_rule = extract_mode rule_info [@@deriving show]
 type steps_rule = steps_mode rule_info [@@deriving show]
+type join_rule = join_mode rule_info [@@deriving show]
 
 (*****************************************************************************)
 (* Helpers *)
@@ -756,8 +801,12 @@ type steps_rule = steps_mode rule_info [@@deriving show]
 
 (* old: was t list -> hrules, but nice to allow for more precise hrules *)
 let hrules_of_rules (rules : 'mode rule_info list) :
-    (Rule_ID.t, 'mode rule_info) Hashtbl.t =
-  rules |> List_.map (fun r -> (fst r.id, r)) |> Hashtbl_.hash_of_list
+    (Rule_ID.t, 'mode rule_info) Base.Hashtbl.t =
+  rules |> List.map (fun r -> (fst r.id, r)) |> Hashtbl_.Base.hash_of_list
+
+let rules_of_hrules (hrules : hrules) : string list =
+  hrules |> Base.Hashtbl.to_alist
+  |> List.map (fun (rule_id, _) -> Rule_ID.to_string rule_id)
 
 let partition_rules (rules : rules) :
     search_rule list * taint_rule list * extract_rule list * steps_rule list =
@@ -773,9 +822,25 @@ let partition_rules (rules : rules) :
             part_rules search taint ({ r with mode = e } :: extract) step l
         | `Steps _ as j ->
             part_rules search taint extract ({ r with mode = j } :: step) l
-        | `SCA _ -> part_rules search taint extract step l)
+        | `SCA _ -> part_rules search taint extract step l
+        | `Join _ -> part_rules search taint extract step l)
   in
   part_rules [] [] [] [] rules
+
+let split_taint_rules (rules : rules) : taint_rule list * rules =
+  let rec part_rules taint other = function
+    | [] -> (List.rev taint, List.rev other)
+    | r :: l -> (
+        match r.mode with
+        | `Taint _ as t -> part_rules ({ r with mode = t } :: taint) other l
+        | `Search _
+        | `Extract _
+        | `Steps _
+        | `Join _
+        | `SCA _ ->
+            part_rules taint (r :: other) l)
+  in
+  part_rules [] [] rules
 
 (* for informational messages *)
 let show_id rule = rule.id |> fst |> Rule_ID.to_string
@@ -787,8 +852,10 @@ let show_id rule = rule.id |> fst |> Rule_ID.to_string
 (* This is used to let the user know which rule the engine was using when
  * a Timeout or OutOfMemory exn occured.
  * TODO: relation with Match_patterns.last_matched_rule?
+ * SAFETY: see comment block for Match_patterns.last_matched_rule.
  *)
-let last_matched_rule : Rule_ID.t option ref = ref None
+let last_matched_rule : Rule_ID.t option Domain.DLS.key =
+  Domain.DLS.new_key (Fun.const None)
 
 (*****************************************************************************)
 (* Visitor/extractor *)
@@ -819,18 +886,34 @@ let rec formulas_of_mode (mode : mode) : formula list =
   | `Search formula -> [ formula ]
   | `Taint { sources = _, sources; sanitizers; sinks = _, sinks; propagators }
     ->
-      List_.map (fun src -> src.source_formula) sources
+      List.filter_map
+        (fun src ->
+          match src.source_formula with
+          | Formula f -> Some f
+          | Ranges _ -> None)
+        sources
       @ (match sanitizers with
         | None -> []
         | Some (_, sanitizers) ->
-            List_.map (fun sanitizer -> sanitizer.sanitizer_formula) sanitizers)
-      @ List_.map (fun sink -> sink.sink_formula) sinks
-      @ List_.map (fun prop -> prop.propagator_formula) propagators
+            List.filter_map
+              (fun s ->
+                match s.sanitizer_formula with
+                | Formula f -> Some f
+                | Ranges _ -> None)
+              sanitizers)
+      @ List.filter_map
+          (fun sink ->
+            match sink.sink_formula with
+            | Formula f -> Some f
+            | Ranges _ -> None)
+          sinks
+      @ List.map (fun prop -> prop.propagator_formula) propagators
   | `Extract { formula; extract = _; _ } -> [ formula ]
   | `Steps steps ->
       List.concat_map
         (fun step -> formulas_of_mode (step.step_mode :> mode))
         steps
+  | `Join _ -> []
   | `SCA _ -> []
 
 (*****************************************************************************)
@@ -850,16 +933,16 @@ let selector_and_analyzer_of_analyzer (analyzer : Analyzer.t) :
 let split_and (xs : formula list) : formula list * (tok * formula) list =
   xs
   |> Either_.partition (fun e ->
-         match e.f with
-         (* positives *)
-         | P _
-         | And _
-         | Inside _
-         | Anywhere _
-         | Or _ ->
-             Left e
-         (* negatives *)
-         | Not (tok, f) -> Right (tok, f))
+      match e.f with
+      (* positives *)
+      | P _
+      | And _
+      | Inside _
+      | Anywhere _
+      | Or _ ->
+          Left e
+      (* negatives *)
+      | Not (tok, f) -> Right (tok, f))
 
 (* create a fake rule when we only have a pattern and language.
  * This is used when someone calls `semgrep -e print -l python`
@@ -886,7 +969,6 @@ let rule_of_formula ?fix (analyzer : Analyzer.t) (formula : formula) : rule =
     target_selector;
     target_analyzer;
     options = None;
-    equivalences = None;
     fix_regexp = None;
     paths = None;
     metadata = None;

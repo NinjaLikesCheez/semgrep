@@ -73,12 +73,15 @@ let default_lr_stats () = { lvalue = ref 0; rvalue = ref 0 }
 type class_stats = { mutable num_constructors : int }
 
 type stats = {
-  var_stats : (Eval.var, lr_stats) Hashtbl.t;
-  class_stats : (string, class_stats) Hashtbl.t;
+  var_stats : (Eval.var, lr_stats) Base.Hashtbl.t;
+  class_stats : (string, class_stats) Base.Hashtbl.t;
 }
 
 let new_stats () =
-  { var_stats = Hashtbl.create 100; class_stats = Hashtbl.create 1 }
+  {
+    var_stats = Base.Hashtbl.Poly.create ~size:100 ();
+    class_stats = Base.Hashtbl.Poly.create ~size:1 ();
+  }
 
 (*****************************************************************************)
 (* Helpers *)
@@ -96,10 +99,13 @@ let rec lvars_in_lhs expr =
   match expr.e with
   | N (Id (id, { id_resolved = { contents = Some (_kind, sid) }; _ }))
   | DotAccess
-      ( { e = IdSpecial (This, _); _ },
+      ( (* could be 'this' for instance fields,
+          or the class name for `static` fields *)
+        _,
         _,
         FN (Id (id, { id_resolved = { contents = Some (_kind, sid) }; _ })) ) ->
       [ (id, sid) ]
+  | ArrayAccess (e, _) -> lvars_in_lhs e
   | Container ((Tuple | Array), (_, es, _)) -> List.concat_map lvars_in_lhs es
   | __else__ -> []
 
@@ -158,12 +164,16 @@ let add_constant_env ident (sid, svalue) (env : Eval.env) =
   | Sym _ ->
       Log.debug (fun m ->
           m ~tags "adding constant in env %s" (H.str_of_ident ident));
-      Hashtbl.add env.constants (H.str_of_ident ident, sid) svalue
-  | NotCst -> ()
+      Base.Hashtbl.set env.constants
+        ~key:(H.str_of_ident ident, sid)
+        ~data:svalue
+  | NotCst
+  | Unknown ->
+      ()
 
 let is_assigned_just_once stats var =
   let id_str, sid = var in
-  match Hashtbl.find_opt stats var with
+  match Base.Hashtbl.find stats var with
   | Some stats -> !(stats.lvalue) = 1
   | None ->
       Log.debug (fun m ->
@@ -173,16 +183,16 @@ let is_assigned_just_once stats var =
 let incr_num_constructors stats cid =
   let stats_cid =
     let cstr, _tok = cid in
-    try Hashtbl.find stats.class_stats cstr with
+    try Hashtbl_.Base.find stats.class_stats cstr with
     | Not_found ->
         let stats_cid = { num_constructors = 0 } in
-        Hashtbl.add stats.class_stats cstr stats_cid;
+        Base.Hashtbl.set stats.class_stats ~key:cstr ~data:stats_cid;
         stats_cid
   in
   stats_cid.num_constructors <- stats_cid.num_constructors + 1
 
 let has_just_one_constructor stats cstr =
-  match Hashtbl.find_opt stats cstr with
+  match Base.Hashtbl.find stats cstr with
   | Some stats -> stats.num_constructors = 1
   | None ->
       Log.debug (fun m -> m ~tags "No stats for %s" cstr);
@@ -191,6 +201,8 @@ let has_just_one_constructor stats cstr =
 let constant_propagation_and_evaluate_literal ?lang =
   let env = Eval.default_env lang in
   Eval.eval env
+
+let obj_creation_mtx = Mutex.create ()
 
 (*****************************************************************************)
 (* Poor man''s const analysis *)
@@ -208,103 +220,129 @@ let constant_propagation_and_evaluate_literal ?lang =
 let stats_of_prog prog : stats =
   let stats = new_stats () in
   let get_stat_or_create var h =
-    try Hashtbl.find h var with
+    try Hashtbl_.Base.find h var with
     | Not_found ->
         let stat = default_lr_stats () in
-        Hashtbl.add h var stat;
+        Base.Hashtbl.set h ~key:var ~data:stat;
         stat
   in
 
   let visitor =
-    object (_self : 'self)
-      inherit [_] Iter_with_context.iter_with_context as super
+    (* We've seen some data races in class initialization:
+       https://github.com/ocaml/ocaml/issues/14131#issuecomment-3471346017 so
+       let's be a little extra careful here just in case *)
+    Mutex.protect obj_creation_mtx (fun () ->
+        object (_self : 'self)
+          inherit [_] Iter_with_context.iter_with_context as super
 
-      method! with_context_visit_definition (env, ctx) x =
-        (* We need to override 'with_context_visit_definition' instead of
-         * 'visit_definition' because we want to know here whether 'FuncDef'
-         * is a constructor. *)
-        (match x with
-        | _, FuncDef _ when ctx.in_constructor -> (
-            match ctx.in_class with
-            | None ->
-                Log.warn (fun m ->
-                    m "stats_of_prog: in constructor but not in class");
-                ()
-            | Some cid -> incr_num_constructors env cid)
-        | ( {
-              name =
-                EN
-                  (Id
-                    (id, { id_resolved = { contents = Some (_kind, sid) }; _ }));
-              _;
-            },
-            VarDef { vinit = Some _e; _ } ) ->
-            let var = (H.str_of_ident id, sid) in
-            let stat = get_stat_or_create var env.var_stats in
-            incr stat.lvalue
-        | _ -> ());
-        super#with_context_visit_definition (env, ctx) x
+          method! with_context_visit_definition (env, ctx) x =
+            (* We need to override 'with_context_visit_definition' instead of
+             * 'visit_definition' because we want to know here whether 'FuncDef'
+             * is a constructor. *)
+            (match x with
+            | _, FuncDef _ when ctx.in_constructor -> (
+                match ctx.in_class with
+                | None ->
+                    Log.warn (fun m ->
+                        m "stats_of_prog: in constructor but not in class");
+                    ()
+                | Some cid -> incr_num_constructors env cid)
+            | ( {
+                  name =
+                    EN
+                      (Id
+                         ( id,
+                           { id_resolved = { contents = Some (_kind, sid) }; _ }
+                         ));
+                  _;
+                },
+                VarDef { vinit = Some _e; _ } ) ->
+                let var = (H.str_of_ident id, sid) in
+                let stat = get_stat_or_create var env.var_stats in
+                incr stat.lvalue
+            | _ -> ());
+            (* Due to our imperfect handling of field initialization, we have some regressions
+               when synthetic function bodies contribute to lvalue stats.
 
-      (* TODO: An `ExprStmt` method call (probably returning 'void') should count as a
-       * potential assignment too... E.g. in Ruby `a.concat(b)` is going to update `a`. *)
-      method! visit_stmt (env, ctx) x =
-        (match x.s with
-        | For
-            ( _,
-              ForEach
-                ( PatId
-                    (id, { id_resolved = { contents = Some (_kind, sid) }; _ }),
-                  _,
-                  _ ),
-              _ ) ->
-            let var = (H.str_of_ident id, sid) in
-            let stat = get_stat_or_create var env.var_stats in
-            incr stat.lvalue
-        | _ -> ());
-        super#visit_stmt (env, ctx) x
+               Initializing a Java private field to a taint source would
+               get lost without this condition. By keeping it, we ignore
+               the autogenerated setter and thus propagate its taintedness.
 
-      method! visit_expr (env, ctx) x =
-        (match x.e with
-        | Assign (* v = ... *) (lhs, _, _e2)
-        | AssignOp (* v += ... *) (lhs, _, _e2) ->
-            (* TODO: What if there is an asignment inside the `lhs` ? *)
-            lvars_in_lhs lhs
-            |> List.iter (fun (id, sid) ->
-                   let var = (H.str_of_ident id, sid) in
-                   let stat = get_stat_or_create var env.var_stats in
-                   incr stat.lvalue;
-                   match x.e with
-                   | AssignOp _ -> incr stat.rvalue
-                   | _ -> ())
-        | Call
-            ( { e = IdSpecial (IncrDecr _, _); _ },
-              ( _,
-                [
-                  Arg
-                    {
-                      e =
-                        N
-                          (Id
-                            ( id,
-                              {
-                                id_resolved = { contents = Some (_kind, sid) };
-                                _;
-                              } ));
-                      _;
-                    };
-                ],
-                _ ) ) ->
-            let var = (H.str_of_ident id, sid) in
-            let stat = get_stat_or_create var env.var_stats in
-            incr stat.lvalue
-        | N (Id (id, { id_resolved = { contents = Some (_kind, sid) }; _ }))
-          when not ctx.in_lvalue ->
-            let var = (H.str_of_ident id, sid) in
-            let stat = get_stat_or_create var env.var_stats in
-            incr stat.rvalue
-        | _ -> ());
-        super#visit_expr (env, ctx) x
-    end
+               We, however, should NOT ignore synthetic function bodies, as
+               a synthetic setter, for instance, imply that a field should not be considered
+               effectively constant.
+
+               Note that we generate Java accessors unconditionally, meaning
+               that we could potentially lose a lot of taint information due to
+               synthetic accessors created unnecessarily.
+
+               This condition should be removed once LANG-227 is fixed. *)
+            if not (is_fake_funcdef x) then
+              super#with_context_visit_definition (env, ctx) x
+
+          (* TODO: An `ExprStmt` method call (probably returning 'void') should count as a
+           * potential assignment too... E.g. in Ruby `a.concat(b)` is going to update `a`. *)
+          method! visit_stmt (env, ctx) x =
+            (match x.s with
+            | For
+                ( _,
+                  ForEach
+                    ( PatId
+                        ( id,
+                          { id_resolved = { contents = Some (_kind, sid) }; _ }
+                        ),
+                      _,
+                      _ ),
+                  _ ) ->
+                let var = (H.str_of_ident id, sid) in
+                let stat = get_stat_or_create var env.var_stats in
+                incr stat.lvalue
+            | _ -> ());
+            super#visit_stmt (env, ctx) x
+
+          method! visit_expr (env, ctx) x =
+            (match x.e with
+            | Assign (* v = ... *) (lhs, _, _e2)
+            | AssignOp (* v += ... *) (lhs, _, _e2) ->
+                (* TODO: What if there is an asignment inside the `lhs` ? *)
+                lvars_in_lhs lhs
+                |> List.iter (fun (id, sid) ->
+                    let var = (H.str_of_ident id, sid) in
+                    let stat = get_stat_or_create var env.var_stats in
+                    incr stat.lvalue;
+                    match x.e with
+                    | AssignOp _ -> incr stat.rvalue
+                    | _ -> ())
+            | Call
+                ( { e = Special (IncrDecr _, _); _ },
+                  ( _,
+                    [
+                      Arg
+                        {
+                          e =
+                            N
+                              (Id
+                                 ( id,
+                                   {
+                                     id_resolved =
+                                       { contents = Some (_kind, sid) };
+                                     _;
+                                   } ));
+                          _;
+                        };
+                    ],
+                    _ ) ) ->
+                let var = (H.str_of_ident id, sid) in
+                let stat = get_stat_or_create var env.var_stats in
+                incr stat.lvalue
+            | N (Id (id, { id_resolved = { contents = Some (_kind, sid) }; _ }))
+              when not ctx.in_lvalue ->
+                let var = (H.str_of_ident id, sid) in
+                let stat = get_stat_or_create var env.var_stats in
+                incr stat.rvalue
+            | _ -> ());
+            super#visit_expr (env, ctx) x
+        end)
   in
   visitor#visit_program (stats, Iter_with_context.initial_context) prog;
   stats
@@ -343,21 +381,21 @@ let (terraform_stmt_to_vardefs : item -> (ident * expr) list) =
         },
         _ ) ->
       xs
-      |> List_.filter_map (function
-           | F
-               {
-                 s =
-                   DefStmt
-                     ( {
-                         name = EN (Id ((str, tk), _idinfo));
-                         attrs = [];
-                         tparams = None;
-                       },
-                       VarDef { vinit = Some v; vtype = None; vtok = _ } );
-                 _;
-               } ->
-               Some (("local." ^ str, tk), v)
-           | _ -> None)
+      |> List.filter_map (function
+        | F
+            {
+              s =
+                DefStmt
+                  ( {
+                      name = EN (Id ((str, tk), _idinfo));
+                      attrs = [];
+                      tparams = None;
+                    },
+                    VarDef { vinit = Some v; vtype = None; vtok = _ } );
+              _;
+            } ->
+            Some (("local." ^ str, tk), v)
+        | _ -> None)
   (* ex: variable "foo" { ... default = 1 } *)
   | ExprStmt
       ( {
@@ -374,22 +412,22 @@ let (terraform_stmt_to_vardefs : item -> (ident * expr) list) =
         },
         _ ) ->
       xs
-      |> List_.filter_map (function
-           | F
-               {
-                 s =
-                   DefStmt
-                     ( {
-                         name = EN (Id (("default", _tk), _idinfo));
-                         attrs = [];
-                         tparams = None;
-                       },
-                       VarDef { vinit = Some v; vtype = None; vtok = _ } );
-                 _;
-               } ->
-               let str, tk = id in
-               Some (("var." ^ str, tk), v)
-           | _ -> None)
+      |> List.filter_map (function
+        | F
+            {
+              s =
+                DefStmt
+                  ( {
+                      name = EN (Id (("default", _tk), _idinfo));
+                      attrs = [];
+                      tparams = None;
+                    },
+                    VarDef { vinit = Some v; vtype = None; vtok = _ } );
+              _;
+            } ->
+            let str, tk = id in
+            Some (("var." ^ str, tk), v)
+        | _ -> None)
   | _ -> []
 
 (* the sid does not matter here, there is no nested scope in terraform,
@@ -403,12 +441,12 @@ let add_special_constants env lang prog =
     let vars = prog |> List.concat_map terraform_stmt_to_vardefs in
     vars
     |> List.iter (fun (id, v) ->
-           match v.e with
-           | L literal ->
-               Log.debug (fun m ->
-                   m ~tags "adding special terraform constant for %s" (fst id));
-               add_constant_env id (terraform_sid, Lit literal) env
-           | _ -> ())
+        match v.e with
+        | L literal ->
+            Log.debug (fun m ->
+                m ~tags "adding special terraform constant for %s" (fst id));
+            add_constant_env id (terraform_sid, Lit literal) env
+        | _ -> ())
 
 (*****************************************************************************)
 (* Entry point *)
@@ -435,179 +473,190 @@ let propagate_basic lang prog =
 
   (* step2: second pass where we actually propagate when we can *)
   let visitor =
-    object (_self : 'self)
-      inherit [_] Iter_with_context.iter_with_context as super
+    (* We've seen some data races in class initialization:
+       https://github.com/ocaml/ocaml/issues/14131#issuecomment-3471346017 so
+       let's be a little extra careful here just in case *)
+    Mutex.protect obj_creation_mtx (fun () ->
+        object (_self : 'self)
+          inherit [_] Iter_with_context.iter_with_context as super
 
-      (* the defs *)
-      method! visit_definition ((env : Eval.env), ctx) x =
-        match x with
-        | ( {
-              name =
-                EN
-                  (Id
-                    (id, { id_resolved = { contents = Some (_kind, sid) }; _ }));
-              attrs;
-              _;
-            },
-            VarDef { vinit = None; _ } ) ->
-            if is_assigned_just_once stats.var_stats (H.str_of_ident id, sid)
-            then
-              (* This is a potential constant but it's defined later on, so we store
-               * it's attributes so check them later, e.g. to know whether it has
-               * `private` visibility. An example of this is a class field that
-               * is initialized in the constructor or in a `static` block. *)
-              Hashtbl.replace env.attributes (fst id, sid) attrs;
-            super#visit_definition (env, ctx) x
-        | ( {
-              name =
-                EN
-                  (Id
-                    ( id,
-                      {
-                        id_resolved = { contents = Some (_kind, sid) };
-                        id_flags;
-                        _;
-                      } ));
-              attrs;
-              _;
-            },
-            VarDef { vinit = Some e; _ } )
-        (* note that some languages such as Python do not have VarDef.
-         * todo? should add those somewhere instead of in_lvalue detection?*) ->
-            let assigned_just_once =
-              is_assigned_just_once stats.var_stats (H.str_of_ident id, sid)
-            in
-            if
-              H.has_keyword_attr Const attrs
-              || H.has_keyword_attr Final attrs
-              || (assigned_just_once && Eval.is_js env)
-              || assigned_just_once && Eval.is_lang env Lang.Java
-                 && List.exists is_private attrs
-            then (
-              id_flags := IdFlags.set_final !id_flags;
-              match (Eval.eval env e, e.e) with
-              (* When the name already has an svalue computed, just use
-               * that. DeepSemgrep assigns svalues sometimes in its naming
-               * phase. *)
-              | Some svalue, _ -> add_constant_env id (sid, svalue) env
-              | None, L literal -> add_constant_env id (sid, Lit literal) env
-              (* For any other symbolic expression, it is OK to propagate it symbolically so long as
+          (* the defs *)
+          method! visit_definition ((env : Eval.env), ctx) x =
+            match x with
+            | ( {
+                  name =
+                    EN
+                      (Id
+                         ( id,
+                           { id_resolved = { contents = Some (_kind, sid) }; _ }
+                         ));
+                  attrs;
+                  _;
+                },
+                VarDef { vinit = None; _ } ) ->
+                if is_assigned_just_once stats.var_stats (H.str_of_ident id, sid)
+                then
+                  (* This is a potential constant but it's defined later on, so we store
+                   * it's attributes so check them later, e.g. to know whether it has
+                   * `private` visibility. An example of this is a class field that
+                   * is initialized in the constructor or in a `static` block. *)
+                  Base.Hashtbl.set env.attributes ~key:(fst id, sid) ~data:attrs;
+                super#visit_definition (env, ctx) x
+            | ( {
+                  name =
+                    EN
+                      (Id
+                         ( id,
+                           {
+                             id_resolved = { contents = Some (_kind, sid) };
+                             id_flags;
+                             _;
+                           } ));
+                  attrs;
+                  _;
+                },
+                VarDef { vinit = Some e; _ } )
+            (* note that some languages such as Python do not have VarDef.
+             * todo? should add those somewhere instead of in_lvalue detection?*)
+              ->
+                let assigned_just_once =
+                  is_assigned_just_once stats.var_stats (H.str_of_ident id, sid)
+                in
+                if
+                  H.has_keyword_attr Const attrs
+                  || H.has_keyword_attr Final attrs
+                  || (assigned_just_once && Eval.is_js env)
+                  || assigned_just_once && Eval.is_lang env Lang.Java
+                     && List.exists is_private attrs
+                then (
+                  id_flags := IdFlags.set_final !id_flags;
+                  match (Eval.eval env e, e.e) with
+                  (* When the name already has an svalue computed, just use
+                   * that. DeepSemgrep assigns svalues sometimes in its naming
+                   * phase. *)
+                  | Some svalue, _ -> add_constant_env id (sid, svalue) env
+                  | None, L literal ->
+                      add_constant_env id (sid, Lit literal) env
+                  (* For any other symbolic expression, it is OK to propagate it symbolically so long as
                  the lvalue is only assigned to once.
                  Although we may propagate expressions with identifiers in them, those identifiers
                  will simply not have an `svalue` if they are non-propagated as well.
               *)
-              | None, _
-                when Dataflow_svalue.is_symbolic_expr e
-                     && no_cycles_in_sym_prop sid e ->
-                  add_constant_env id (sid, Sym e) env
-              | None, _ -> ());
-            super#visit_definition (env, ctx) x
-        | _ ->
-            Hook.get hook_propagate_basic_visitor
-            |> Option.iter (fun v -> v.visit_definition (env, ctx) x);
-            super#visit_definition (env, ctx) x
+                  | None, _
+                    when Dataflow_svalue.is_symbolic_expr e
+                         && no_cycles_in_sym_prop sid e ->
+                      add_constant_env id (sid, Sym e) env
+                  | None, _ -> ());
+                super#visit_definition (env, ctx) x
+            | _ ->
+                Hook.get hook_propagate_basic_visitor
+                |> Option.iter (fun v -> v.visit_definition (env, ctx) x);
+                super#visit_definition (env, ctx) x
 
-      (* THINK: Should we just visit every single name ? *)
-      method! visit_NamedAttr (env, ctx) tok name args =
-        (match name with
-        | Id (id, id_info) ->
-            let/ svalue = Eval.find_id env id id_info in
-            Dataflow_svalue.set_svalue_ref id_info svalue
-        | __else__ -> ());
-        super#visit_NamedAttr (env, ctx) tok name args
+          (* THINK: Should we just visit every single name ? *)
+          method! visit_NamedAttr (env, ctx) tok name args =
+            (match name with
+            | Id (id, id_info) ->
+                let/ svalue = Eval.find_id env id id_info in
+                Dataflow_svalue.set_svalue_ref id_info svalue
+            | __else__ -> ());
+            super#visit_NamedAttr (env, ctx) tok name args
 
-      (* the uses (and also defs for Python Assign) *)
-      method! visit_expr (env, ctx) x =
-        match x.e with
-        | N (Id (id, id_info))
-        | DotAccess
-            ({ e = IdSpecial ((This | Self), _); _ }, _, FN (Id (id, id_info)))
-          when not ctx.in_lvalue ->
-            let/ svalue = Eval.find_id env id id_info in
-            Dataflow_svalue.set_svalue_ref id_info svalue
-        (* ugly: dockerfile specific *)
-        | Call
-            ( { e = N (Id (("!dockerfile_expand!", _), _)); _ },
-              (_, [ Arg { e = N (Id (id, id_info)); _ } ], _) )
-          when not ctx.in_lvalue ->
-            let/ svalue = Eval.find_id env id id_info in
-            Dataflow_svalue.set_svalue_ref id_info svalue
-        (* ugly: terraform specific.
-         * coupling: with eval() above
-         *)
-        | DotAccess
-            ( { e = N (Id (((("local" | "var") as prefix), _), _)); _ },
-              _,
-              FN (Id ((str, _tk), id_info)) )
-          when lang = Lang.Terraform && not ctx.in_lvalue ->
-            let var = (prefix ^ "." ^ str, terraform_sid) in
-            let/ svalue = Hashtbl.find_opt env.constants var in
-            Dataflow_svalue.set_svalue_ref id_info svalue
-        | Assign
-            (* Assign that is really a hidden VarDef (e.g., in Python) *)
-            ( {
-                e =
-                  ( N
-                      (Id
-                        ( id,
-                          {
-                            id_resolved = { contents = Some (kind, sid) };
-                            id_flags;
-                            _;
-                          } ))
-                  | DotAccess
-                      ( { e = IdSpecial ((This | Self), _); _ },
-                        _,
-                        FN
+          (* the uses (and also defs for Python Assign) *)
+          method! visit_expr (env, ctx) x =
+            match x.e with
+            | N (Id (id, id_info))
+            | DotAccess
+                ( { e = N (IdSpecial (((This | Self), _), _)); _ },
+                  _,
+                  FN (Id (id, id_info)) )
+              when not ctx.in_lvalue ->
+                let/ svalue = Eval.find_id env id id_info in
+                Dataflow_svalue.set_svalue_ref id_info svalue
+            (* ugly: dockerfile specific *)
+            | Call
+                ( { e = N (Id (("!dockerfile_expand!", _), _)); _ },
+                  (_, [ Arg { e = N (Id (id, id_info)); _ } ], _) )
+              when not ctx.in_lvalue ->
+                let/ svalue = Eval.find_id env id id_info in
+                Dataflow_svalue.set_svalue_ref id_info svalue
+            (* ugly: terraform specific.
+             * coupling: with eval() above
+             *)
+            | DotAccess
+                ( { e = N (Id (((("local" | "var") as prefix), _), _)); _ },
+                  _,
+                  FN (Id ((str, _tk), id_info)) )
+              when lang = Lang.Terraform && not ctx.in_lvalue ->
+                let var = (prefix ^ "." ^ str, terraform_sid) in
+                let/ svalue = Base.Hashtbl.find env.constants var in
+                Dataflow_svalue.set_svalue_ref id_info svalue
+            | Assign
+                (* Assign that is really a hidden VarDef (e.g., in Python) *)
+                ( {
+                    e =
+                      ( N
                           (Id
-                            ( id,
-                              {
-                                id_resolved = { contents = Some (kind, sid) };
-                                id_flags;
-                                _;
-                              } )) ) );
-                _;
-              },
-              _,
-              rexp ) ->
-            let opt_svalue = Eval.eval env rexp in
-            let is_private_class_field =
-              match Hashtbl.find_opt env.attributes (fst id, sid) with
-              | None -> false
-              | Some attrs ->
-                  List.exists is_private attrs && is_class_field env kind
-            in
-            let in_unique_constructor =
-              match ctx.in_class with
-              | None -> false
-              | Some cid ->
-                  ctx.in_constructor
-                  && has_just_one_constructor stats.class_stats (fst cid)
-            in
-            if
-              is_assigned_just_once stats.var_stats (H.str_of_ident id, sid)
-              (* restricted to prevent unexpected const-prop FPs *)
-              && ((Eval.is_lang env Lang.Python
-                  || Eval.is_lang env Lang.Ruby || Eval.is_lang env Lang.Php
-                  || Eval.is_js env)
-                  && H.name_is_global kind
-                 (* TODO: Add other Java-like OO languages, maybe Apex and C# ? *)
-                 || Eval.is_lang env Lang.Java && is_private_class_field
-                    && (ctx.in_static_block || in_unique_constructor))
-              && is_resolved_name kind sid
-            then (
-              id_flags := IdFlags.set_final !id_flags;
-              match opt_svalue with
-              | Some svalue -> add_constant_env id (sid, svalue) env
-              | None ->
-                  if
-                    Dataflow_svalue.is_symbolic_expr rexp
-                    && no_cycles_in_sym_prop sid rexp
-                  then add_constant_env id (sid, Sym rexp) env;
-                  ());
-            super#visit_expr (env, ctx) rexp
-        | __else__ -> super#visit_expr (env, ctx) x
-    end
+                             ( id,
+                               {
+                                 id_resolved = { contents = Some (kind, sid) };
+                                 id_flags;
+                                 _;
+                               } ))
+                      | DotAccess
+                          ( { e = N (IdSpecial (((This | Self), _), _)); _ },
+                            _,
+                            FN
+                              (Id
+                                 ( id,
+                                   {
+                                     id_resolved =
+                                       { contents = Some (kind, sid) };
+                                     id_flags;
+                                     _;
+                                   } )) ) );
+                    _;
+                  },
+                  _,
+                  rexp ) ->
+                let opt_svalue = Eval.eval env rexp in
+                let is_private_class_field =
+                  match Base.Hashtbl.find env.attributes (fst id, sid) with
+                  | None -> false
+                  | Some attrs ->
+                      List.exists is_private attrs && is_class_field env kind
+                in
+                let in_unique_constructor =
+                  match ctx.in_class with
+                  | None -> false
+                  | Some cid ->
+                      ctx.in_constructor
+                      && has_just_one_constructor stats.class_stats (fst cid)
+                in
+                if
+                  is_assigned_just_once stats.var_stats (H.str_of_ident id, sid)
+                  (* restricted to prevent unexpected const-prop FPs *)
+                  && ((Eval.is_lang env Lang.Python
+                      || Eval.is_lang env Lang.Ruby || Eval.is_lang env Lang.Php
+                      || Eval.is_js env)
+                      && H.name_is_global kind
+                     (* TODO: Add other Java-like OO languages, maybe Apex and C# ? *)
+                     || Eval.is_lang env Lang.Java && is_private_class_field
+                        && (ctx.in_static_block || in_unique_constructor))
+                  && is_resolved_name kind sid
+                then (
+                  id_flags := IdFlags.set_final !id_flags;
+                  match opt_svalue with
+                  | Some svalue -> add_constant_env id (sid, svalue) env
+                  | None ->
+                      if
+                        Dataflow_svalue.is_symbolic_expr rexp
+                        && no_cycles_in_sym_prop sid rexp
+                      then add_constant_env id (sid, Sym rexp) env;
+                      ());
+                super#visit_expr (env, ctx) rexp
+            | __else__ -> super#visit_expr (env, ctx) x
+        end)
   in
   visitor#visit_program (env, Iter_with_context.initial_context) prog;
   ()
@@ -628,21 +677,22 @@ let propagate_dataflow lang ast =
       in
       (* Top-level function. No need to use CFG_build.cfg_of_gfdef here. *)
       let cfg, lambdas = CFG_build.cfg_of_stmts xs in
-      propagate_dataflow_one_function lang IL.{ params = []; cfg; lambdas }
+      propagate_dataflow_one_function lang
+        Fun_CFG.{ params = []; fdef = None; cfg; lambdas }
   | _ ->
       ast
       |> Visit_function_defs.visit (fun _ent fdef ->
-             let fun_cfg = CFG_build.cfg_of_gfdef lang fdef in
-             (* when/ pattern when is not constant propagation but is related in the sense
-              * that it also finds extra info by analyzing the cfg. we are reusing the cfg
-              * created here to annotate facts for the pattern when feature.
-              *
-              * TODO: refactor this code if we don't incorporate when into svalue analysis.
-              *)
-             (match Hook.get Dataflow_when.hook_annotate_facts with
-             | None -> ()
-             | Some annotate_facts -> annotate_facts fun_cfg.cfg);
-             propagate_dataflow_one_function lang fun_cfg);
+          let fun_cfg = CFG_build.cfg_of_gfdef lang fdef in
+          (* when/ pattern when is not constant propagation but is related in the sense
+           * that it also finds extra info by analyzing the cfg. we are reusing the cfg
+           * created here to annotate facts for the pattern when feature.
+           *
+           * TODO: refactor this code if we don't incorporate when into svalue analysis.
+           *)
+          (match Hook.get Dataflow_when.hook_annotate_facts with
+          | None -> ()
+          | Some annotate_facts -> annotate_facts fun_cfg.cfg);
+          propagate_dataflow_one_function lang fun_cfg);
 
       (* We consider the top-level function the interior of a degenerate function,
          and simply run constant propagation on that.
@@ -653,5 +703,6 @@ let propagate_dataflow lang ast =
       let xs = AST_to_IL.stmt lang (G.stmt1 ast) in
       (* Top-level function. No need to use CFG_build.cfg_of_gfdef here. *)
       let cfg, lambdas = CFG_build.cfg_of_stmts xs in
-      propagate_dataflow_one_function lang IL.{ params = []; cfg; lambdas }
+      propagate_dataflow_one_function lang
+        Fun_CFG.{ params = []; fdef = None; cfg; lambdas }
 [@@trace_trace]

@@ -16,7 +16,7 @@ open Common
 module G = AST_generic
 module PM = Core_match
 module R = Rule
-module LabelSet = Set.Make (String)
+module LabelSet = Sets.String_set
 module Log = Log_tainting.Log
 
 (* TODO: Consider renaming the `show_xyz` functions to `pretty_xyz` and
@@ -64,7 +64,7 @@ module Log = Log_tainting.Log
 (* Call traces *)
 (*****************************************************************************)
 
-type tainted_token = G.tok [@@deriving show]
+type tainted_token = Loc.t [@@deriving show]
 type tainted_tokens = tainted_token list [@@deriving show]
 type rev_tainted_tokens = tainted_tokens [@@deriving show]
 (* TODO: Given that the analysis is path-insensitive, the trace should capture
@@ -123,7 +123,7 @@ let rec show_call_trace show_thing = function
       in
       let matched_line =
         let loc1, _ = pm.range_loc in
-        loc1.Tok.pos.line
+        loc1.Loc.pos.line
       in
       Printf.sprintf "%s at l.%d [%s]" matched_str matched_line (show_thing x)
   | Call (_e, _, trace) ->
@@ -153,7 +153,7 @@ let compare_lval { base = base1; offset = offset1 }
   | other -> other
 
 let show_arg { name; index = i } =
-  Printf.sprintf "arg(%s#%d)" (IL.str_of_name name) i
+  Printf.sprintf "arg(%s@%d)" (IL.str_of_name name) i
 
 let show_base base =
   match base with
@@ -168,9 +168,7 @@ let show_offset offset =
   | Ostr s -> Printf.sprintf "[%s]" s
   | Oany -> "[*]"
 
-let show_offset_list offset =
-  offset |> List_.map show_offset |> String.concat ""
-
+let show_offset_list offset = offset |> List.map show_offset |> String.concat ""
 let show_lval { base; offset } = show_base base ^ show_offset_list offset
 
 let offset_of_IL (o : IL.offset) =
@@ -188,35 +186,31 @@ let offset_of_rev_IL_offset ~rev_offset = List.rev_map offset_of_IL rev_offset
 let rev_IL_offset_of_offset offset =
   let os =
     offset
-    |> List_.map (function
-         | Ofld x -> Some IL.{ o = Dot x; oorig = NoOrig }
-         | Oint i ->
-             Some
-               {
-                 o =
-                   Index
-                     {
-                       e = Literal (G.Int (Parsed_int.of_int i));
-                       eorig = NoOrig;
-                     };
-                 oorig = NoOrig;
-               }
-         | Ostr s ->
-             Some
-               {
-                 o =
-                   Index
-                     {
-                       e =
-                         Literal
-                           (G.String
-                              (Tok.unsafe_fake_bracket
-                                 (s, Tok.unsafe_fake_tok s)));
-                       eorig = NoOrig;
-                     };
-                 oorig = NoOrig;
-               }
-         | Oany -> None)
+    |> List.map (function
+      | Ofld x -> Some IL.{ o = Dot x; oorig = NoOrig }
+      | Oint i ->
+          Some
+            {
+              o =
+                Index
+                  { e = Literal (G.Int (Parsed_int.of_int i)); eorig = NoOrig };
+              oorig = NoOrig;
+            }
+      | Ostr s ->
+          Some
+            {
+              o =
+                Index
+                  {
+                    e =
+                      Literal
+                        (G.String
+                           (Tok.unsafe_fake_bracket (s, Tok.unsafe_fake_tok s)));
+                    eorig = NoOrig;
+                  };
+              oorig = NoOrig;
+            }
+      | Oany -> None)
   in
   os
   |> List.fold_left
@@ -234,7 +228,11 @@ let lval_of_arg arg = { base = BArg arg; offset = [] }
 (* Taint *)
 (*****************************************************************************)
 
-type var = Taint_var of lval | Taint_in_shape_var of lval | Control_var
+type var =
+  | Taint_var of lval
+  | Propagator_var of Dataflow_var_env.var
+  | Taint_in_shape_var of lval
+  | Control_var
 
 type source = {
   call_trace : R.taint_source call_trace;
@@ -262,14 +260,17 @@ let compare_precondition (_ts1, f1) (_ts2, f2) =
 let compare_var v1 v2 =
   match (v1, v2) with
   | Taint_var lv1, Taint_var lv2 -> compare_lval lv1 lv2
+  | Propagator_var pv1, Propagator_var pv2 -> String.compare pv1 pv2
   | Taint_in_shape_var lv1, Taint_in_shape_var lv2 -> compare_lval lv1 lv2
   | Control_var, Control_var -> 0
   (* smaller than *)
-  | Taint_var _, (Taint_in_shape_var _ | Control_var) -> -1
+  | Taint_var _, (Propagator_var _ | Taint_in_shape_var _ | Control_var) -> -1
+  | Propagator_var _, (Taint_in_shape_var _ | Control_var) -> -1
   | Taint_in_shape_var _, Control_var -> -1
   (* greater than *)
-  | Taint_in_shape_var _, Taint_var _ -> 1
-  | Control_var, (Taint_in_shape_var _ | Taint_var _) -> 1
+  | Propagator_var _, Taint_var _ -> 1
+  | Taint_in_shape_var _, (Propagator_var _ | Taint_var _) -> 1
+  | Control_var, (Propagator_var _ | Taint_in_shape_var _ | Taint_var _) -> 1
 
 (* See NOTE "on compare functions" *)
 let compare_source
@@ -299,8 +300,8 @@ let compare_source
           | None, _
           | _, None ->
               (* 'None' here is the same as 'true', although the `requires` of both taints
-                 * may not be the same, in this specific case we consider them "the same",
-                 * see 'pick_best_taint'. *)
+               * may not be the same, in this specific case we consider them "the same",
+               * see 'pick_best_taint'. *)
               0
           | Some pre1, Some pre2 -> compare_precondition pre1 pre2)
       | other -> other)
@@ -334,6 +335,7 @@ let rec show_precondition = function
 let show_var var =
   match var with
   | Taint_var lval -> "'" ^ show_lval lval
+  | Propagator_var pvar -> "?" ^ pvar
   | Taint_in_shape_var lval -> "'<" ^ show_lval lval ^ ">"
   | Control_var -> "'<control>"
 
@@ -350,7 +352,7 @@ let rec show_source { call_trace; label; precondition } =
   in
   let matched_line =
     let loc1, _ = pm.range_loc in
-    loc1.Tok.pos.line
+    loc1.Loc.pos.line
   in
   let num_calls = length_of_call_trace call_trace in
   let num_calls_str =
@@ -361,16 +363,16 @@ let rec show_source { call_trace; label; precondition } =
     else if label = ts.label then Printf.sprintf " :%s" label
     else Printf.sprintf " :%s->%s" ts.label label
   in
-  let precondition_str = show_taints_with_precondition precondition in
+  let precondition_str = show_taints_with_trace precondition in
   Printf.sprintf "[%s%s :l.%d%s%s]" num_calls_str matched_str matched_line
     label_str precondition_str
 
-and show_taints_with_precondition precondition =
+and show_taints_with_trace precondition =
   match precondition with
   | None -> ""
   | Some (ts, pre) ->
       Common.spf "{/PRE|%s|if %s/}"
-        (List_.map show_taint ts |> String.concat " + ")
+        (List.map show_taint ts |> String.concat " + ")
         (show_precondition pre)
 
 and show_taint taint =
@@ -449,7 +451,7 @@ module Taint_set = struct
 
   and pick_best_taint taint1 taint2 =
     (* Here we assume that 'compare taint1 taint2 = 0' so we could keep any
-       * of them, but we want "the best" one, e.g. the one with the shortest trace. *)
+     * of them, but we want "the best" one, e.g. the one with the shortest trace. *)
     match (taint1.orig, taint2.orig) with
     | Var _, Var _ ->
         (* Polymorphic taint should only be intraprocedural so the call-trace is irrelevant. *)
@@ -476,7 +478,7 @@ module Taint_set = struct
                *
                * Otherwise we end up with taint sets where most of the taints are
                * essentially the same. This is probably due to
-               * [see note "Taint-tracking via ranges" in Match_tainting_mode],
+               * [see note "Taint-tracking via ranges" in Match_taint_spec],
                * and not having "Best_sources" [see note "Best matches" in 'Taint_spec_match'].
                * TOOD: Revisit ^^^ now we have `exact: true` sources.
                *)
@@ -529,7 +531,7 @@ end
 type taints = Taint_set.t
 
 let show_taints taints =
-  taints |> Taint_set.elements |> List_.map show_taint |> String.concat ", "
+  taints |> Taint_set.elements |> List.map show_taint |> String.concat ", "
   |> fun str -> "{ " ^ str ^ " }"
 
 (*****************************************************************************)
@@ -542,7 +544,7 @@ let labels_in_precondition pre =
     | R.PLabel l -> LabelSet.singleton l
     | R.PAnd pres
     | R.POr pres ->
-        pres |> List_.map loop |> List.fold_left LabelSet.union LabelSet.empty
+        pres |> List.map loop |> List.fold_left LabelSet.union LabelSet.empty
     | R.PNot pre -> loop pre
   in
   loop pre
@@ -607,22 +609,22 @@ and labels_in_taints taints =
   let maybe_labels = ref LabelSet.empty in
   taints
   |> Taint_set.iter (fun taint ->
-         match taint.orig with
-         | Var _ -> has_poly_taint := true
-         | Src { label; precondition = None; _ } ->
-             sure_labels := LabelSet.add label !sure_labels
-         | Src { label; precondition = Some (incoming, pre); _ } -> (
-             match
-               solve_precondition ~ignore_poly_taint:false
-                 ~taints:(Taint_set.of_list incoming)
-                 pre
-             with
-             | Some true -> sure_labels := LabelSet.add label !sure_labels
-             | Some false -> ()
-             | None -> maybe_labels := LabelSet.add label !maybe_labels));
+      match taint.orig with
+      | Var _ -> has_poly_taint := true
+      | Src { label; precondition = None; _ } ->
+          sure_labels := LabelSet.add label !sure_labels
+      | Src { label; precondition = Some (incoming, pre); _ } -> (
+          match
+            solve_precondition ~ignore_poly_taint:false
+              ~taints:(Taint_set.of_list incoming)
+              pre
+          with
+          | Some true -> sure_labels := LabelSet.add label !sure_labels
+          | Some false -> ()
+          | None -> maybe_labels := LabelSet.add label !maybe_labels));
   (!sure_labels, !maybe_labels, !has_poly_taint)
 
-let taints_satisfy_requires taints pre =
+let taints_satisfy_requires_for_finding taints pre =
   (* This is used when deciding whether to report a finding, so if we had:
    *
    *     def foo(y):
@@ -641,11 +643,25 @@ let taints_satisfy_requires taints pre =
    *   but if there are calls to `foo` such as `foo("safe")` then we could
    *   wait and not report any finding here.
    *)
+  let has_real_taint_source =
+    taints
+    |> List.exists (fun taint ->
+        match taint.orig with
+        | Src _ -> true
+        | Var _ -> false)
+  in
   match
     solve_precondition ~ignore_poly_taint:true
       ~taints:(Taint_set.of_list taints) pre
   with
-  | Some b -> b
+  | Some b ->
+      (* We want to be sure that any taint finding has *real* taint sources.
+        If 'taints' just contains taint variables, then we cannot truly
+        satisfy the precondition 'pre' for the purpose of generating a finding.
+        Note that otherwise, with `~ignore_poly_taint:true`, we would trivially
+        satisfy a `not L` precondition when 'taints' contains taint variables.
+       *)
+      b && has_real_taint_source
   | None ->
       (* If we set 'ignore_poly_taint' then we expect to be able to solve
        * the precondition! *)
@@ -657,9 +673,9 @@ let filter_relevant_taints requires taints =
   (* If the precondition is 'A' we don't care about taint with label 'B' or 'C'. *)
   taints
   |> Taint_set.filter (fun t ->
-         match t.orig with
-         | Src src -> LabelSet.mem src.label labels
-         | Var _ -> true)
+      match t.orig with
+      | Src src -> LabelSet.mem src.label labels
+      | Var _ -> true)
 
 (* Just a straightforward bottom-up map on preconditions. *)
 let rec map_preconditions f taint =
@@ -668,31 +684,33 @@ let rec map_preconditions f taint =
   | Src { precondition = None; _ } -> Some taint
   | Src ({ precondition = Some (incoming, expr); _ } as src) -> (
       let new_incoming =
-        incoming
-        |> List_.filter_map (map_preconditions f)
-        |> f |> Taint_set.of_list
+        incoming |> List_.filter_map_endo (map_preconditions f) |> f
       in
-      let new_incoming = filter_relevant_taints expr new_incoming in
-      match
-        solve_precondition ~ignore_poly_taint:false ~taints:new_incoming expr
-      with
-      | Some false -> None
-      | Some true ->
-          Some { taint with orig = Src { src with precondition = None } }
-      | None ->
-          let new_incoming = new_incoming |> Taint_set.elements in
-          let new_precondition = Some (new_incoming, expr) in
-          Some
-            {
-              taint with
-              orig = Src { src with precondition = new_precondition };
-            })
+      if phys_equal new_incoming incoming then Some taint
+      else
+        let new_incoming =
+          new_incoming |> Taint_set.of_list |> filter_relevant_taints expr
+        in
+        match
+          solve_precondition ~ignore_poly_taint:false ~taints:new_incoming expr
+        with
+        | Some false -> None
+        | Some true ->
+            Some { taint with orig = Src { src with precondition = None } }
+        | None ->
+            let new_incoming = new_incoming |> Taint_set.elements in
+            let new_precondition = Some (new_incoming, expr) in
+            Some
+              {
+                taint with
+                orig = Src { src with precondition = new_precondition };
+              })
 
 (*****************************************************************************)
 (* New taints *)
 (*****************************************************************************)
 
-let src_of_pm ~incoming (pm, (source : Rule.taint_source)) =
+let src_of_pm ~incoming ((pm : PM.t), (source : Rule.taint_source)) =
   let pc = R.get_source_precondition source in
   let relevant_incoming = filter_relevant_taints pc incoming in
   (* We don't expect to be able to solve preconditions here, but we need to try
@@ -747,7 +765,7 @@ let taints_of_pms ~incoming pms =
     if i >= max_ITERS then taints
     else
       let incoming = taints |> Taint_set.union incoming in
-      let new_taint_list = pms |> List_.filter_map (taint_of_pm ~incoming) in
+      let new_taint_list = pms |> List.filter_map (taint_of_pm ~incoming) in
       let taints' =
         Taint_set.of_list new_taint_list |> Taint_set.union taints
       in

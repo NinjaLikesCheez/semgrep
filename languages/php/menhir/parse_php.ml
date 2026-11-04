@@ -15,7 +15,6 @@
 open Fpath_.Operators
 module Ast = Cst_php
 module Flag = Flag_parsing
-module Flag_php = Flag_parsing_php
 module TH = Token_helpers_php
 module PS = Parsing_stat
 module Log = Log_lib_parsing.Log
@@ -41,14 +40,14 @@ let error_msg_tok tok = Parsing_helpers.error_message_info (TH.info_of_tok tok)
 (*****************************************************************************)
 let tokens ?(init_state = Lexer_php.INITIAL) input_source =
   Lexer_php.reset ();
-  Lexer_php._mode_stack := [ init_state ];
+  Domain.DLS.set Lexer_php._mode_stack [ init_state ];
 
   let token lexbuf =
     let tok =
       (* for yyless emulation *)
-      match !Lexer_php._pending_tokens with
+      match Domain.DLS.get Lexer_php._pending_tokens with
       | x :: xs ->
-          Lexer_php._pending_tokens := xs;
+          Domain.DLS.set Lexer_php._pending_tokens xs;
           x
       | [] -> (
           match Lexer_php.current_mode () with
@@ -66,7 +65,7 @@ let tokens ?(init_state = Lexer_php.INITIAL) input_source =
           | Lexer_php.ST_START_NOWDOC s -> Lexer_php.st_start_nowdoc s lexbuf)
     in
     if not (TH.is_comment tok) then
-      Lexer_php._last_non_whitespace_like_token := Some tok;
+      Domain.DLS.set Lexer_php._last_non_whitespace_like_token (Some tok);
     tok
   in
   Parsing_helpers.tokenize_all_and_adjust_pos input_source token
@@ -105,7 +104,7 @@ let parse filename =
       (* Call parser *)
       (* -------------------------------------------------- *)
       Either.Left
-        (Profiling.profile_code "Parser_php.main" (fun () ->
+        (Profiling.measure "Parser_php.main" (fun () ->
              Parser_php.main lexer lexbuf_fake))
     with
     | Parsing.Parse_error ->
@@ -118,7 +117,7 @@ let parse filename =
         tr.Parsing_helpers.passed <- List.rev toks;
 
         let info_of_bads =
-          Common2.map_eff_rev TH.info_of_tok tr.Parsing_helpers.passed
+          List.rev_map TH.info_of_tok tr.Parsing_helpers.passed
         in
 
         Right (info_of_bads, line_error, current)
@@ -127,10 +126,10 @@ let parse filename =
   match elems with
   | Either.Left xs -> { Parsing_result.ast = xs; tokens = toks; stat }
   | Either.Right (info_of_bads, line_error, cur) ->
-      if not !Flag.error_recovery then
+      if not @@ Hook.get Flag.error_recovery then
         raise (Parsing_error.Syntax_error (TH.info_of_tok cur));
 
-      if !Flag.show_parsing_error then (
+      if Hook.get Flag.show_parsing_error then (
         Log.err (fun m -> m "parse error\n = %s" (error_msg_tok cur));
         let checkpoint2 = UFile.cat filename |> List.length in
         Log.err (fun m ->
@@ -157,7 +156,7 @@ let parse_program file =
 (*****************************************************************************)
 
 let any_of_string s =
-  Common.save_excursion Flag_parsing.sgrep_mode true (fun () ->
+  Hook.with_hook_set Flag_parsing.sgrep_mode true (fun () ->
       let toks =
         tokens ~init_state:Lexer_php.ST_IN_SCRIPTING (Parsing_helpers.Str s)
       in

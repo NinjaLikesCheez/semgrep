@@ -20,7 +20,6 @@ open Parser_php
 
 module Ast = Cst_php
 module Flag = Flag_parsing
-module Flag_php = Flag_parsing_php
 
 (*****************************************************************************)
 (* Prelude *)
@@ -39,11 +38,8 @@ module Flag_php = Flag_parsing_php
 exception Lexical of string
 
 let error s =
-  if !Flag_php.strict_lexer
-  then raise (Lexical s)
-  else
-    if !Flag.verbose_lexing
-    then UCommon.pr2 ("LEXER: " ^ s)
+  if Hook.get Flag.verbose_lexing
+  then UCommon.pr2 ("LEXER: " ^ s)
 
 (* pad: hack around ocamllex to emulate the yyless() of flex. The semantic
  * is not exactly the same than yyless(), so I use yyback() instead.
@@ -62,17 +58,6 @@ let tokinfo = Tok.tok_of_lexbuf
 let tokinfo_file_str_pos (file : Fpath.t) (str : string) (bytepos : int) : Tok.t
   = Tok.make ~str ~bytepos ~file
 
-(* all string passed to T_IDENT or T_VARIABLE should go through case_str *)
-let case_str s =
-  if !Flag_php.case_sensitive
-  then s
-  else String.lowercase_ascii s
-
-let lang_ext_or_t_ident ii fii =
-  if !Flag_php.facebook_lang_extensions
-  then fii ii
-  else T_IDENT(case_str (Tok.content_of_tok ii), ii)
-
 let t_variable_or_metavar s info =
   (* sgrep-ext: we used to generate a T_IDENT here, so a metavariable
    * could be used where a T_IDENT was expected, e.g., a function name,
@@ -81,9 +66,9 @@ let t_variable_or_metavar s info =
    * token for metavariables. That way we also avoid certain
    * conflicts in the grammar.
    *)
-  if AST_generic.is_metavar_name ("$" ^ s) && !Flag.sgrep_mode
-  then T_METAVAR (case_str ("$" ^ s), info)
-  else T_VARIABLE(case_str s, info)
+  if AST_generic.is_metavar_name ("$" ^ s) && Hook.get Flag.sgrep_mode
+  then T_METAVAR ("$" ^ s, info)
+  else T_VARIABLE(s, info)
 
 (* ---------------------------------------------------------------------- *)
 (* Keywords *)
@@ -101,7 +86,7 @@ let t_variable_or_metavar s info =
  *
  * todo: callable, goto
  *)
-let keyword_table = Hashtbl_.hash_of_list [
+let keyword_table = Hashtbl_.Base.hash_of_list [
 
   "while",   (fun ii -> T_WHILE ii);   "endwhile", (fun ii -> T_ENDWHILE ii);
   "do",      (fun ii -> T_DO ii);
@@ -198,13 +183,13 @@ let keyword_table = Hashtbl_.hash_of_list [
   (* old: "__halt_compiler", (fun ii -> T_HALT_COMPILER ii); *)
 
   (* php-facebook-ext: *)
-  "await", (fun ii -> lang_ext_or_t_ident ii (fun x -> T_AWAIT x));
-  "type",    (fun ii -> lang_ext_or_t_ident ii (fun x -> T_TYPE x));
+  "await", (fun ii -> T_AWAIT ii);
+  "type",    (fun ii -> T_TYPE ii);
   (* for attribute declarations and Hack first class enums *)
   "enum", (fun ii -> T_ENUM ii);
 ]
 
-let _ = assert ((Common2.hkeys keyword_table) |>
+let _ = assert ((Hashtbl_.Base.hkeys keyword_table) |>
                  List.for_all (fun s -> s = String.lowercase_ascii s))
 
 (* ---------------------------------------------------------------------- *)
@@ -266,32 +251,36 @@ type state_mode =
 let default_state = INITIAL
 
 let _mode_stack =
-  ref [default_state]
+  Domain.DLS.new_key (Fun.const [default_state])
 (* todo: now that I have yyback, maybe I should revisit this code. *)
-let _pending_tokens =
-  ref ([]: Parser_php.token list)
+let _pending_tokens : Parser_php.token list Domain.DLS.key=
+  Domain.DLS.new_key(Fun.const [])
 
 (* The logic to modify _last_non_whitespace_like_token is in the
  * caller of the lexer, that is in Parse_php.tokens.
  * Used for XHP.
  *)
-let _last_non_whitespace_like_token =
-  ref (None: Parser_php.token option)
+let _last_non_whitespace_like_token : Parser_php.token option Domain.DLS.key =
+  Domain.DLS.new_key (Fun.const None)
+
 let reset () =
-  _mode_stack := [default_state];
-    _pending_tokens := [];
-   _last_non_whitespace_like_token := None;
+  Domain.DLS.set _mode_stack [default_state];
+  Domain.DLS.set _pending_tokens [];
+  Domain.DLS.set _last_non_whitespace_like_token None;
   ()
 
 let rec current_mode () =
-  match !_mode_stack with
+  match Domain.DLS.get _mode_stack with
   | top :: _ -> top
   | [] ->
       error("mode_stack is empty, defaulting to INITIAL");
       reset();
       current_mode ()
-let push_mode mode = Stack_.push mode _mode_stack
-let pop_mode () = ignore(Stack_.pop _mode_stack)
+let push_mode mode =
+  Domain.DLS.set _mode_stack (mode :: Domain.DLS.get _mode_stack)
+let pop_mode () =
+  let ms = Domain.DLS.get _mode_stack in
+  Domain.DLS.set _mode_stack (List_.tl_exn "unexpected empty mode stack" ms)
 
 (* What is the semantic of BEGIN() in flex ? start from scratch with empty
  * stack ?
@@ -325,7 +314,7 @@ let set_mode mode =
  *)
 
 let push_token tok =
-  _pending_tokens := tok::!_pending_tokens
+  Domain.DLS.set _pending_tokens (tok :: Domain.DLS.get _pending_tokens)
 
 
 (* ugly: in code like 'function foo( (function(string):string) $callback){}'
@@ -334,10 +323,8 @@ let push_token tok =
  * be to not have those ugly lexing rules for cast, but this would
  * lead to some grammar ambiguities or require other parsing hacks anyway.
 *)
-let lang_ext_or_cast t lexbuf =
-  if !Flag_php.facebook_lang_extensions
-  then
-    (match !_last_non_whitespace_like_token with
+let lang_ext t lexbuf =
+    match Domain.DLS.get _last_non_whitespace_like_token with
     | Some (T_FUNCTION _) ->
       let s = tok lexbuf in
       (* just keep the open parenthesis *)
@@ -345,8 +332,6 @@ let lang_ext_or_cast t lexbuf =
       TOPAR (tokinfo lexbuf)
     | _ ->
       t
-    )
-  else t
 }
 
 (*****************************************************************************)
@@ -544,13 +529,13 @@ rule st_in_scripting = parse
         let file = Tok.file_of_tok info in
         let parse_info = Tok.unsafe_loc_of_tok info in
         let pos_after_sym   =
-          parse_info.Tok.pos.bytepos + String.length sym in
+          parse_info.Loc.pos.bytepos + String.length sym in
         let pos_after_white = pos_after_sym + String.length white in
 
         let whiteinfo = tokinfo_file_str_pos file white pos_after_sym in
         let lblinfo = tokinfo_file_str_pos file label pos_after_white in
 
-        push_token (T_IDENT (case_str label, lblinfo));
+        push_token (T_IDENT (label, lblinfo));
        (* todo: could be newline ... *)
         push_token (TSpaces whiteinfo);
 
@@ -594,8 +579,8 @@ rule st_in_scripting = parse
      * at least the uppercase form to be used as identifier, hence those
      * two rules below.
      *)
-    | "SELF"   { T_IDENT (case_str (tok lexbuf), tokinfo lexbuf) }
-    | "PARENT" { T_IDENT (case_str (tok lexbuf), tokinfo lexbuf) }
+    | "SELF"   { T_IDENT ((tok lexbuf), tokinfo lexbuf) }
+    | "PARENT" { T_IDENT ((tok lexbuf), tokinfo lexbuf) }
 
     (* ugly: some code is using ASYNC as a constant, so one way to fix
      * the conflict is to return the T_ASYNC only when it's used
@@ -610,14 +595,14 @@ rule st_in_scripting = parse
     | LABEL
         { let info = tokinfo lexbuf in
           let s = tok lexbuf in
-          match Common2.optionise (fun () ->
+          match
             (* PHP is case insensitive ... it's ok to write IF(...) { ... } *)
-            Hashtbl.find keyword_table (String.lowercase_ascii s))
+            Base.Hashtbl.find keyword_table (String.lowercase_ascii s)
           with
           | Some f -> f info
           (* was called T_STRING in original grammar *)
           | None ->
-              T_IDENT (case_str s, info)
+              T_IDENT (s, info)
         }
 
     (* Could put a special rule for "$this", but there are multiple places here
@@ -634,10 +619,10 @@ rule st_in_scripting = parse
         let dollarinfo = Tok.rewrap_str (String.make 1 dollar) info in
         let parse_info = Tok.unsafe_loc_of_tok info in
         let file = Tok.file_of_tok info in
-        let pos_after_sym = parse_info.Tok.pos.bytepos + 2 in
+        let pos_after_sym = parse_info.Loc.pos.bytepos + 2 in
         let lblinfo = tokinfo_file_str_pos file s pos_after_sym in
 
-        push_token (T_VARIABLE(case_str s, lblinfo));
+        push_token (T_VARIABLE(s, lblinfo));
         TDOLLAR dollarinfo
                   }
   (* sgrep-ext: *)
@@ -713,36 +698,36 @@ rule st_in_scripting = parse
      * string(). So what they have done if this ugly lexing hack.
      *)
     | "(" TABS_AND_SPACES ("int"|"integer") TABS_AND_SPACES ")"
-        { lang_ext_or_cast (T_INT_CAST(tokinfo lexbuf)) lexbuf }
+        { lang_ext (T_INT_CAST(tokinfo lexbuf)) lexbuf }
 
     | "(" TABS_AND_SPACES ("real"|"double"|"float") TABS_AND_SPACES ")"
-        { lang_ext_or_cast (T_DOUBLE_CAST(tokinfo lexbuf)) lexbuf }
+        { lang_ext (T_DOUBLE_CAST(tokinfo lexbuf)) lexbuf }
 
     | "(" TABS_AND_SPACES "string" TABS_AND_SPACES ")"
-        { lang_ext_or_cast (T_STRING_CAST(tokinfo lexbuf)) lexbuf }
+        { lang_ext (T_STRING_CAST(tokinfo lexbuf)) lexbuf }
 
     | "(" TABS_AND_SPACES "binary" TABS_AND_SPACES ")"
-        { lang_ext_or_cast (T_STRING_CAST(tokinfo lexbuf)) lexbuf }
+        { lang_ext (T_STRING_CAST(tokinfo lexbuf)) lexbuf }
 
     | "(" TABS_AND_SPACES "array" TABS_AND_SPACES ")"
-        { lang_ext_or_cast (T_ARRAY_CAST(tokinfo lexbuf)) lexbuf }
+        { lang_ext (T_ARRAY_CAST(tokinfo lexbuf)) lexbuf }
 
     | "(" TABS_AND_SPACES "object" TABS_AND_SPACES ")"
-        { lang_ext_or_cast (T_OBJECT_CAST(tokinfo lexbuf)) lexbuf }
+        { lang_ext (T_OBJECT_CAST(tokinfo lexbuf)) lexbuf }
 
     | "(" TABS_AND_SPACES ("bool"|"boolean") TABS_AND_SPACES ")"
-        { lang_ext_or_cast (T_BOOL_CAST(tokinfo lexbuf)) lexbuf }
+        { lang_ext (T_BOOL_CAST(tokinfo lexbuf)) lexbuf }
 
     (* PHP is case insensitive for many things *)
     | "(" TABS_AND_SPACES "Array" TABS_AND_SPACES ")"
-        { lang_ext_or_cast (T_ARRAY_CAST(tokinfo lexbuf)) lexbuf }
+        { lang_ext (T_ARRAY_CAST(tokinfo lexbuf)) lexbuf }
     | "(" TABS_AND_SPACES "Object" TABS_AND_SPACES ")"
-        { lang_ext_or_cast (T_OBJECT_CAST(tokinfo lexbuf)) lexbuf }
+        { lang_ext (T_OBJECT_CAST(tokinfo lexbuf)) lexbuf }
     | "(" TABS_AND_SPACES ("Bool"|"Boolean") TABS_AND_SPACES ")"
-        { lang_ext_or_cast (T_BOOL_CAST(tokinfo lexbuf)) lexbuf }
+        { lang_ext (T_BOOL_CAST(tokinfo lexbuf)) lexbuf }
 
     | "(" TABS_AND_SPACES ("unset") TABS_AND_SPACES ")"
-        { lang_ext_or_cast (T_UNSET_CAST(tokinfo lexbuf)) lexbuf }
+        { lang_ext (T_UNSET_CAST(tokinfo lexbuf)) lexbuf }
     | "?>"
         {
           (* because of XHP and my token merger:
@@ -846,7 +831,7 @@ and st_looking_for_property = parse
     }
   | LABEL {
       pop_mode();
-      T_IDENT(case_str (tok lexbuf), tokinfo lexbuf)
+      T_IDENT((tok lexbuf), tokinfo lexbuf)
     }
 (*
   | ANY_CHAR {
@@ -875,8 +860,8 @@ and st_var_offset = parse
     T_NUM_STRING (tok lexbuf, tokinfo lexbuf)
   }
 
-  | "$" (LABEL as s) { T_VARIABLE(case_str s, tokinfo lexbuf) }
-  | LABEL            { T_IDENT(case_str (tok lexbuf), tokinfo lexbuf)  }
+  | "$" (LABEL as s) { T_VARIABLE(s, tokinfo lexbuf) }
+  | LABEL            { T_IDENT((tok lexbuf), tokinfo lexbuf)  }
 
   | "]" {
       pop_mode();
@@ -912,7 +897,7 @@ and st_double_quotes = parse
           let bra_info = tokinfo_file_str_pos file "[" pos_after_label in
           push_token (TOBRA bra_info);
           push_mode ST_VAR_OFFSET;
-          T_VARIABLE(case_str s, varinfo)
+          T_VARIABLE(s, varinfo)
       }
     (* bugfix: can have strings like "$$foo$" *)
     | "$" { T_ENCAPSED_AND_WHITESPACE(tok lexbuf, tokinfo lexbuf) }
@@ -949,7 +934,7 @@ and st_backquote = parse
       T_ENCAPSED_AND_WHITESPACE(tok lexbuf, tokinfo lexbuf)
     }
     (* TODO? should we use t_variable_or_metavar? *)
-    | "$" (LABEL as s)     { T_VARIABLE (case_str s, (tokinfo lexbuf)) }
+    | "$" (LABEL as s)     { T_VARIABLE (s, (tokinfo lexbuf)) }
     | "$" (LABEL as s) "[" {
           let info = tokinfo lexbuf in
 
@@ -961,7 +946,7 @@ and st_backquote = parse
           let bra_info = tokinfo_file_str_pos file "[" pos_after_label in
           push_token (TOBRA bra_info);
           push_mode ST_VAR_OFFSET;
-          T_VARIABLE(case_str s, varinfo)
+          T_VARIABLE(s, varinfo)
       }
     (* bugfix: can have strings like "$$foo$" *)
     | "$" { T_ENCAPSED_AND_WHITESPACE(tok lexbuf, tokinfo lexbuf) }
@@ -1040,7 +1025,7 @@ and st_start_heredoc stopdoc = parse
           let bra_info = tokinfo_file_str_pos file "[" pos_after_label in
           push_token (TOBRA bra_info);
           push_mode ST_VAR_OFFSET;
-          T_VARIABLE(case_str s, varinfo)
+          T_VARIABLE(s, varinfo)
       }
     (* bugfix: can have strings like "$$foo$", or {{$foo}} *)
     | "$" { T_ENCAPSED_AND_WHITESPACE(tok lexbuf, tokinfo lexbuf) }

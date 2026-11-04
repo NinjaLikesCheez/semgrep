@@ -5,139 +5,72 @@ jobs:
       - build-test-core-x86
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
       - name: Fetch semgrep-cli submodules
         run: git submodule update --init --recursive --recommend-shallow cli/src/semgrep/semgrep_interfaces
-      - uses: actions/setup-python@v4
+      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78
         with:
-          cache: pipenv
-          python-version: "3.9"
-      - run: pip install pipenv==2024.0.1
-      - uses: actions/download-artifact@v4
+          enable-cache: auto
+          python-version: "3.10"
+          version: 0.13.4
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131
         with:
           name: semgrep-core-x86-artifact
+          path: artifacts
       - name: Install artifacts
         run: |
-          tar xf artifacts.tgz
+          # upload-artifact does not preserve the executable bit
+          # (https://github.com/actions/upload-artifact#permission-loss),
+          # so restore it before installing semgrep-core.
+          chmod +x artifacts/*
           #alt: put it in cli/src/semgrep/bin/, like make copy-core-for-cli
           sudo cp artifacts/* /usr/bin
       - name: Install Python dependencies
-        run: pipenv install --dev
+        run: uv sync --locked
         working-directory: cli
       - name: Test dummy benchmarks on latest
         run: |
-          pipenv run semgrep --version
-          pipenv run semgrep-core -version
-          pipenv run python3 ../perf/run-benchmarks --dummy
+          uv run semgrep --version
+          uv run semgrep-core -version
+          uv run python3 ../perf/run-benchmarks --dummy
         working-directory: cli
   build-test-core-x86:
-    secrets: inherit
     uses: ./.github/workflows/build-test-core-x86.yml
   build-test-docker:
-    secrets: inherit
     uses: ./.github/workflows/build-test-docker.yml
-    with:
-      artifact-name: semgrep-docker-image-artifact
-      docker-flavor: |
-        latest=false
-      docker-tags: |
-        type=ref,event=pr
-        type=ref,event=branch
-        type=sha,event=branch
-      enable-tests: true
-      file: Dockerfile
-      repository-name: semgrep/semgrep
-      target: semgrep-cli
-  build-test-docker-nonroot:
-    needs:
-      - build-test-docker
-    secrets: inherit
-    uses: ./.github/workflows/build-test-docker.yml
-    with:
-      artifact-name: semgrep-docker-image-artifact-nonroot
-      docker-flavor: |
-        latest=false
-        suffix=-nonroot
-      docker-tags: |
-        type=sha,event=branch
-        type=ref,event=pr
-      enable-tests: false
-      file: Dockerfile
-      repository-name: semgrep/semgrep
-      target: nonroot
-  build-test-docker-performance-tests:
-    needs:
-      - build-test-docker
-    secrets: inherit
-    uses: ./.github/workflows/build-test-docker.yml
-    with:
-      artifact-name: semgrep-docker-image-artifact-performance-tests
-      docker-flavor: |
-        latest=false
-        suffix=-performance-tests
-      docker-tags: |
-        type=sha,event=branch
-        type=ref,event=pr
-      enable-tests: false
-      file: Dockerfile
-      repository-name: semgrep/semgrep
-      target: performance-tests
-  build-test-manylinux-aarch64:
-    needs:
-      - build-test-docker
-    secrets: inherit
-    uses: ./.github/workflows/build-test-manylinux-aarch64.yml
-  build-test-manylinux-x86:
-    needs:
-      - build-test-core-x86
-    secrets: inherit
-    uses: ./.github/workflows/build-test-manylinux-x86.yml
   build-test-osx-arm64:
-    secrets: inherit
     uses: ./.github/workflows/build-test-osx-arm64.yml
-  build-test-osx-x86:
-    secrets: inherit
-    uses: ./.github/workflows/build-test-osx-x86.yml
-  build-test-windows-x86:
-    secrets: inherit
-    uses: ./.github/workflows/build-test-windows-x86.yml
-  push-docker-returntocorp:
-    if: github.ref == 'refs/heads/develop' || (github.actor != 'dependabot[bot]' && !(github.event.pull_request.head.repo.full_name != github.repository))
-    needs:
-      - build-test-docker
-    secrets: inherit
-    uses: ./.github/workflows/push-docker.yml
-    with:
-      artifact-name: semgrep-docker-image-artifact
-      dry-run: false
-      repository-name: semgrep/semgrep
   test-cli:
     name: test semgrep-cli
     needs:
       - build-test-core-x86
     permissions:
-      contents: write
+      contents: read
       id-token: write
       pull-requests: write
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
       - name: Fetch semgrep-cli submodules
         run: git submodule update --init --recursive --recommend-shallow cli/src/semgrep/semgrep_interfaces
-      - uses: actions/setup-python@v4
+      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78
         with:
-          cache: pipenv
+          enable-cache: auto
           python-version: ${{ matrix.python }}
-      - run: pip install pipenv==2024.0.1
+          version: 0.13.4
       - name: Install Python dependencies
-        run: pipenv install --dev
+        run: uv sync --locked
         working-directory: cli
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131
         with:
           name: semgrep-core-x86-artifact
+          path: artifacts
       - name: Install artifacts
         run: |
-          tar xf artifacts.tgz
+          # upload-artifact does not preserve the executable bit
+          # (https://github.com/actions/upload-artifact#permission-loss),
+          # so restore it before installing semgrep-core.
+          chmod +x artifacts/*
           #alt: put it in cli/src/semgrep/bin/, like make copy-core-for-cli
           sudo cp artifacts/* /usr/bin
       - name: Run pytest
@@ -145,6 +78,9 @@ jobs:
           # tests should simulate CI environment iff they need one
           unset CI
           unset "${!GITHUB_@}"
+          # TODO(jmgrosen): this is a temporary hack to fix snapshot output
+          # formatting in OSS tests. See #5493.
+          export COLUMNS=80
 
           PYTEST_EXTRA_ARGS="--snapshot-update --allow-snapshot-deletion" make ci-test
         working-directory: cli
@@ -165,7 +101,7 @@ jobs:
       - id: snapshot-commit
         if: failure() && github.event_name == 'pull_request' && (github.actor != 'dependabot[bot]' && !(github.event.pull_request.head.repo.full_name != github.repository))
         name: Commit snapshot updates
-        uses: EndBug/add-and-commit@v9
+        uses: EndBug/add-and-commit@cc9c08ba6c8df3b93a8f2db63e89b98368ae2ae8
         with:
           add: cli/tests/default/e2e/snapshots
           default_author: github_actions
@@ -176,53 +112,71 @@ jobs:
         name: Remove Credentials
         run: rm ~/.netrc
       - env:
+          COMMIT_LONG_SHA: ${{ steps.snapshot-commit.outputs.commit_long_sha }}
+          COMMIT_SHA: ${{ steps.snapshot-commit.outputs.commit_sha }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PULL_REQUEST_NUMBER: ${{ github.event.pull_request.number }}
         if: failure() && steps.snapshot-commit.outputs.pushed == 'true'
         name: Comment about any snapshot updates
         run: |
           echo ":camera_flash: The pytest shapshots changed in your PR." >> /tmp/message.txt
           echo "Please carefully review these changes and make sure they are intended:" >> /tmp/message.txt
           echo >> /tmp/message.txt
-          echo "1. Review the changes at https://github.com/semgrep/semgrep/commit/${{ steps.snapshot-commit.outputs.commit_long_sha }}" >> /tmp/message.txt
+          echo "1. Review the changes at https://github.com/semgrep/semgrep/commit/$COMMIT_LONG_SHA" >> /tmp/message.txt
           echo "2. Accept the new snapshots with" >> /tmp/message.txt
           echo >> /tmp/message.txt
-          echo "       git fetch origin && git cherry-pick ${{ steps.snapshot-commit.outputs.commit_sha }} && git push" >> /tmp/message.txt
+          echo "       git fetch origin && git cherry-pick \"$COMMIT_SHA\" && git push" >> /tmp/message.txt
 
-          gh pr comment ${{ github.event.pull_request.number }} --body-file /tmp/message.txt
+          gh pr comment "$PULL_REQUEST_NUMBER" --body-file /tmp/message.txt
     strategy:
       matrix:
         python:
-          - "3.9"
           - "3.10"
           - "3.11"
+          - "3.12"
+          - "3.13"
+          - "3.14"
   test-osemgrep:
-    container: returntocorp/ocaml:alpine-2024-01-18
+    container: alpine:3.23
     env:
       HOME: /root
     runs-on: ubuntu-latest
     steps:
-      - name: Make checkout speedy
-        run: git config --global fetch.parallel 50
-      - uses: actions/checkout@v3
-        with:
-          submodules: true
+      - name: setup alpine
+        run: apk add --no-cache git git-lfs bash curl build-base make bubblewrap rsync
       - name: Configure git safedir properly
         run: git config --global --add safe.directory $(pwd)
+      - name: Make checkout speedy
+        run: git config --global fetch.parallel 50
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          submodules: true
+      - env:
+          GIT_CONFIG_COUNT: "1"
+          GIT_CONFIG_KEY_0: maintenance.auto
+          GIT_CONFIG_VALUE_0: "false"
+        uses: semgrep/setup-ocaml@a739c5405d73c42ef15a9dc995efc0f87396cc36
+        with:
+          cache-prefix: v8-semgrep-${{ hashFiles('opam-lockfiles/*.locked', '*.opam', 'dev/required.opam', 'libs/ocaml-tree-sitter-semgrep/core/tree-sitter.opam', 'cli/src/semgrep/semgrep_interfaces/semgrep-interfaces.opam', 'OSS/opam-lockfiles/*.locked', 'OSS/*.opam', 'OSS/dev/required.opam', 'OSS/libs/ocaml-tree-sitter-semgrep/core/tree-sitter.opam', 'OSS/cli/src/semgrep/semgrep_interfaces/semgrep-interfaces.opam') }}
+          ocaml-compiler: ocaml-variants.5.4.0+options,ocaml-option-flambda
+          opam-pin: false
+          opam-repositories: |
+            default: https://github.com/ocaml/opam-repository.git#922f67e068446a8d8e809a40251a259bd0549552
+          save-opam-post-run: true
       - name: Build semgrep-core
         run: |
           eval $(opam env)
-          make install-deps-ALPINE
           make install-deps
           make core
       - name: Install osemgrep
         run: |
           eval $(opam env)
           make copy-core-for-cli
-      - name: Install Python dependencies
-        run: |
-          apk add --no-cache python3
-          pip install --no-cache-dir --ignore-installed distlib pipenv==2024.0.1
-          (cd cli; pipenv install --dev)
+      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78
+        with:
+          enable-cache: auto
+          python-version: "3.11"
+          version: 0.13.4
       - name: Run pytest for osemgrep known passing tests
         run: |
           git config --global --add safe.directory "$(pwd)"
@@ -234,28 +188,32 @@ jobs:
       - build-test-core-x86
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
       - name: Fetch semgrep-cli submodules
         run: git submodule update --init --recursive --recommend-shallow cli/src/semgrep/semgrep_interfaces tests/semgrep-rules
-      - uses: actions/setup-python@v4
+      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78
         with:
-          cache: pipenv
-          python-version: "3.11"
-      - run: pip install pipenv==2024.0.1
-      - uses: actions/download-artifact@v4
+          enable-cache: auto
+          python-version: "3.12"
+          version: 0.13.4
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131
         with:
           name: semgrep-core-x86-artifact
+          path: artifacts
       - name: Install artifacts
         run: |
-          tar xf artifacts.tgz
+          # upload-artifact does not preserve the executable bit
+          # (https://github.com/actions/upload-artifact#permission-loss),
+          # so restore it before installing semgrep-core.
+          chmod +x artifacts/*
           #alt: put it in cli/src/semgrep/bin/, like make copy-core-for-cli
           sudo cp artifacts/* /usr/bin
       - name: Install semgrep
         run: |
           export PATH=/github/home/.local/bin:$PATH
-          pipenv install --dev
+          uv sync --locked
         working-directory: cli
-      - uses: actions/cache@v3
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
         with:
           key: qa-public-repos-${{ hashFiles('semgrep/tests/qa/*public_repos*') }}-${{ matrix.split }}
           path: ~/.cache/qa-public-repos
@@ -267,7 +225,7 @@ jobs:
         name: Test semgrep
         run: |
           export PATH=/github/home/.local/bin:$PATH
-          pipenv run pytest -n auto -vv --tb=short --splits 4 --group ${{ matrix.split }} tests/qa
+          uv run pytest -n auto -vv --tb=short --splits 4 --group ${{ matrix.split }} tests/qa
         working-directory: cli
     strategy:
       fail-fast: false
@@ -278,55 +236,38 @@ jobs:
           - 3
           - 4
   test-semgrep-core:
-    container: returntocorp/ocaml:alpine-2024-01-18
+    container: alpine:3.23
     env:
       HOME: /root
     runs-on: ubuntu-latest
     steps:
-      - name: Make checkout speedy
-        run: git config --global fetch.parallel 50
-      - uses: actions/checkout@v3
-        with:
-          submodules: true
+      - name: setup alpine
+        run: apk add --no-cache git git-lfs bash curl build-base make bubblewrap rsync
       - name: Configure git safedir properly
         run: git config --global --add safe.directory $(pwd)
-      - env:
-          SEGMENT_DOWNLOAD_TIMEOUT_MINS: 2
-        name: Set GHA cache for OPAM in ~/.opam
-        uses: actions/cache@v3
+      - name: Make checkout speedy
+        run: git config --global fetch.parallel 50
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
         with:
-          key: ${{ runner.os }}-${{ runner.arch }}-v1-opam-4.14.0-${{hashFiles('semgrep.opam')}}
-          path: ~/.opam
+          submodules: true
+      - env:
+          GIT_CONFIG_COUNT: "1"
+          GIT_CONFIG_KEY_0: maintenance.auto
+          GIT_CONFIG_VALUE_0: "false"
+        uses: semgrep/setup-ocaml@a739c5405d73c42ef15a9dc995efc0f87396cc36
+        with:
+          cache-prefix: v8-semgrep-${{ hashFiles('opam-lockfiles/*.locked', '*.opam', 'dev/required.opam', 'libs/ocaml-tree-sitter-semgrep/core/tree-sitter.opam', 'cli/src/semgrep/semgrep_interfaces/semgrep-interfaces.opam', 'OSS/opam-lockfiles/*.locked', 'OSS/*.opam', 'OSS/dev/required.opam', 'OSS/libs/ocaml-tree-sitter-semgrep/core/tree-sitter.opam', 'OSS/cli/src/semgrep/semgrep_interfaces/semgrep-interfaces.opam') }}
+          ocaml-compiler: ocaml-variants.5.4.0+options,ocaml-option-flambda
+          opam-pin: false
+          opam-repositories: |
+            default: https://github.com/ocaml/opam-repository.git#922f67e068446a8d8e809a40251a259bd0549552
+          save-opam-post-run: true
       - name: Install dependencies
-        run: |
-          eval $(opam env)
-          make install-deps-ALPINE-for-semgrep-core
-          make install-deps-for-semgrep-core
-          make -C interfaces/semgrep_interfaces setup-ALPINE setup
+        run: opam exec -- make install-deps
       - name: Build semgrep-core
-        run: opam exec -- make core
-      - name: Test semgrep-core (and time it)
-        run: |
-          eval $(opam env)
-          START=`date +%s`
-
-          make core-test
-          make core-test-e2e
-
-          END=`date +%s`
-          TEST_RUN_TIME=$((END-START))
-          curl --fail -L -X POST "https://dashboard.semgrep.dev/api/metric/semgrep.core.test-run-time-seconds.num" -d "$TEST_RUN_TIME"
-      - if: github.ref == 'refs/heads/develop'
-        name: Report Number of Tests Stats
-        run: ./scripts/report_test_metrics.sh
-      - name: Publish match performance
-        run: opam exec -- make report-perf-matching
-  trigger-semgrep-comparison-argo:
-    if: ${{ github.event_name == 'pull_request' && !startsWith(github.event.pull_request.base.ref, 'release') && !startsWith(github.head_ref, 'release') }}
-    needs:
-      - push-docker-returntocorp
-    secrets: inherit
-    uses: ./.github/workflows/trigger-semgrep-comparison-argo.yml
+        run: opam exec -- make
+      - name: Test semgrep-core
+        run: opam exec -- make test
 name: tests
 on:
   pull_request:

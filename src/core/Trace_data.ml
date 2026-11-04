@@ -75,17 +75,24 @@
    (like ocaml runtime version, if we're in a container etc.) *)
 module Attributes = struct
   (* Scan related attrs *)
-  let semgrep_managed_scan = "scan.semgrep_managed_scan"
-  let engine = "scan.engine"
-  let repo_name = "scan.repo_name"
-  let jobs = "scan.jobs"
+  let jobs = "scan.core.jobs"
   let job = "scan.parmap_job"
-  let folder = "scan.folder"
-  let pro_secrets_validators = "scan.pro_secrets_validators"
-  let pro_historical_scanning = "scan.pro_historical_scanning"
-  let pro_deep_intrafile = "scan.pro_deep_intrafile"
-  let pro_deep_interfile = "scan.pro_deep_interfile"
-  let pro_secrets_allowed_origins = "scan.pro_secrets_allowed_origins"
+  let pro_secrets_validators = "scan.core.pro_secrets_validators"
+  let pro_historical_scanning = "scan.core.pro_historical_scanning"
+  let pro_deep_intrafile = "scan.core.pro_deep_intrafile"
+  let pro_deep_interfile = "scan.core.pro_deep_interfile"
+  let pro_secrets_allowed_origins = "scan.core.pro_secrets_allowed_origins"
+  let phase_targets_count = "scan.phase.targets.count"
+  let phase_targets_size = "scan.phase.targets.bytes"
+  let phase_rules_count = "scan.phase.rules.count"
+  let phase_jobs_count = "scan.phase.jobs.count"
+  let phase_timeout = "scan.phase.timeout_s"
+  let phase_memory_limit = "scan.phase.memory_limit_mb"
+
+  (* Per-rule attrs *)
+  let rule_id = "rule_id"
+  let rule_analyzer = "analyzer"
+  let rule_taint = "taint"
 end
 (*****************************************************************************)
 (* Types *)
@@ -109,89 +116,6 @@ type analysis_flags = {
 let allowed_origins allow_all_origins =
   if allow_all_origins then "all_origins" else "pro_rules_only"
 
-let get_env_vars =
-  (* just get the first env var that is set in a list of env vars *)
-  let get_first_env_var env_vars : string option =
-    try
-      match env_vars |> List_.map Sys.getenv_opt |> List_.filter_some with
-      | hd :: _ -> Some hd
-      | [] -> None
-      (* any Sys.* function can raise Sys_error :( *)
-    with
-    | Sys_error e ->
-        (* We probably want to see this error since it'd be really weird if it
-           happened *)
-        (* nosemgrep *)
-        Logs.err (fun m ->
-            m
-              "System error reading an environment variable for tracing data: \
-               %s"
-              e);
-        None
-  in
-  let map_env_var_to_otel_data name type_ env_vars default :
-      string * Trace_core.user_data =
-    let user_data_val_of_string x =
-      let v_opt =
-        match type_ with
-        | `Int -> int_of_string_opt x |> Option.map (fun x -> `Int x)
-        | `String -> Some (`String x)
-        | `Bool -> Some (`Bool (x = "true" || x = "1" || x = "yes"))
-        | `Float -> float_of_string_opt x |> Option.map (fun x -> `Float x)
-        | `None -> None
-      in
-      Option.value v_opt ~default
-    in
-    let user_data =
-      get_first_env_var env_vars
-      |> Option.fold ~none:default ~some:user_data_val_of_string
-    in
-    (name, user_data)
-  in
-  List_.map (fun (name, type_, env_vars, default) ->
-      map_env_var_to_otel_data name type_ env_vars default)
-
-(* In case we don't have a repo name, report the base folder where
-   semgrep was run. We report only the base name to avoid leaking
-   user information they may not have expected us to include. *)
-let current_working_folder () = Filename.basename (Sys.getcwd ())
-
-(*****************************************************************************)
-(* Defaults *)
-(*****************************************************************************)
-(* Format:
-   (name, type, env_vars, default_value)
-   where we pick the first env var that is set, and if none are set we use the
-   default value
-*)
-
-(* Resource attributes we always want to try and set from the environment *)
-let default_resource_env_attrs =
-  [
-    (* coupling: semgrep/meta.py, if you change this we may want to change
-       something about job url there, or vice versa *)
-    (* Instance of the semgrep `service` *)
-    ( Tracing.Attributes.instance_id,
-      `String,
-      [ "SEMGREP_JOB_URL"; "CI_JOB_URL" ],
-      `None );
-    (* coupling: semgrep/meta.py, if you change this we may want to change
-       something about job url there, or vice versa *)
-    ( Attributes.semgrep_managed_scan,
-      `Bool,
-      [ "SEMGREP_MANAGED_SCAN" ],
-      `Bool false );
-    (* Poor man's Git repo detection. Running git repo detection again
-       seems wasteful, but checking two env vars is pretty cheap.
-
-       TODO the more we port of semgrep scan and semgrep ci, the more
-       of this information will already be in OCaml *)
-    ( Attributes.repo_name,
-      `String,
-      [ "SEMGREP_REPO_DISPLAY_NAME"; "SEMGREP_REPO_NAME" ],
-      `String "<local run>" );
-  ]
-
 (*****************************************************************************)
 (* Shortcuts for Otel tracing *)
 (*****************************************************************************)
@@ -206,7 +130,53 @@ let no_analysis_features () =
   }
 
 let data_of_languages (languages : Analyzer.t list) =
-  languages |> List_.map (fun l -> (Analyzer.to_string l, `Bool true))
+  languages |> List.map (fun l -> (Analyzer.to_string l, `Bool true))
+
+(*
+ record_phase_data records metrics for functions that take both sets of files
+ and sets of rules as inputs. This let's us autogenerate and alert on
+ performance metrics that are normalized by the size of the input and the
+ number of rules, which are two major factors in how long a scan takes. We can
+ also alert on things like if we see a lot of scans that have a small number of
+ rules but still take a long time, which might be an indication of a perf issue
+ somewhere silly.
+ *)
+(* coupling: telemetry.py add_phase_data *)
+let record_phase_data ?(timeout = 0.0) ?(memory_limit = 0) ?(jobs = 1) ~fpaths
+    ~rules sp =
+  let filesize fpath =
+    match UFile.filesize fpath with
+    | Ok size -> size
+    | _ -> 0
+  in
+  let attrs : (string * Opentelemetry.value) list =
+    [
+      (Attributes.phase_targets_count, `Int (List.length fpaths));
+      ( Attributes.phase_targets_size,
+        `Int (List.fold_left (fun acc path -> acc + filesize path) 0 fpaths) );
+      (Attributes.phase_rules_count, `Int (List.length rules));
+      (Attributes.phase_jobs_count, `Int jobs);
+      (Attributes.phase_memory_limit, `Int memory_limit);
+      (Attributes.phase_timeout, `Float timeout);
+    ]
+  in
+  Tracing.add_data_to_span sp attrs
+
+let data_of_rule (rule : Rule.t) : (string * Telemetry.user_data) list =
+  [
+    (Attributes.rule_id, `String (Rule_ID.to_string (fst rule.id)));
+    (Attributes.rule_analyzer, `String (Analyzer.to_string rule.target_analyzer));
+    ( Attributes.rule_taint,
+      `Bool
+        (match rule.mode with
+        | `Taint _ -> true
+        | `Search _
+        | `Extract _
+        | `Steps _
+        | `SCA _
+        | `Join _ ->
+            false) );
+  ]
 
 (* NOTE: If this IS NOT semgrep specific stick it in Tracing.ml *)
 (* WARNING: Let's be careful what we add as a resource attribute. TL;DR; these
@@ -214,28 +184,32 @@ let data_of_languages (languages : Analyzer.t list) =
    types of data can have different performance and cost implications for these
    tools. See module commentary for more info
 *)
-let get_resource_attrs ?(env = "prod") ~engine ~analysis_flags ~jobs () =
-  [
-    (* Version of Semgrep *)
-    (Tracing.Attributes.version, `String Version.version);
-    (* Whether we're running in a production, staging, or develop environment
-       (Usually maps to SMS prod,staging,dev2) *)
-    (Tracing.Attributes.deployment_environment_name, `String env);
-    (Attributes.engine, `String engine);
-    (Attributes.jobs, `Int jobs);
-    (Attributes.folder, `String (current_working_folder ()));
-    (Attributes.pro_secrets_validators, `Bool analysis_flags.secrets_validators);
-    (Attributes.pro_historical_scanning, `Bool analysis_flags.historical_scan);
-    (Attributes.pro_deep_intrafile, `Bool analysis_flags.deep_intra_file);
-    (Attributes.pro_deep_interfile, `Bool analysis_flags.deep_inter_file);
-    (* TODO it would be nice if we also got how the process was executed, and
-       with what config/flags *)
-  ]
-  @ get_env_vars default_resource_env_attrs
-  @
-  if analysis_flags.secrets_validators then
+let get_resource_attrs ?(env = "prod") ~engine ~analysis_flags ~jobs ~eio () =
+  let attrs =
     [
-      ( Attributes.pro_secrets_allowed_origins,
-        `String (allowed_origins analysis_flags.allow_all_origins) );
+      (* Version of Semgrep *)
+      (Telemetry.Attributes.version, `String Version.version);
+      (* Whether we're running in a production, staging, or develop environment
+       (Usually maps to SMS prod,staging,dev2) *)
+      (Telemetry.Attributes.deployment_environment_name, `String env);
+      (Telemetry.Attributes.scan_engine, `String engine);
+      (Telemetry.Attributes.eio, `Bool eio);
+      (Attributes.jobs, `Int jobs);
+      ( Attributes.pro_secrets_validators,
+        `Bool analysis_flags.secrets_validators );
+      (Attributes.pro_historical_scanning, `Bool analysis_flags.historical_scan);
+      (Attributes.pro_deep_intrafile, `Bool analysis_flags.deep_intra_file);
+      (Attributes.pro_deep_interfile, `Bool analysis_flags.deep_inter_file);
+      (* TODO it would be nice if we also got how the process was executed, and
+       with what config/flags *)
     ]
-  else []
+    @
+    if analysis_flags.secrets_validators then
+      [
+        ( Attributes.pro_secrets_allowed_origins,
+          `String (allowed_origins analysis_flags.allow_all_origins) );
+      ]
+    else []
+  in
+  (* Filter out if the val is `None *)
+  List.filter (fun (_, v) -> not (v = `None)) attrs

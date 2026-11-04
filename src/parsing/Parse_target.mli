@@ -1,3 +1,15 @@
+(*
+   Copyright (c) 2020-2025 Semgrep Inc.
+
+   This library is free software; you can redistribute it and/or
+   modify it under the terms of the GNU Lesser General Public License
+   version 2.1 as published by the Free Software Foundation.
+
+   This library is distributed in the hope that it will be useful, but
+   WITHOUT ANY WARRANTY; without even the implied warranty of
+   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the file
+   LICENSE for more details.
+*)
 (* parse_and_resolve_name uses a pfff or tree-sitter parser, or both.
  * The function also resolve names (hence the name) and propagate constants.
  *
@@ -31,10 +43,8 @@ val parse_and_resolve_name_fail_if_partial :
    parser inserted missing tokens (or any future kind of error or warning) *)
 val parse_and_resolve_name_strict : Lang.t -> Fpath.t -> AST_generic.program
 
-(* to be set dynamically with the right set of language parsers.
- * hack to reduce the size of the engine.js file.
- *)
-val just_parse_with_lang_ref : (Lang.t -> Fpath.t -> Parsing_result2.t) ref
-
 (* returns a Output_from_core.PartialParsing error *)
 val errors_from_skipped_tokens : Tok.location list -> Core_error.ErrorSet.t
+
+(* used by Parse_pattern2 *)
+val lang_to_python_parsing_mode : Lang.t -> Parse_python.parsing_mode

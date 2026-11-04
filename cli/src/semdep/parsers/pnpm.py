@@ -1,19 +1,35 @@
+#
+# Copyright (c) 2023-2025 Semgrep Inc.
+#
+# This library is free software; you can redistribute it and/or
+# modify it under the terms of the GNU Lesser General Public License
+# version 2.1 as published by the Free Software Foundation.
+#
+# This library is distributed in the hope that it will be useful, but
+# WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the file
+# LICENSE for more details.
+#
 """
 Parsers for pnpm-lock.yaml files
 Based on https://github.com/pnpm/spec/blob/master/lockfile/5.2.md
 """
 import re
+from dataclasses import dataclass
 from pathlib import Path
 from typing import List
 from typing import Optional
 from typing import Tuple
+from typing import Union
 
 import semgrep.semgrep_interfaces.semgrep_output_v1 as out
 from semdep.parsers.util import DependencyFileToParse
 from semdep.parsers.util import DependencyParserError
+from semdep.parsers.util import LockfileParseFailure
 from semdep.parsers.util import safe_parse_lockfile_and_manifest
 from semdep.parsers.util import transitivity
-from semgrep.rule_lang import parse_yaml_preserve_spans
+from semgrep import telemetry
+from semgrep.rule_lang import parse_yamls_preserve_spans
 from semgrep.rule_lang import YamlMap
 from semgrep.rule_lang import YamlTree
 from semgrep.semgrep_interfaces.semgrep_output_v1 import DependencyChild
@@ -21,9 +37,7 @@ from semgrep.semgrep_interfaces.semgrep_output_v1 import Ecosystem
 from semgrep.semgrep_interfaces.semgrep_output_v1 import FoundDependency
 from semgrep.semgrep_interfaces.semgrep_output_v1 import Fpath
 from semgrep.semgrep_interfaces.semgrep_output_v1 import Npm
-from semgrep.semgrep_interfaces.semgrep_output_v1 import PnpmLock_
 from semgrep.semgrep_interfaces.semgrep_output_v1 import ScaParserName
-
 
 # Pre-compiled regex patterns for better performance since they are used multiple times
 PACKAGE_KEY_PATTERN_PRE_V6 = re.compile(r"/(.+)/([^/]+)")
@@ -34,6 +48,9 @@ SNAPSHOT_KEY_PATTERN = re.compile(
 )
 BASE_VERSION_PATTERN_SIMPLE = re.compile(r"(?P<version>^[^\(]+)")
 BASE_VERSION_PATTERN = re.compile(r"^(?P<version>[^\(\+]+(?:\+[^\(]+)?)\(")
+BASE_VERSION_PATTERN_LESS_SIMPLE = re.compile(
+    r"(?:/[@]?[^@]+@)?(?P<version>[^\(\+]+(?:\+[^\(]+)?)"
+)
 PACKAGE_ALIAS_PATTERN = re.compile(r"^(?P<package>[^\(\)@]+)@(?P<version>[^\(\)]+)")
 
 
@@ -91,7 +108,7 @@ def validate_lockfile_dependencies_completeness(
     return [
         DependencyParserError(
             path=out.Fpath(str(lockfile_path)),
-            parser=ScaParserName(PnpmLock_()),
+            parser=ScaParserName(out.PPnpmLock()),
             reason=error_str,
         )
     ]
@@ -116,13 +133,13 @@ def build_package_key_mapping_post_v9(
         value: '@vitest/coverage-v8@2.0.5(vitest@2.0.5(@types/node@20.12.7)(jsdom@25.0.1)(lightningcss@1.23.0)(sass@1.70.0)(terser@5.27.0))'
     """
 
-    snapshots: YamlTree[YamlMap] = parsed_lockfile.value["snapshots"].value
-    if not snapshots or not isinstance(snapshots, YamlMap):
+    snapshots: YamlTree[YamlMap] | None = parsed_lockfile.value.get("snapshots")
+    if not snapshots or not isinstance(snapshots.value, YamlMap):
         return {}
 
     package_key_mapping: dict[str, str] = {}
 
-    for key, _value in snapshots.items():
+    for key, _value in snapshots.value.items():
         package_key_match = SNAPSHOT_KEY_PATTERN.match(key.value)
         if not package_key_match:
             continue
@@ -146,47 +163,78 @@ def extract_base_version(version_string: str) -> str:
     Returns:
         The base version string, e.g., '8.2.0' or '8.2.0+build'.
     """
-    match = BASE_VERSION_PATTERN.match(version_string)
+    match = BASE_VERSION_PATTERN_LESS_SIMPLE.match(version_string)
     return match.group("version") if match else version_string
+
+
+@dataclass
+class ParseResult:
+    package: str
+    version: str
+
+
+def parse_dependency_version(version_str: str) -> ParseResult:
+    """
+    Parses a dependency version string into its components.
+
+    Examples:
+    - "4.2.3" -> ParseResult("", "4.2.3")
+    - "string-width@4.2.3" -> ParseResult("string-width", "4.2.3")
+    - "@docusaurus/react-loadable@6.0.0" -> ParseResult("@docusaurus/react-loadable", "6.0.0")
+    - "/@pnpm/node-fetch@1.0.0" -> ParseResult("@pnpm/node-fetch", "1.0.0")
+    """
+    if not version_str:
+        return ParseResult("", "")
+
+    base_version = version_str.split("(")[0]
+
+    if base_version.startswith("/"):
+        base_version = base_version[1:]
+
+    if "_" in base_version:
+        base_version = base_version.split("_")[0]
+
+    if "@" not in base_version:
+        return ParseResult("", base_version)
+
+    if base_version.startswith("@"):
+        package_end = base_version.rindex("@")
+        return ParseResult(
+            package=base_version[:package_end], version=base_version[package_end + 1 :]
+        )
+    else:
+        package, version = base_version.split("@", 1)
+        return ParseResult(package=package, version=version)
 
 
 def sanitize_dependency_post_v9(dependency: DependencyChild) -> DependencyChild:
     """
-    Sanitizes a DependencyChild object by:
-    1. Resolving version aliases (e.g., `string-width-cjs: string-width@4.2.3`).
-    2. Extracting the base version, ignoring contexts like `(eslint@9.9.1)(typescript@5.5.4)`.
-
-    Args:
-        dependency: A DependencyChild object to sanitize.
-
-    Returns:
-        A sanitized DependencyChild with canonical package name and version.
+    Sanitizes a DependencyChild object by resolving aliases and removing contexts.
 
     Examples:
+    1. Regular package:
+       Input:  DependencyChild(package="string-width", version="4.2.3")
+       Output: DependencyChild(package="string-width", version="4.2.3")
 
-    input: `DependencyChild(package="string-width-cjs" version="string-width@4.2.3")`
-    output: `DependencyChild(package="string-width" version="4.2.3")`
+    2. Aliased package:
+       Input:  DependencyChild(package="string-width-cjs", version="string-width@4.2.3")
+       Output: DependencyChild(package="string-width", version="4.2.3")
 
-    input: `DependencyChild(package="string-width-cjs" version="string-width@4.2.3+build")`
-    output: `DependencyChild(package="string-width" version="4.2.3+build")`
-
-    input: `DependencyChild(package="typescript-eslint" version="8.2.0(eslint@9.9.1)(typescript@5.5.4)")`
-    output: `DependencyChild(package="typescript-eslint" version="8.2.0")`
+    3. Scoped package:
+       Input:  DependencyChild(package="react-loadable", version="@docusaurus/react-loadable@6.0.0")
+       Output: DependencyChild(package="@docusaurus/react-loadable", version="6.0.0")
     """
-    # Handle aliasing, i.e. cases where the version itself may be a package reference (e.g., version="string-width@4.2.3").
-    alias_match = PACKAGE_ALIAS_PATTERN.match(dependency.version)
+    # Parse the version string to extract any embedded package name
+    result = parse_dependency_version(dependency.version)
 
-    if alias_match:
-        canonical_package = alias_match.group("package")
-        version_with_context = alias_match.group("version")
-    else:
-        canonical_package = dependency.package
-        version_with_context = dependency.version
+    # Use the package name from the version string if present, as it's the canonical name from the registry
+    # (e.g. "@docusaurus/react-loadable" in "react-loadable: '@docusaurus/react-loadable@6.0.0'")
+    canonical_package = result.package or dependency.package
 
-    # Remove nested contexts from the version, such as `(eslint@1.2.3)(typescript@4.5.6)`
-    base_version = extract_base_version(version_with_context)
+    # Use the parsed version
+    canonical_version = result.version
 
-    return DependencyChild(package=canonical_package, version=base_version)
+    return DependencyChild(package=canonical_package, version=canonical_version)
 
 
 # Direct dependencies
@@ -264,7 +312,7 @@ def parse_package_key_post_v9(key: str) -> Optional[Tuple[str, str]]:
 
 # Dependency children
 def parse_dependencies(
-    dependencies: YamlTree[YamlMap],
+    dependencies: Union[YamlTree[YamlMap], None],
 ) -> List[DependencyChild]:
     """
     Parses a YamlMap of dependencies into a list of DependencyChild objects.
@@ -275,7 +323,7 @@ def parse_dependencies(
     Returns:
         A list of DependencyChild objects with package names and versions.
     """
-    if not dependencies.value:
+    if not dependencies or not isinstance(dependencies.value, YamlMap):
         return []
 
     return [
@@ -317,22 +365,37 @@ def parse_dep_children_pre_v9(
 ) -> List[DependencyChild]:
     """
     Parses the dependencies of a package from a pnpm-lock.yaml file (version >5.4 <9.0).
-    The provided package_info is a YamlMap containing the package information of a single package under the key "packages".
-    Returns a list of DependencyChild objects representing the dependencies of the package.
+
+    Args:
+        package_info: YamlMap containing the package information under "packages"
+        full_file: The complete pnpm-lock.yaml file
+        package_key: The key of the current package
+
+    Returns:
+        List of DependencyChild objects representing the dependencies
+
+    Example package_info:
+        dependencies:
+          string-width-cjs: string-width@4.2.3
+          react-loadable: @docusaurus/react-loadable@6.0.0
+          node-fetch: /@pnpm/node-fetch@1.0.0
+          core-loggers: 10.0.4(@pnpm/logger@5.2.0)
     """
     if not package_info.value or "dependencies" not in package_info.value:
         return []
 
-    all_dependencies = parse_dependencies(package_info.value["dependencies"])
+    all_dependencies = parse_dependencies(package_info.value.get("dependencies"))
 
-    # Filter out peer dependencies from dependency graph construction
-    peer_dependencies = parse_peer_dependencies(package_info)
+    sanitized_deps = []
+    for dep in all_dependencies:
+        parsed = parse_dependency_version(dep.version)
+        sanitized_deps.append(
+            DependencyChild(
+                package=parsed.package or dep.package, version=parsed.version
+            )
+        )
 
-    return [
-        DependencyChild(package=dep.package, version=extract_base_version(dep.version))
-        for dep in all_dependencies
-        if dep.package not in peer_dependencies
-    ]
+    return sanitized_deps
 
 
 def parse_dep_children_post_v9(
@@ -398,49 +461,69 @@ def parse_dep_children_post_v9(
         - Peer dependencies are included in the "dependencies" field of the snapshot but are filtered out for correctness.
         - Aliased and contextual versions are normalized to their canonical forms.
     """
-    all_snapshots: YamlTree[YamlMap] = full_file.value["snapshots"].value
+    all_snapshots: YamlTree[YamlMap] | None = full_file.value.get("snapshots")
 
-    if not all_snapshots or not isinstance(all_snapshots, YamlMap):
+    if not all_snapshots or not isinstance(all_snapshots.value, YamlMap):
         return []
 
-    snapshot = all_snapshots.get(package_key)
+    snapshot = all_snapshots.value.get(package_key)
     if not snapshot or "dependencies" not in snapshot.value:
         return []
 
     all_dependencies: List[DependencyChild] = parse_dependencies(
-        snapshot.value["dependencies"]
+        snapshot.value.get("dependencies")
     )
-    peer_dependencies: List[str] = parse_peer_dependencies(package_info)
+    return [sanitize_dependency_post_v9(dep) for dep in all_dependencies]
 
-    # all_dependencies contain peer dependencies as well, so we need to filter them out, and also correct the version to remove any contexts
-    return [
-        sanitize_dependency_post_v9(dep)
-        for dep in all_dependencies
-        if dep.package not in peer_dependencies
-    ]
+
+def parse_pnpm_lockfile_yaml(text: str, lockfile_path: Path) -> Optional[YamlTree]:
+    """
+    Return the project document of a pnpm-lock.yaml: always the last one, as
+    pnpm 11+ may prepend an "env" document.
+    """
+    documents = parse_yamls_preserve_spans(text, str(lockfile_path), allow_null=True)
+    return documents[-1] if documents else None
+
+
+def _lockfile_structure_error(lockfile_path: Path, reason: str) -> LockfileParseFailure:
+    return LockfileParseFailure(
+        Fpath(str(lockfile_path)), ScaParserName(out.PPnpmLock()), reason
+    )
 
 
 # Main Course
+@telemetry.trace(telemetry.TraceOwner.SSC)
 def parse_pnpm(
     lockfile_path: Path, manifest_path: Optional[Path]
 ) -> Tuple[List[FoundDependency], List[DependencyParserError]]:
     parsed_lockfile, _, errors = safe_parse_lockfile_and_manifest(
         DependencyFileToParse(
             lockfile_path,
-            lambda text: parse_yaml_preserve_spans(
-                text, str(lockfile_path), allow_null=True
-            ),
-            ScaParserName(PnpmLock_()),
+            lambda text: parse_pnpm_lockfile_yaml(text, lockfile_path),
+            ScaParserName(out.PPnpmLock()),
         ),
         None,
     )
 
-    if not parsed_lockfile or not isinstance(parsed_lockfile.value, YamlMap):
+    if parsed_lockfile is None:
         return [], errors
+    if not isinstance(parsed_lockfile.value, YamlMap):
+        return [], [
+            *errors,
+            _lockfile_structure_error(
+                lockfile_path,
+                "no project document (YAML mapping) found in lockfile",
+            ),
+        ]
     try:
         lockfile_version = float(parsed_lockfile.value["lockfileVersion"].value)
     except KeyError:
-        return [], errors
+        return [], [
+            *errors,
+            _lockfile_structure_error(
+                lockfile_path, "no lockfileVersion found in lockfile"
+            ),
+        ]
 
     # This will be important later
     canonical_package_key_mapping: dict[str, str] = {}
@@ -509,7 +592,7 @@ def parse_pnpm(
                     errors.append(
                         DependencyParserError(
                             path=out.Fpath(str(lockfile_path)),
-                            parser=ScaParserName(PnpmLock_()),
+                            parser=ScaParserName(out.PPnpmLock()),
                             reason=f"Could not parse package key {key.value}",
                             line=line,
                         )

@@ -1,4 +1,16 @@
 (*
+   Copyright (c) 2021-2025 Semgrep Inc.
+
+   This library is free software; you can redistribute it and/or
+   modify it under the terms of the GNU Lesser General Public License
+   version 2.1 as published by the Free Software Foundation.
+
+   This library is distributed in the hope that it will be useful, but
+   WITHOUT ANY WARRANTY; without even the implied warranty of
+   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the file
+   LICENSE for more details.
+*)
+(*
    Avoid segfaults when the process runs out of memory.
 *)
 
@@ -67,7 +79,6 @@ exception ExceededMemoryLimit of string
    - default heap_warning_mb: 500 MiB
 *)
 val run_with_memory_limit :
-  < Cap.memory_limit > ->
   ?get_context:(unit -> string) ->
   ?stack_warning_kb:int ->
   ?heap_warning_mb:int ->

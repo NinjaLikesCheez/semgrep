@@ -21,6 +21,7 @@ These principles inform our decisions around data collection:
 $ semgrep --config=myrule.yaml  # → no metrics (loading rules from local file)
 $ semgrep --config=p/python     # → metrics enabled (fetching Registry)
 $ semgrep login && semgrep ci   # → metrics enabled (logged in to semgrep.dev)
+$ semgrep install-semgrep-pro   # → metrics enabled (requires being logged in)
 ```
 
 Semgrep does **not** enable metrics when running with only local configuration files or command-line search patterns.
@@ -32,7 +33,7 @@ Metrics may also be configured to be sent on every run, or never sent.
 
 To configure metrics, pass the `--metrics` option to Semgrep:
 
-- `--metrics auto`: (default) metrics are sent whenever rules are pulled from the [Semgrep Registry](https://semgrep.dev/r)
+- `--metrics auto`: (default) metrics are sent whenever rules are pulled from the [Semgrep Registry](https://semgrep.dev/r) or the user is logged in.
 - `--metrics on`: metrics are sent on every Semgrep run
 - `--metrics off`: metrics are never sent
 
@@ -79,9 +80,10 @@ Environmental data provide contextual data about Semgrep CLI’s runtime environ
 - An [anonymous user ID](#anonymous-user-id) that identifies the machine
 - IP address that triggers a run
 - Value of the CI environment variable, if set
+- How the Semgrep CLI was installed (`pip`, `homebrew`, `docker`, or `unknown`), detected heuristically from the install path and environment variables
 - Pseudoanonymized hash of the scanned project’s name
 - Pseudoanonymized hash of the rule definitions run
-- Pseduoanonymized hash of the config option.
+- Pseudoanonymized hash of the config option.
   _(Note that when a config option downloads a ruleset from the https://semgrep.dev registry, [feature usage metrics](#feature-usage) still include the ruleset name in plain text.)_
 
 ### Performance
@@ -132,6 +134,13 @@ Additional data is reported when used in conjunction with an IDE integration, su
 
 Note: For all officially supported Semgrep IDE integrations, these metrics can be disabled via settings in the IDE. By default these settings follow any global telemetry/metrics settings the user may have already set for the IDE itself.
 
+### Pro Engine installation
+
+When running `semgrep install-semgrep-pro` (which requires being logged in), additional data is reported to help us understand how many Pro Engine installations happen and how many succeed; e.g.
+
+- Whether the installation completed successfully
+- Which installation step failed, as a fixed identifier such as `download-403` or `version-check-failed` (never a free-form error message)
+
 ### Pseudoanonymization
 
 Certain identifying data (e.g. project URLs) are pseudoanonymized before being sent to the Semgrep, Inc backend.
@@ -171,6 +180,7 @@ Semgrep, Inc will:
 |             | Deployment ID                           | The ID organization associated with the logged in account                     | Understand popularity of logged in features by organization                                                | 1234                                                                                                                                                                               | Number        |
 |             | Integration name                        | If Semgrep is being called by another tool, optional name of that integration | Reproduce and debug issues specific integrations                                           | `gitlab`                                                                                                                                                                              | String         |
 |             | CI                                      | Notes if Semgrep is running in CI and the name of the provider                | Reproduce and debug issues with specific CI providers                                      | GitLabCI v0.13.12                                                                                                                                                                     | String         |
+|             | Install method                          | How the Semgrep CLI was installed, detected heuristically                     | Understand which distribution channels are used; debug channel-specific issues            | `pip`                                                                                                                                                                                 | String         |
 |             | Client IP                               | IP address that triggered a run                                               | Understand broad ruleset usage                                                             | 0.0.0.0                                                                                                                                                                               | String         |
 |             |                                         |                                                                               |                                                                                            |                                                                                                                                                                                       |                |
 | Performance |                                         |                                                                               |                                                                                            |                                                                                                                                                                                       |                |
@@ -209,12 +219,16 @@ Semgrep, Inc will:
 |Extension||||||
 |         |Machine ID|A random UUID generated by the IDE itself|Understanding number of unique users using IDE integrations|`222bcccd-9dc2-4d10-ac3a-5692460e77ee`|String|
 |         |Is New App Install|If the user just installed the IDE integration|Understand common issues with setting up IDE integrations|`false`|Boolean|
-|         |Session ID|A random UUID generated everytime the integration starts up, usually when opening a project|Understand errors that commonly happen together, deduplicate errors|`222bcccd-9dc2-4d10-ac3a-5692460e77ee`|String|
+|         |Session ID|A random UUID generated every time the integration starts up, usually when opening a project|Understand errors that commonly happen together, deduplicate errors|`222bcccd-9dc2-4d10-ac3a-5692460e77ee`|String|
 
 |         |Integration version|Current version of the IDE integration|Reproduce and debug issues with specific versions|`1.8.0`| String|
 |         |Integration type|IDE being used|Reproduce and debug issues with specific integrations|`vscode`|String|
-|         |Autofix count|How many autofixes have been triggered through the integration|Understand the value that the integration provides to the user in helping remediate code issue|10|Number|
+|         |Autofix count|How many autofixes have been triggered through the integration|Understand the value that the integration provides to the user in helping remediate code issues|10|Number|
 |         |Ignore count|How many findings have been ignored by the user through the integration|Understand the quality and noisiness of rules|5|Number|
+
+|Pro Engine install||||||
+|         |Success|Whether `semgrep install-semgrep-pro` completed successfully|Understand how many Pro Engine installs happen and how many succeed|`true`|Boolean|
+|         |Error|Fixed identifier of the install step that failed|Debug common installation failures|`download-403`|String|
 
 ### Anonymous user ID
 
@@ -379,36 +393,33 @@ dependencies data are:
 - Package name (e.g., lodash)
 - Package version (e.g., 1.2.3)
 - File path for lockfile (e.g., frontend/yarn.lock)
+- Analysis of external dependency calls. (e.g., from flask import Response, Response(status=204))
 
 ## Debugging data collected when traces are requested
 
 To help debug performance issues, Semgrep CLI can send traces, enabled via `--trace`.
-Traces are never sent unless the `--trace` flag is included.
+Traces are never sent unless the `--trace` flag is included, and are never retained for more than 30 days.
 
 There are three modes of tracing.
-1. Info (`--trace`): basic tracing. Sends timings about each file as it undergoes pre-processing and then matching. Includes the file path and sometimes rule names.
-2. Debug (`--trace` with `SEMGREP_TRACE_LEVEL=debug`): debug tracing. Sends additional timings, particularly around functions run during taint analysis.
+1. Info (`--trace`): basic tracing. Sends basic info about settings passed via environment variables or flags, and timings around scan phases.
+2. Debug (`--trace` with `SEMGREP_TRACE_LEVEL=debug`): debug tracing. Sends additional timings, particularly around functions run during taint analysis, timings about each file as it undergoes pre-processing and then matching. Includes the file path and sometimes rule names.
 3. Trace (`--trace` with `SEMGREP_TRACE_LEVEL=trace`): even more detailed debug tracing.
 
 All traces are sent in Opentelemetry format and may include:
 - Semgrep function currently running (e.g. `Match_tainting_mode.check_rules`)
 - Start time (e.g. `1718775054055113`)
 - Duration (e.g. `934956`)
-- Path (e.g. `test/example/test_code.py`)
-- Size of a file in bytes (e.g. `12927`)
-- Rule name (e.g. `tainted-sql-from-http-request`)
-- Is a taint rule (e.g. `true`)
+- Settings passed (e.g. `--jobs`, `--timeout`)
 
 Additionally, summary data is always included in the top level trace, such as:
 - Repo name (e.g. `semgrep-app`)
-- Folder name (e.g. `tests`)
 - Number of matches (e.g. `2`)
 - Number of errors (e.g. `1`)
-- Number of OSS rules (e.g. `12`)
+- Number of rules (e.g. `12`)
 - Number of targets (e.g. `128`)
-- Languages (e.g. `Java: true`)
 - Is a diff scan (e.g. `false`)
 - Is an interfile scan (e.g. `true`)
+- Cryptographic hash of rules (e.g. `One-way hash of the rule definitions`)
 - Other scan settings of a similar nature. Summary data will only include information that `semgrep ci` has access to.
 
 Additionally, informational, warning, and error logs will be included when
@@ -420,6 +431,7 @@ tracing is enabled, which may include:
 No information will be sent in the info mode that would not be sent by `semgrep ci`.
 
 In debug and trace mode only, traces may also include:
+- file paths (e.g. `src/my_file.py`)
 - Hashed function names (e.g. `d40fdc8ef9bf7b7dd1b014533a58a05e9b98d7dd856784352201388fe5e22673`)
 - Hashed variable names (e.g. `0268934f5c43d1b5fc7d52d9efe17c69f1144b108c384c3513cbe493043712b3`)
 

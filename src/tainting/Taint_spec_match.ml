@@ -14,7 +14,6 @@
  *)
 open Common
 module PM = Core_match
-module Effect = Shape_and_sig.Effect
 
 type overlap = float
 
@@ -27,7 +26,6 @@ type 'spec t = {
 }
 
 let is_exact x = x.overlap > 0.99
-let sink_of_match x = { Effect.pm = x.spec_pm; rule_sink = x.spec }
 
 let _show x =
   Range.content_at_range x.spec_pm.path.internal_path_to_content x.range
@@ -96,10 +94,9 @@ module Best_matches = struct
 
   let _debug xs =
     xs |> S.elements
-    |> List_.map (fun (Any m) ->
-           m.spec_id ^ ":"
-           ^ Range.content_at_range m.spec_pm.path.internal_path_to_content
-               m.range)
+    |> List.map (fun (Any m) ->
+        m.spec_id ^ ":"
+        ^ Range.content_at_range m.spec_pm.path.internal_path_to_content m.range)
     |> String.concat " ; "
 
   let rec add (Any m' as x') best_matches =
@@ -138,7 +135,12 @@ end
 
 let is_best_match = Best_matches.is_best_match
 
-(* See NOTE "Best matches" for more context. *)
+(* See NOTE "Best matches" for more context.
+
+  THINK: Could we use this for propagation points? I think we would need to use
+    a spec_id different from the prop id, we would need to use the prop var that
+    is specific to the propagator match instead.
+ *)
 let best_matches_in_nodes ~sub_matches_of_orig fun_cfg =
   let find_origs_visitor =
     object (_self : 'self)
@@ -147,6 +149,10 @@ let best_matches_in_nodes ~sub_matches_of_orig fun_cfg =
       method! visit_instr acc i =
         acc := Seq.cons i.iorig !acc;
         super#visit_instr acc i
+
+      method! visit_call acc c =
+        acc := Seq.cons c.corig !acc;
+        super#visit_call acc c
 
       method! visit_exp acc e =
         acc := Seq.cons e.eorig !acc;
@@ -182,13 +188,13 @@ let best_matches_in_nodes ~sub_matches_of_orig fun_cfg =
    * Yet `!tmp`, which has `if tainted then ok1 else ok2` as 'eorig', and
    * thus has a range that contains them all, is the chosen as the "best"
    * match of the sink spec.
-   * *)
-  fun_cfg |> IL_helpers.reachable_nodes
+   *)
+  fun_cfg |> Fun_CFG.reachable_nodes
   |> Seq.concat_map (fun node ->
-         let all_origs : IL.orig Seq.t =
-           let origs = ref Seq.empty in
-           find_origs_visitor#visit_node origs node;
-           !origs
-         in
-         all_origs |> Seq.concat_map sub_matches_of_orig)
+      let all_origs : IL.orig Seq.t =
+        let origs = ref Seq.empty in
+        find_origs_visitor#visit_node origs node;
+        !origs
+      in
+      all_origs |> Seq.concat_map sub_matches_of_orig)
   |> Seq.fold_left (fun s x -> Best_matches.add x s) Best_matches.empty

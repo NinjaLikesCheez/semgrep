@@ -1,3 +1,15 @@
+(*
+   Copyright (c) 2024 Semgrep Inc.
+
+   This library is free software; you can redistribute it and/or
+   modify it under the terms of the GNU Lesser General Public License
+   version 2.1 as published by the Free Software Foundation.
+
+   This library is distributed in the hope that it will be useful, but
+   WITHOUT ANY WARRANTY; without even the implied warranty of
+   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the file
+   LICENSE for more details.
+*)
 type stat = {
   kind : Unix.file_kind;
   line_count : int;
@@ -7,7 +19,7 @@ type stat = {
   type_ : File_type.file_type;
 }
 [@@deriving yojson]
-(** [stat] is like Linux's `stat`, but more specific to Semgrep *)
+(** [stat] is like Linux's [stat], but more specific to Semgrep *)
 
 type annotated_target = {
   internal_path : string;

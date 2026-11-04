@@ -1,4 +1,15 @@
-import multiprocessing
+#
+# Copyright (c) 2023-2025 Semgrep Inc.
+#
+# This library is free software; you can redistribute it and/or
+# modify it under the terms of the GNU Lesser General Public License
+# version 2.1 as published by the Free Software Foundation.
+#
+# This library is distributed in the hope that it will be useful, but
+# WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the file
+# LICENSE for more details.
+#
 import subprocess
 from enum import auto
 from enum import Enum
@@ -36,7 +47,6 @@ class EngineType(Enum):
         logged_in: bool = False,
         engine_flag: Optional["EngineType"] = None,
         run_secrets: bool = False,
-        interfile_diff_scan_enabled: bool = False,
         # ci-only args
         ci_scan_handler: Optional[ScanHandler] = None,
         git_meta: Optional[GitMeta] = None,
@@ -76,11 +86,7 @@ class EngineType(Enum):
         # TODO we can delete this once interfile diff scans are GA
 
         diff_scan = git_meta and not git_meta.is_full_scan
-        if (
-            diff_scan
-            and not interfile_diff_scan_enabled
-            and requested_engine is cls.PRO_INTERFILE
-        ):
+        if diff_scan and requested_engine is cls.PRO_INTERFILE:
             requested_engine = cls.PRO_INTRAFILE
 
         # Override 2: Turn off PRO_INTERFILE when only supply chain is requested
@@ -121,24 +127,25 @@ class EngineType(Enum):
         )
         return output.rstrip()
 
-    @staticmethod
-    def get_cpu_count() -> int:
-        try:
-            return multiprocessing.cpu_count()
-        except NotImplementedError:  # on Windows
-            return 1
-
-    @property
-    def default_jobs(self) -> int:
-        if self == EngineType.PRO_INTERFILE:
-            return 1
-        # Maxing out number of cores used to 16 if more not requested to not overload on large machines
-        return min(16, self.get_cpu_count())
-
-    @property
     def default_max_memory(self) -> int:
         """Interfile uses a lot of memory, so it should have a safe default limit."""
         if self == EngineType.PRO_INTERFILE:
+            # TODO: consider the right thing for MacOS or Windows.
+            # Linux: memory.max either holds a value in bytes, or "max" for unlimited.
+            try:
+                raw = Path("/sys/fs/cgroup/memory.max").read_text().strip()
+                if raw != "max":
+                    mib = int(raw) // 1024 // 1024
+                    budget = int(mib * 0.9)
+                    if budget < 1024:
+                        logger.warning(
+                            f"Detected an unusually-low cgroup memory limit of {mib} MiB."
+                            f"Using {budget} MiB as the max-memory budget; on out-of-memory"
+                            "errors or other scan failures, consider increasing container resources."
+                        )
+                    return budget
+            except (OSError, ValueError):
+                pass
             return DEFAULT_MAX_MEMORY_PRO_CI
         return 0  # unlimited
 
@@ -193,3 +200,14 @@ class EngineType(Enum):
             return out.EngineKind(out.OSS_())
         else:
             return out.EngineKind(out.PRO_())
+
+    def __str__(self) -> str:
+        match self:
+            case EngineType.OSS:
+                return "OSS"
+            case EngineType.PRO_LANG:
+                return "PRO_LANG"
+            case EngineType.PRO_INTRAFILE:
+                return "PRO_INTRAFILE"
+            case EngineType.PRO_INTERFILE:
+                return "PRO_INTERFILE"

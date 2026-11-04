@@ -1,4 +1,16 @@
 (*
+   Copyright (c) 2022-2025 Semgrep Inc.
+
+   This library is free software; you can redistribute it and/or
+   modify it under the terms of the GNU Lesser General Public License
+   version 2.1 as published by the Free Software Foundation.
+
+   This library is distributed in the hope that it will be useful, but
+   WITHOUT ANY WARRANTY; without even the implied warranty of
+   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the file
+   LICENSE for more details.
+*)
+(*
    'semgrep scan' (and also 'semgrep ci') command-line parsing.
 *)
 
@@ -31,21 +43,19 @@ type conf = {
   version_check : bool;
   (* Debugging/logging/profiling options *)
   common : CLI_common.conf;
-  trace : bool;
-  (* TODO: use Uri.t *)
-  trace_endpoint : string option;
   (* Ugly: should be in separate subcommands *)
   version : bool;
   show : Show_CLI.conf option;
   validate : Validate_CLI.conf option;
   test : Test_CLI.conf option;
-  allow_local_builds : bool;
   (* --x-* options are experimental forever! (= subject to change or removal
      without notice) *)
   (* --x-ls: *)
   ls : bool;
   (* --x-ls-long: *)
   ls_format : Ls_subcommand.format;
+  (* --x-mem-policy: Pro-only, processed by Pro_CLI *)
+  x_mem_policy : string option;
 }
 [@@deriving show]
 
@@ -60,11 +70,10 @@ val default : conf
    This function may raise an exn in case of an error parsing argv
    but this should be caught by CLI.safe_run.
 
-   ugly: need to pass Cap.tmp to support named pipes
-   TODO: would be better to do that in Scan_subcommand.ml instead, after
-   parsing the arguments.
+   TODO: would be better to handle named pipes in Scan_subcommand.ml
+   instead, after parsing the arguments.
 *)
-val parse_argv : < Cap.tmp > -> string array -> conf
+val parse_argv : string array -> conf
 
 (* exported because used by Interactive_CLI.ml too (and some by Ci_CLI.ml) *)
 val o_lang : string option Cmdliner.Term.t
@@ -79,12 +88,12 @@ val o_allow_untrusted_validators : bool Cmdliner.Term.t
 val o_autofix : bool Cmdliner.Term.t
 val o_baseline_commit : string option Cmdliner.Term.t
 val o_dataflow_traces : bool Cmdliner.Term.t
-val o_diff_depth : int Cmdliner.Term.t
 val o_dryrun : bool Cmdliner.Term.t
 val o_dump_command_for_core : bool Cmdliner.Term.t
 val o_emacs : bool Cmdliner.Term.t
 val o_emacs_outputs : string list Cmdliner.Term.t
 val o_exclude_minified_files : bool Cmdliner.Term.t
+val o_exclude_binary_files : bool Cmdliner.Term.t
 val o_exclude_rule_ids : string list Cmdliner.Term.t
 val o_files_with_matches : bool Cmdliner.Term.t
 val o_force_color : bool Cmdliner.Term.t
@@ -93,7 +102,6 @@ val o_gitlab_sast_outputs : string list Cmdliner.Term.t
 val o_gitlab_secrets : bool Cmdliner.Term.t
 val o_gitlab_secrets_outputs : string list Cmdliner.Term.t
 val o_historical_secrets : bool Cmdliner.Term.t
-val o_ignore_semgrepignore_files : bool Cmdliner.Term.t
 val o_incremental_output : bool Cmdliner.Term.t
 val o_json : bool Cmdliner.Term.t
 val o_json_outputs : string list Cmdliner.Term.t
@@ -103,12 +111,14 @@ val o_matching_explanations : bool Cmdliner.Term.t
 val o_max_chars_per_line : int Cmdliner.Term.t
 val o_max_lines_per_finding : int Cmdliner.Term.t
 val o_max_log_list_entries : int Cmdliner.Term.t
+val o_max_match_context_size : int Cmdliner.Term.t
 val o_max_memory_mb : int Cmdliner.Term.t
 val o_max_target_bytes : int Cmdliner.Term.t
 val o_metrics : Metrics_.config Cmdliner.Term.t
-val o_num_jobs : int Cmdliner.Term.t
+val o_num_jobs : Core_scan_config.num_jobs Cmdliner.Term.t
 val o_no_secrets_validation : bool Cmdliner.Term.t
 val o_nosem : bool Cmdliner.Term.t
+val o_secrets_timeout : int Cmdliner.Term.t
 val o_optimizations : bool Cmdliner.Term.t
 val o_oss : bool Cmdliner.Term.t
 val o_output : string option Cmdliner.Term.t
@@ -120,6 +130,7 @@ val o_rewrite_rule_ids : bool Cmdliner.Term.t
 val o_sarif : bool Cmdliner.Term.t
 val o_sarif_outputs : string list Cmdliner.Term.t
 val o_scan_unknown_extensions : bool Cmdliner.Term.t
+val o_semgrepignore_filename : string option Cmdliner.Term.t
 val o_test : bool Cmdliner.Term.t
 val o_text : bool Cmdliner.Term.t
 val o_text_outputs : string list Cmdliner.Term.t
@@ -127,12 +138,23 @@ val o_time : bool Cmdliner.Term.t
 val o_timeout : float Cmdliner.Term.t
 val o_timeout_interfile : int Cmdliner.Term.t
 val o_timeout_threshold : int Cmdliner.Term.t
-val o_trace : bool Cmdliner.Term.t
-val o_trace_endpoint : string option Cmdliner.Term.t
 val o_use_git : bool Cmdliner.Term.t
+val o_use_semgrepignore_v2 : bool Cmdliner.Term.t
 val o_version_check : bool Cmdliner.Term.t
 val o_vim : bool Cmdliner.Term.t
 val o_vim_outputs : string list Cmdliner.Term.t
+val o_x_ignore_semgrepignore_files : bool Cmdliner.Term.t
+val o_x_mem_policy : string option Cmdliner.Term.t
+val o_x_tr : bool option Cmdliner.Term.t
+val o_x_dependency_paths : bool Cmdliner.Term.t
+
+val o_x_gradle_module_attribution : bool Cmdliner.Term.t
+(** Accept the Gradle module attribution flag for forwarding to the Python CLI. *)
+
+val o_x_pro_naming : bool Cmdliner.Term.t
+val o_x_group_taint_rules : bool Cmdliner.Term.t
+val o_x_mcp : bool Cmdliner.Term.t
+val o_x_run_taint_once : bool Cmdliner.Term.t
 
 val engine_type_conf :
   oss:bool ->
@@ -142,7 +164,10 @@ val engine_type_conf :
   secrets:bool ->
   no_secrets_validation:bool ->
   allow_untrusted_validators:bool ->
+  secrets_timeout:int ->
   pro_path_sensitive:bool ->
+  allow_local_builds:bool ->
+  x_tr:bool option ->
   Engine_type.t
 
 val output_format_conf :
@@ -158,12 +183,12 @@ val output_format_conf :
   Output_format.t
 
 val outputs_conf :
-  text_outputs:'a list ->
-  json_outputs:'a list ->
-  emacs_outputs:'a list ->
-  vim_outputs:'a list ->
-  sarif_outputs:'a list ->
-  gitlab_sast_outputs:'a list ->
-  gitlab_secrets_outputs:'a list ->
-  junit_xml_outputs:'a list ->
-  ('a option, Output_format.t) Map_.t
+  text_outputs:string list ->
+  json_outputs:string list ->
+  emacs_outputs:string list ->
+  vim_outputs:string list ->
+  sarif_outputs:string list ->
+  gitlab_sast_outputs:string list ->
+  gitlab_secrets_outputs:string list ->
+  junit_xml_outputs:string list ->
+  Output_format.t Maps.String_map.t

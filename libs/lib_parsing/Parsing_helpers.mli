@@ -1,3 +1,15 @@
+(*
+   Copyright (c) 2023-2025 Semgrep Inc.
+
+   This library is free software; you can redistribute it and/or
+   modify it under the terms of the GNU Lesser General Public License
+   version 2.1 as published by the Free Software Foundation.
+
+   This library is distributed in the hope that it will be useful, but
+   WITHOUT ANY WARRANTY; without even the implied warranty of
+   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the file
+   LICENSE for more details.
+*)
 (* Parsing helpers used by the ocamllex/ocamlyacc/menhir parsers.
  * For parsing helpers for tree-sitter, see Parse_tree_sitter_helpers.ml
  *)
@@ -50,7 +62,8 @@ val mk_lexer_for_yacc :
   (* token stream for error recovery *)
   'tok tokens_state
   * ((* the lexer to pass to the ocamlyacc parser *)
-     Lexing.lexbuf -> 'tok)
+     Lexing.lexbuf ->
+    'tok)
   * (* fake lexbuf needed by ocamlyacc API *)
     Lexing.lexbuf
 

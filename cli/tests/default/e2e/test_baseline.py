@@ -1,3 +1,15 @@
+#
+# Copyright (c) 2022-2025 Semgrep Inc.
+#
+# This library is free software; you can redistribute it and/or
+# modify it under the terms of the GNU Lesser General Public License
+# version 2.1 as published by the Free Software Foundation.
+#
+# This library is distributed in the hope that it will be useful, but
+# WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the file
+# LICENSE for more details.
+#
 import os
 import subprocess
 import tempfile
@@ -8,10 +20,19 @@ from pathlib import Path
 from typing import Optional
 
 import pytest
+from tests.conftest import remove_cert_warnings
+from tests.conftest import skip_on_windows
 from tests.semgrep_runner import SEMGREP_BASE_SCAN_COMMAND
+
+from semgrep.util import IS_WINDOWS
 
 pytestmark = pytest.mark.kinda_slow
 
+# This becomes a string that's added to target files in our test repos.
+# Commits append a line similar to 'foo = 23478921' to files of the repo.
+# Searching for this string and counting for the number of occurrences
+# reflects the state of the files that were scanned by semgrep.
+# A typical commit adds a line, increasing the number of semgrep findings.
 SENTINEL_1 = 23478921
 
 
@@ -90,7 +111,12 @@ def _git_merge(ref: str) -> str:
     ).strip()
 
 
-def run_sentinel_scan(check: bool = True, base_commit: Optional[str] = None):
+# Search for the sentinel which was appended to files multiple times over the
+# course of multiple commits.
+def run_sentinel_scan(
+    check: bool = True,
+    base_commit: Optional[str] = None,
+):
     env = {"LANG": "en_US.UTF-8"}
     env["SEMGREP_USER_AGENT_APPEND"] = "testing"
     unique_settings_file = tempfile.NamedTemporaryFile().name
@@ -100,6 +126,9 @@ def run_sentinel_scan(check: bool = True, base_commit: Optional[str] = None):
     )
     env["SEMGREP_SETTINGS_FILE"] = unique_settings_file
     env["PATH"] = os.environ.get("PATH", "")
+    if IS_WINDOWS:
+        env["SYSTEMROOT"] = os.environ.get("SYSTEMROOT", "")
+        env["USERPROFILE"] = os.environ.get("USERPROFILE", "")
 
     cmd = SEMGREP_BASE_SCAN_COMMAND + [
         "--disable-version-check",
@@ -110,10 +139,12 @@ def run_sentinel_scan(check: bool = True, base_commit: Optional[str] = None):
         "-l",
         "python",
     ]
+
     if base_commit:
         cmd.extend(["--baseline-commit", base_commit])
 
     try:
+        print(f"run: {cmd}")
         return subprocess.run(
             cmd,
             capture_output=True,
@@ -146,10 +177,52 @@ def assert_err_match(snapshot, output, snapshot_name, replace_base_commit=None):
         if replace_base_commit
         else output.stderr
     )
+    # Needed here because some Windows tests depend on it (see function
+    # documentation) and general masking is not applied here.
+    err = remove_cert_warnings(err)
     return snapshot.assert_match(textwrap.dedent(err), snapshot_name)
 
 
-def test_one_commit_with_baseline(git_tmp_path, snapshot):
+@pytest.mark.osemfail
+def test_worktree_state_restored(git_tmp_path, posix_snapshot):
+    # Test when head contains all findings and baseline doesnt contain any
+    foo = git_tmp_path / "foo.py"
+    foo.write_text(f"x = 1")
+
+    # Add baseline files
+    subprocess.run(["git", "add", "."], check=True, capture_output=True)
+    _git_commit(1)
+    base_commit = subprocess.check_output(
+        ["git", "rev-parse", "HEAD"], encoding="utf-8"
+    ).strip()
+
+    # Write a finding
+    foo.write_text(f"x = {SENTINEL_1}\n")
+    subprocess.run(["git", "add", "."], check=True, capture_output=True)
+    _git_commit(2)
+
+    # Save the git worktree state to ensure we clean it up
+    # Note: This test has been arbitrarily chosen to check that the
+    # git worktree state is cleaned up
+    worktree_state_before = subprocess.run(
+        ["git", "worktree", "list"], capture_output=True
+    )
+
+    # Run non-baseline scan and sanity check findings
+    output = run_sentinel_scan()
+    assert_out_match(posix_snapshot, output, "output.txt")
+
+    # Run baseline scan
+    run_sentinel_scan(base_commit=base_commit)
+
+    # Check that the git worktree state was not changed by the scans
+    worktree_state_after = subprocess.run(
+        ["git", "worktree", "list"], capture_output=True
+    )
+    assert worktree_state_before.stdout == worktree_state_after.stdout
+
+
+def test_one_commit_with_baseline(git_tmp_path, posix_snapshot):
     foo = git_tmp_path / "foo.py"
     foo.write_text(f"x = {SENTINEL_1}\n")
     bar = git_tmp_path / "bar.py"
@@ -165,21 +238,25 @@ def test_one_commit_with_baseline(git_tmp_path, snapshot):
     _git_commit(2)
     # Non-baseline scan should report findings
     output = run_sentinel_scan()
-    assert_out_match(snapshot, output, "output.txt")
+    assert_out_match(posix_snapshot, output, "output.txt")
     assert (
         output.stdout != ""
     )  # If you fail this assertion means above snapshot was incorrectly changed
-    assert_err_match(snapshot, output, "error.txt")
+    assert_err_match(posix_snapshot, output, "error.txt")
 
     # Baseline scan should report 0 findings
     baseline_output = run_sentinel_scan(base_commit=base_commit)
     assert baseline_output.stdout == ""
     assert_err_match(
-        snapshot, baseline_output, "baseline_error.txt", replace_base_commit=base_commit
+        posix_snapshot,
+        baseline_output,
+        "baseline_error.txt",
+        replace_base_commit=base_commit,
     )
 
 
-def test_symlink(git_tmp_path, snapshot):
+@skip_on_windows  # git_commit different hashes
+def test_symlink(git_tmp_path, posix_snapshot):
     # Test that head having no change to base (git commit --allow-empty)
     # doesnt break semgrep
     foo = git_tmp_path / "foo.py"
@@ -203,21 +280,25 @@ def test_symlink(git_tmp_path, snapshot):
     _git_commit(2)
     # Non-baseline scan should report findings
     output = run_sentinel_scan()
-    assert_out_match(snapshot, output, "output.txt")
+    assert_out_match(posix_snapshot, output, "output.txt")
     assert (
         output.stdout != ""
     )  # If you fail this assertion means above snapshot was incorrectly changed
-    assert_err_match(snapshot, output, "error.txt")
+    assert_err_match(posix_snapshot, output, "error.txt")
 
     # Baseline scan should report 0 findings
     baseline_output = run_sentinel_scan(base_commit=base_commit)
     assert baseline_output.stdout == ""
     assert_err_match(
-        snapshot, baseline_output, "baseline_error.txt", replace_base_commit=base_commit
+        posix_snapshot,
+        baseline_output,
+        "baseline_error.txt",
+        replace_base_commit=base_commit,
     )
 
 
-def test_renamed_dir(git_tmp_path, snapshot):
+@skip_on_windows  # git_commit different hashes
+def test_renamed_dir(git_tmp_path, posix_snapshot):
     dir = git_tmp_path / "dir_old"
     dir.mkdir()
     foo = dir / "foo.py"
@@ -231,20 +312,20 @@ def test_renamed_dir(git_tmp_path, snapshot):
 
     # Non-baseline scan should report findings
     output = run_sentinel_scan()
-    assert_out_match(snapshot, output, "full.out")
+    assert_out_match(posix_snapshot, output, "full.out")
     assert (
         output.stdout != ""
     ), "If you fail this assertion, above snapshot was incorrectly changed"
-    assert_err_match(snapshot, output, "full.err")
+    assert_err_match(posix_snapshot, output, "full.err")
 
     # Diff scan should report no findings due to
     # renamed file detection and diffing logic
     baseline_output = run_sentinel_scan(base_commit="HEAD^")
-    assert_out_match(snapshot, baseline_output, "diff.out")
-    assert_err_match(snapshot, baseline_output, "diff.err")
+    assert_out_match(posix_snapshot, baseline_output, "diff.out")
+    assert_err_match(posix_snapshot, baseline_output, "diff.err")
 
 
-def test_dir_symlink_changed(git_tmp_path, snapshot):
+def test_dir_symlink_changed(git_tmp_path, posix_snapshot):
     dir_one = git_tmp_path / "dir_one"
     dir_two = git_tmp_path / "dir_two"
     dir_one.mkdir()
@@ -264,19 +345,20 @@ def test_dir_symlink_changed(git_tmp_path, snapshot):
 
     # Non-baseline scan should report findings
     output = run_sentinel_scan()
-    assert_out_match(snapshot, output, "full.out")
+    assert_out_match(posix_snapshot, output, "full.out")
     assert (
         output.stdout != ""
     ), "If you fail this assertion, above snapshot was incorrectly changed"
-    assert_err_match(snapshot, output, "full.err")
+    assert_err_match(posix_snapshot, output, "full.err")
 
     # Baseline scan should report no findings
     baseline_output = run_sentinel_scan(base_commit="HEAD^")
-    assert_out_match(snapshot, baseline_output, "diff.out")
-    assert_err_match(snapshot, baseline_output, "diff.err")
+    assert_out_match(posix_snapshot, baseline_output, "diff.out")
+    assert_err_match(posix_snapshot, baseline_output, "diff.err")
 
 
-def test_file_changed_to_dir(git_tmp_path, snapshot):
+@skip_on_windows  # git_commit different hashes
+def test_file_changed_to_dir(git_tmp_path, posix_snapshot):
     file_or_dir_path = git_tmp_path / "file_or_dir.py"
     file_or_dir_path.write_text(f"x = {SENTINEL_1}\n")
     _git_commit(1, add=True)
@@ -292,19 +374,20 @@ def test_file_changed_to_dir(git_tmp_path, snapshot):
 
     # Non-baseline scan should report findings
     output = run_sentinel_scan()
-    assert_out_match(snapshot, output, "full.out")
+    assert_out_match(posix_snapshot, output, "full.out")
     assert (
         output.stdout != ""
     ), "If you fail this assertion, above snapshot was incorrectly changed"
-    assert_err_match(snapshot, output, "full.err")
+    assert_err_match(posix_snapshot, output, "full.err")
 
     # Diff scan should report no findings
     baseline_output = run_sentinel_scan(base_commit="HEAD^")
-    assert_out_match(snapshot, baseline_output, "diff.out")
-    assert_err_match(snapshot, baseline_output, "diff.err")
+    assert_out_match(posix_snapshot, baseline_output, "diff.out")
+    assert_err_match(posix_snapshot, baseline_output, "diff.err")
 
 
-def test_dir_changed_to_file(git_tmp_path, snapshot):
+@skip_on_windows  # git_commit different hashes
+def test_dir_changed_to_file(git_tmp_path, posix_snapshot):
     file_or_dir_path = git_tmp_path / "file_or_dir.py"
     file_or_dir_path.mkdir()
 
@@ -323,19 +406,19 @@ def test_dir_changed_to_file(git_tmp_path, snapshot):
 
     # Non-baseline scan should report findings
     output = run_sentinel_scan()
-    assert_out_match(snapshot, output, "full.out")
+    assert_out_match(posix_snapshot, output, "full.out")
     assert (
         output.stdout != ""
     ), "If you fail this assertion, above snapshot was incorrectly changed"
-    assert_err_match(snapshot, output, "full.err")
+    assert_err_match(posix_snapshot, output, "full.err")
 
     # Diff scan should report no findings
     baseline_output = run_sentinel_scan(base_commit="HEAD^")
-    assert_out_match(snapshot, baseline_output, "diff.out")
-    assert_err_match(snapshot, baseline_output, "diff.err")
+    assert_out_match(posix_snapshot, baseline_output, "diff.out")
+    assert_err_match(posix_snapshot, baseline_output, "diff.err")
 
 
-def test_no_findings_both(git_tmp_path, snapshot):
+def test_no_findings_both(git_tmp_path, posix_snapshot):
     # Test if no findings in head or base semgrep doesnt explode
     foo = git_tmp_path / "foo.py"
     bar = git_tmp_path / "bar.py"
@@ -358,17 +441,22 @@ def test_no_findings_both(git_tmp_path, snapshot):
     # Non-baseline scan should report no findings
     output = run_sentinel_scan()
     assert output.stdout == ""
-    assert_err_match(snapshot, output, "error.txt", replace_base_commit=base_commit)
+    assert_err_match(
+        posix_snapshot, output, "error.txt", replace_base_commit=base_commit
+    )
 
     # Baseline scan should report no findings
     baseline_output = run_sentinel_scan(base_commit=base_commit)
     assert baseline_output.stdout == output.stdout
     assert_err_match(
-        snapshot, baseline_output, "baseline_error.txt", replace_base_commit=base_commit
+        posix_snapshot,
+        baseline_output,
+        "baseline_error.txt",
+        replace_base_commit=base_commit,
     )
 
 
-def test_file_changed_to_symlink(git_tmp_path, snapshot):
+def test_file_changed_to_symlink(git_tmp_path, posix_snapshot):
     file_or_dir_path = git_tmp_path / "file_or_link.py"
     file_or_dir_path.write_text(f"x = {SENTINEL_1}\n")
     _git_commit(1, add=True)
@@ -379,18 +467,19 @@ def test_file_changed_to_symlink(git_tmp_path, snapshot):
 
     # Non-baseline scan should report findings
     output = run_sentinel_scan()
-    assert_out_match(snapshot, output, "full.out")
+    assert_out_match(posix_snapshot, output, "full.out")
     assert (
         output.stdout != ""
     ), "If you fail this assertion, above snapshot was incorrectly changed"
-    assert_err_match(snapshot, output, "full.err")
+    assert_err_match(posix_snapshot, output, "full.err")
 
     baseline_output = run_sentinel_scan(base_commit="HEAD^")
-    assert_out_match(snapshot, baseline_output, "diff.out")
-    assert_err_match(snapshot, baseline_output, "diff.err")
+    assert_out_match(posix_snapshot, baseline_output, "diff.out")
+    assert_err_match(posix_snapshot, baseline_output, "diff.err")
 
 
-def test_symlink_changed_to_file(git_tmp_path, snapshot):
+@skip_on_windows  # git_commit different hashes
+def test_symlink_changed_to_file(git_tmp_path, posix_snapshot):
     file_path = git_tmp_path / "definitely_a_file.py"
     file_path.write_text(f"x = {SENTINEL_1}\n")
     symlink_or_file_path = git_tmp_path / "symlink_or_file.py"
@@ -403,18 +492,18 @@ def test_symlink_changed_to_file(git_tmp_path, snapshot):
 
     # Non-baseline scan should report findings
     output = run_sentinel_scan()
-    assert_out_match(snapshot, output, "full.out")
+    assert_out_match(posix_snapshot, output, "full.out")
     assert (
         output.stdout != ""
     ), "If you fail this assertion, above snapshot was incorrectly changed"
-    assert_err_match(snapshot, output, "full.err")
+    assert_err_match(posix_snapshot, output, "full.err")
 
     baseline_output = run_sentinel_scan(base_commit="HEAD^")
-    assert_out_match(snapshot, baseline_output, "diff.out")
-    assert_err_match(snapshot, baseline_output, "diff.err")
+    assert_out_match(posix_snapshot, baseline_output, "diff.out")
+    assert_err_match(posix_snapshot, baseline_output, "diff.err")
 
 
-def test_no_findings_head(git_tmp_path, snapshot):
+def test_no_findings_head(git_tmp_path, posix_snapshot):
     # Test that no findings in head reports no findings even if
     # findings in baseline
     foo = git_tmp_path / "foo.py"
@@ -440,17 +529,23 @@ def test_no_findings_head(git_tmp_path, snapshot):
     # Non-baseline scan should report no findings
     output = run_sentinel_scan()
     assert output.stdout == ""
-    assert_err_match(snapshot, output, "error.txt", replace_base_commit=base_commit)
+    assert_err_match(
+        posix_snapshot, output, "error.txt", replace_base_commit=base_commit
+    )
 
     # Baseline scan should report no findings
     baseline_output = run_sentinel_scan(base_commit=base_commit)
     assert baseline_output.stdout == output.stdout
     assert_err_match(
-        snapshot, baseline_output, "baseline_error.txt", replace_base_commit=base_commit
+        posix_snapshot,
+        baseline_output,
+        "baseline_error.txt",
+        replace_base_commit=base_commit,
     )
 
 
-def test_no_findings_baseline(git_tmp_path, snapshot):
+@skip_on_windows  # git_commit different hashes
+def test_no_findings_baseline(git_tmp_path, posix_snapshot):
     # Test when head contains all findings and baseline doesnt contain any
     foo = git_tmp_path / "foo.py"
     foo.write_text(f"x = 1")
@@ -471,20 +566,25 @@ def test_no_findings_baseline(git_tmp_path, snapshot):
 
     # Non-baseline scan should report findings
     output = run_sentinel_scan()
-    assert_out_match(snapshot, output, "output.txt")
+    assert_out_match(posix_snapshot, output, "output.txt")
     assert output.stdout != ""
-    assert_err_match(snapshot, output, "error.txt", replace_base_commit=base_commit)
+    assert_err_match(
+        posix_snapshot, output, "error.txt", replace_base_commit=base_commit
+    )
 
     # Baseline scan should report same findings
     baseline_output = run_sentinel_scan(base_commit=base_commit)
-    assert_out_match(snapshot, baseline_output, "baseline_output.txt")
+    assert_out_match(posix_snapshot, baseline_output, "baseline_output.txt")
     assert baseline_output.stdout == output.stdout
     assert_err_match(
-        snapshot, baseline_output, "baseline_error.txt", replace_base_commit=base_commit
+        posix_snapshot,
+        baseline_output,
+        "baseline_error.txt",
+        replace_base_commit=base_commit,
     )
 
 
-def test_some_intersection(git_tmp_path, snapshot):
+def test_some_intersection(git_tmp_path, posix_snapshot):
     # Test when baseline contains some findings of head
     foo = git_tmp_path / "foo.py"
     foo.write_text(f"x = {SENTINEL_1}\n")
@@ -504,20 +604,26 @@ def test_some_intersection(git_tmp_path, snapshot):
 
     # Non-baseline scan should report 2 findings
     output = run_sentinel_scan()
-    assert_out_match(snapshot, output, "output.txt")
+    assert_out_match(posix_snapshot, output, "output.txt")
     assert output.stdout != ""
-    assert_err_match(snapshot, output, "error.txt", replace_base_commit=base_commit)
+    assert_err_match(
+        posix_snapshot, output, "error.txt", replace_base_commit=base_commit
+    )
 
     # Baseline scan should report 1 finding but hide 1
     baseline_output = run_sentinel_scan(base_commit=base_commit)
-    assert_out_match(snapshot, baseline_output, "baseline_output.txt")
+    assert_out_match(posix_snapshot, baseline_output, "baseline_output.txt")
     assert baseline_output.stdout != output.stdout
     assert_err_match(
-        snapshot, baseline_output, "baseline_error.txt", replace_base_commit=base_commit
+        posix_snapshot,
+        baseline_output,
+        "baseline_error.txt",
+        replace_base_commit=base_commit,
     )
 
 
-def test_all_intersect(git_tmp_path, snapshot):
+@skip_on_windows  # git_commit different hashes
+def test_all_intersect(git_tmp_path, posix_snapshot):
     # Test when baseline and head contain same findings none are reported
     foo = git_tmp_path / "foo.py"
     foo.write_text(f"x = {SENTINEL_1}\n")
@@ -538,21 +644,24 @@ def test_all_intersect(git_tmp_path, snapshot):
 
     # Non-baseline scan should report findings
     output = run_sentinel_scan()
-    assert_out_match(snapshot, output, "output.txt")
+    assert_out_match(posix_snapshot, output, "output.txt")
     assert (
         output.stdout != ""
     )  # If you fail this assertion means above snapshot was incorreclty changed
-    assert_err_match(snapshot, output, "error.txt")
+    assert_err_match(posix_snapshot, output, "error.txt")
 
     # Baseline scan should report 0 findings
     baseline_output = run_sentinel_scan(base_commit=base_commit)
     assert baseline_output.stdout == ""
     assert_err_match(
-        snapshot, baseline_output, "baseline_error.txt", replace_base_commit=base_commit
+        posix_snapshot,
+        baseline_output,
+        "baseline_error.txt",
+        replace_base_commit=base_commit,
     )
 
 
-def test_no_intersection(git_tmp_path, snapshot):
+def test_no_intersection(git_tmp_path, posix_snapshot):
     # If no intersection of baseline and head finding should still report head finding
     foo = git_tmp_path / "foo.py"
     foo.write_text(f"x = {SENTINEL_1}")
@@ -573,15 +682,20 @@ def test_no_intersection(git_tmp_path, snapshot):
 
     # Non-baseline scan should report 1 finding
     output = run_sentinel_scan()
-    assert_out_match(snapshot, output, "output.txt")
+    assert_out_match(posix_snapshot, output, "output.txt")
     assert output.stdout != ""
-    assert_err_match(snapshot, output, "error.txt", replace_base_commit=base_commit)
+    assert_err_match(
+        posix_snapshot, output, "error.txt", replace_base_commit=base_commit
+    )
 
     # Baseline scan should report same finding
     baseline_output = run_sentinel_scan(base_commit=base_commit)
     assert baseline_output.stdout == output.stdout
     assert_err_match(
-        snapshot, baseline_output, "baseline_error.txt", replace_base_commit=base_commit
+        posix_snapshot,
+        baseline_output,
+        "baseline_error.txt",
+        replace_base_commit=base_commit,
     )
 
 
@@ -592,7 +706,8 @@ def test_no_intersection(git_tmp_path, snapshot):
         pytest.param("Foo.py", id="case-sensitive"),
     ],
 )
-def test_renamed_file(git_tmp_path, snapshot, new_name):
+@skip_on_windows  # git_commit different hashes
+def test_renamed_file(git_tmp_path, posix_snapshot, new_name):
     old_name = "foo.py"
     old_path = git_tmp_path / old_name
     # write lots of static text so git will recognize the file as renamed
@@ -610,15 +725,20 @@ def test_renamed_file(git_tmp_path, snapshot, new_name):
 
     # Non-baseline scan should report 1 finding
     output = run_sentinel_scan()
-    assert_out_match(snapshot, output, "output.txt")
+    assert_out_match(posix_snapshot, output, "output.txt")
     assert output.stdout != ""
-    assert_err_match(snapshot, output, "error.txt", replace_base_commit=base_commit)
+    assert_err_match(
+        posix_snapshot, output, "error.txt", replace_base_commit=base_commit
+    )
 
     # Diff scan should report no findings
     baseline_output = run_sentinel_scan(base_commit=base_commit)
-    assert_out_match(snapshot, baseline_output, "baseline_output.txt")
+    assert_out_match(posix_snapshot, baseline_output, "baseline_output.txt")
     assert_err_match(
-        snapshot, baseline_output, "baseline_error.txt", replace_base_commit=base_commit
+        posix_snapshot,
+        baseline_output,
+        "baseline_error.txt",
+        replace_base_commit=base_commit,
     )
 
     assert set(git_tmp_path.glob("*.py")) == {
@@ -636,7 +756,7 @@ def test_renamed_file(git_tmp_path, snapshot, new_name):
 #    pass
 
 
-def test_unstaged_changes(git_tmp_path, snapshot):
+def test_unstaged_changes(git_tmp_path, posix_snapshot):
     # Should not abort if have unstaged changes
     foo = git_tmp_path / "foo"
     foo.mkdir()
@@ -651,11 +771,12 @@ def test_unstaged_changes(git_tmp_path, snapshot):
     foo_a.write_text(f"y = {SENTINEL_1}\n")
     output = run_sentinel_scan(base_commit=base_commit, check=False)
     assert output.returncode == 0
-    assert_out_match(snapshot, output, "output.txt")
-    assert_err_match(snapshot, output, "error.txt")
+    assert_out_match(posix_snapshot, output, "output.txt")
+    assert_err_match(posix_snapshot, output, "error.txt")
 
 
-def test_staged_changes(git_tmp_path, snapshot):
+@skip_on_windows  # git_commit different hashes
+def test_staged_changes(git_tmp_path, posix_snapshot):
     # Should report findings in staged changes
 
     # Should not abort if have unstaged changes
@@ -676,8 +797,8 @@ def test_staged_changes(git_tmp_path, snapshot):
 
     output = run_sentinel_scan(base_commit=base_commit, check=False)
     assert output.returncode == 0
-    assert_out_match(snapshot, output, "output.txt")
-    assert_err_match(snapshot, output, "error.txt")
+    assert_out_match(posix_snapshot, output, "output.txt")
+    assert_err_match(posix_snapshot, output, "error.txt")
 
 
 # TODO
@@ -685,7 +806,7 @@ def test_staged_changes(git_tmp_path, snapshot):
 #    pass
 
 
-def test_not_git_directory(monkeypatch, tmp_path, snapshot):
+def test_not_git_directory(monkeypatch, tmp_path, posix_snapshot):
     # Should abort baseline scan if not a git directory
     monkeypatch.chdir(tmp_path)
     foo = tmp_path / "foo"
@@ -701,7 +822,7 @@ def test_not_git_directory(monkeypatch, tmp_path, snapshot):
     # snapshot.assert_match(output.stderr, "error.txt")
 
 
-def test_commit_doesnt_exist(git_tmp_path, snapshot):
+def test_commit_doesnt_exist(git_tmp_path, posix_snapshot):
     # Should abort baseline scan if baseline is not valid commit
     foo = git_tmp_path / "foo"
     foo.mkdir()
@@ -716,8 +837,18 @@ def test_commit_doesnt_exist(git_tmp_path, snapshot):
     # shows different paths to the source code depending on the host.
 
 
+# TODO: please explain:
+# - What's expected from this repo?
+#   (describe the test expectations)
+# - How can I create this repo for testing semgrep commands on it?
+#   1. Run the tests.
+#   2. Visit your local equivalent of /tmp/pytest-of-martin/pytest-1194/
+#      where you'll find the repos that were created for each test.
+# - How do the branches foo, bar, and baz relate to one another? Where
+#   are they on the graph below?
+#
 @pytest.fixture
-def complex_merge_repo(git_tmp_path, snapshot):
+def complex_merge_repo(git_tmp_path):
     r"""
     This generates a complex history like this:
 
@@ -789,15 +920,53 @@ def complex_merge_repo(git_tmp_path, snapshot):
         commits["baz"].append(_git_commit(index, add=True))
 
 
+# Test semgrep scans on the files that changed between a baseline commit
+# and another commit on a repo with a messy merge history.
+# These commits are given names which are branch names "foo", "bar", etc.
+# We run the test using all pairs of such commits.
+#
+# How to troubleshoot:
+# - cd into the test repo left in place by pytest (see above)
+# - Compare the branches using e.g. 'git diff foo...baz' where
+#   'foo' is the baseline commit (or branch name) and 'baz' is the current
+#   commit. The three dots in 'foo...baz' are shortcut for getting the
+#   the merge base (latest common ancestor between the commits) and
+#   the show the diffs between the merge base and 'baz' (current).
+# - You can use 'git grep 23478921' to check how many findings are expected
+#   in the current commit.
+#
+# There is a discrepancy in output for the test
+# 'test_crisscrossing_merges[baz-foo]' between Semgrepignore v1 and v2 due
+# to Git failing to determine a merge base in one implementation but not the
+# other. To reproduce the bug:
+#  1. cd into the test repo (after running the test and visiting the temp
+#     folder created by pytest)
+#  2. git checkout baz
+#  3. Compare the two commands:
+#
+#       $ git diff --cached $(git merge-base foo HEAD)
+#       <output>
+#
+#       $ git diff --cached --merge-base foo
+#       fatal: multiple merge bases found
+#
+#     According to 'git diff --help', the two commands above should be
+#     equivalent but they're not. Pysemgrep (Semgrepignore v1) uses the latter
+#     which fails. The error is caught and the fallback behavior is to use
+#     the baseline commit directly instead of the merge base. Osemgrep
+#     (Semgrepignore v2) uses the former which succeeds, resulting in a
+#     different test output.
+#
 @pytest.mark.parametrize("current, baseline", permutations(["foo", "bar", "baz"], 2))
-def test_crisscrossing_merges(complex_merge_repo, current, baseline, snapshot):
+@skip_on_windows  # git_commit different hashes
+def test_crisscrossing_merges(complex_merge_repo, current, baseline, posix_snapshot):
     subprocess.run(["git", "checkout", current])
     output = run_sentinel_scan(base_commit=baseline)
-    assert_out_match(snapshot, output, f"stdout.txt")
-    assert_err_match(snapshot, output, f"stderr.txt")
+    assert_out_match(posix_snapshot, output, f"stdout.txt")
+    assert_err_match(posix_snapshot, output, f"stderr.txt")
 
 
-def test_conflicting_file_and_main_branch_names(git_tmp_path, snapshot):
+def test_conflicting_file_and_main_branch_names(git_tmp_path, posix_snapshot):
     # Test when a file in the root dir has the same name as the main branch
     main_file = git_tmp_path / "main"
     main_file.write_text("this is a file named 'main'\n")

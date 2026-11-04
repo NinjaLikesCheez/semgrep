@@ -1,451 +1,558 @@
+#
+# Copyright (c) 2024-2025 Semgrep Inc.
+#
+# This library is free software; you can redistribute it and/or
+# modify it under the terms of the GNU Lesser General Public License
+# version 2.1 as published by the Free Software Foundation.
+#
+# This library is distributed in the hope that it will be useful, but
+# WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the file
+# LICENSE for more details.
+#
 import hashlib
-from abc import ABC
-from abc import abstractmethod
 from collections import defaultdict
 from dataclasses import dataclass
-from enum import auto
-from enum import Enum
+from dataclasses import field
 from pathlib import Path
 from typing import Dict
 from typing import Generator
+from typing import Iterable
 from typing import List
 from typing import Optional
-from typing import Sequence
-from typing import Set
 from typing import Tuple
-from typing import TypeVar
 from typing import Union
 
 import semgrep.semgrep_interfaces.semgrep_output_v1 as out
-from semgrep.error import DependencyResolutionError
-from semgrep.semgrep_interfaces.semgrep_output_v1 import DependencyParserError
-from semgrep.semgrep_interfaces.semgrep_output_v1 import Ecosystem
-from semgrep.semgrep_interfaces.semgrep_output_v1 import FoundDependency
+from semgrep.simple_profiling import simple_profiling
+from semgrep.types import Target
 
 
-class ResolutionMethod(Enum):
-    # we parsed a lockfile that was already included in the repository
-    LOCKFILE_PARSING = auto()
+@dataclass(frozen=True)
+class DependencyResolutionConfig:
+    # Allow resolving dependencies by building projects, installing
+    # dependencies, etc. This must be explicitly enabled because it introduces
+    # a security risk since it may cause arbitrary code to be executed.
+    allow_local_builds: bool
 
-    # we communicated with the package manager to resolve dependencies
-    DYNAMIC = auto()
+    # Use resolvers that have been updated to parse dependency paths from
+    # lockfiles and other dependency sources.
+    ptt_enabled: bool
 
-    def to_stats_output(self) -> out.ResolutionMethod:
-        if self == ResolutionMethod.LOCKFILE_PARSING:
-            return out.ResolutionMethod(value=out.LockfileParsing())
-        elif self == ResolutionMethod.DYNAMIC:
-            return out.ResolutionMethod(value=out.DynamicResolution())
+    # If true, resolve all found subprojects, even if they are not explicitly
+    # targeted. This is used because one customer requires that all subprojects
+    # are resolved even for diff scans.
+    resolve_untargeted_subprojects: bool
+
+    # download source code for each subproject's dependencies.
+    download_dependency_source_code: bool
+
+    # Report Gradle dependencies separately for each module build file.
+    gradle_module_attribution: bool = False
+
+    # Use only the experimental ocaml parsers. This may
+    # produce different results from the python parsers. Note that ocaml parsers
+    # may be used even when False when necessary for feature support or when
+    # they have been validated.
+    use_experimental_ocaml_parsers: bool = False
+
+    # Extra environment variables to pass to package manager subprocesses.
+    # Parsed from SEMGREP_LOCAL_BUILD_ENV JSON object.
+    local_build_env: Dict[str, str] = field(default_factory=dict)
+
+    # directory containing precomputed dependencies for subprojects
+    # in CycloneDX SBOM JSON format.
+    precomputed_dependencies_dir: Path | None = None
+
+    # Note: is_baseline_scan is scan-phase state rather than resolution config,
+    # but it's here because attach_auxillary_sboms needs it when selecting
+    # the head/ vs base/ SBOM directory during resolution.
+    is_baseline_scan: bool = False
+
+    # If true, resolve only the subprojects whose ecosystem is evaluated by at
+    # least one of the rules being run, and skip the rest. Set for partial scans
+    # (see --x-partial-scan-rule-id), which run a restricted set of rules and so
+    # cannot produce a finding for any other ecosystem.
+    restrict_resolution_to_rule_ecosystems: bool = False
+
+
+# A classification of subprojects we use to deterine support for various features.
+# Not a perfect classification (doesn't handle multi-lockfile sources), but works
+# well enough for current purposes.
+SubprojectKind = Union[
+    Tuple[out.ManifestKind, None],
+    Tuple[None, out.LockfileKind],
+    Tuple[out.ManifestKind, out.LockfileKind],
+]
+
+
+def from_resolved_dependencies(
+    deps: List[out.ResolvedDependency],
+) -> Dict[out.DependencyChild, List[out.ResolvedDependency]]:
+    mapping: Dict[out.DependencyChild, List[out.ResolvedDependency]] = {}
+    for x in deps:
+        (dep, downloaded_dep) = x.value
+        k = out.DependencyChild(dep.package, dep.version)
+        if k not in mapping:
+            mapping[k] = []
+        mapping[k].append(out.ResolvedDependency((dep, downloaded_dep)))
+    return mapping
+
+
+def iter_dependencies(
+    d: Dict[out.DependencyChild, List[out.ResolvedDependency]],
+) -> Generator[out.ResolvedDependency, None, None]:
+    for dep_group in d.values():
+        for dep in dep_group:
+            yield dep
+
+
+def iter_found_dependencies(
+    d: Dict[out.DependencyChild, List[out.ResolvedDependency]],
+) -> Generator[out.FoundDependency, None, None]:
+    for x in iter_dependencies(d):
+        (found_dep, _) = x.value
+        yield found_dep
+
+
+def count_resolved_dependencies(
+    d: Dict[out.DependencyChild, List[out.ResolvedDependency]],
+) -> int:
+    """
+    Count the number of dependencies
+    """
+    return sum(1 for _ in iter_dependencies(d))
+
+
+def make_dependencies_by_source_path(
+    d: Dict[out.DependencyChild, List[out.ResolvedDependency]],
+) -> Tuple[Dict[str, List[out.FoundDependency]], List[out.FoundDependency]]:
+    """
+    Returns a mapping of lockfile paths to dependencies found in that lockfile.
+
+    Also returns a list of FoundDependencies that did not have a lockfile
+    available.
+    """
+    lockfile_to_deps: Dict[str, List[out.FoundDependency]] = defaultdict(list)
+    unknown_lockfile: List[out.FoundDependency] = []
+
+    for dep in iter_found_dependencies(d):
+        if dep.lockfile_path is not None:
+            lockfile_to_deps[str(dep.lockfile_path.value)].append(dep)
         else:
-            raise ValueError(f"Unsupported resolution method: {self}")
+            unknown_lockfile.append(dep)
+
+    return dict(lockfile_to_deps), unknown_lockfile
 
 
-class DependencySource(ABC):
-    @abstractmethod
-    def get_display_paths(self) -> List[Path]:
-        return []
+def get_display_paths(dep: out.DependencySource) -> List[Path]:
+    ds = dep.value
+    if isinstance(ds, out.ManifestOnly):
+        return [Path(ds.value.path.value)]
+    elif isinstance(ds, out.LockfileOnly):
+        return [Path(ds.value.path.value)]
+    elif isinstance(ds, out.ManifestLockfile):
+        # Original implementation shows only the lockfile's display path.
+        return [Path(ds.value[1].path.value)]
+    elif isinstance(ds, out.MultiLockfile):
+        # ds.sources is a list of lockfile_dependency_source variants.
+        return [path for src in ds.value for path in get_display_paths(src)]
+    elif isinstance(ds, out.AuxillarySBOM):
+        # we only include permanent SBOMs here, not ephemeral ones
+        sbom, rest = ds.value
+        return (
+            [Path(sbom.path.value)] if not sbom.is_ephemeral else []
+        ) + get_display_paths(rest)
+    else:
+        raise TypeError(f"Unexpected dependency_source variant: {type(ds)}")
 
-    @abstractmethod
-    def to_stats_output(self) -> List[out.DependencySourceFile]:
-        pass
 
-    @abstractmethod
-    def get_all_source_files(self) -> List[Path]:
-        pass
+def get_all_source_files(dep: out.DependencySource) -> List[Path]:
+    ds = dep.value
+    if isinstance(ds, out.ManifestOnly):
+        return [Path(ds.value.path.value)]
+    elif isinstance(ds, out.LockfileOnly):
+        return [Path(ds.value.path.value)]
+    elif isinstance(ds, out.ManifestLockfile):
+        return [Path(ds.value[0].path.value), Path(ds.value[1].path.value)]
+    elif isinstance(ds, out.MultiLockfile):
+        return [path for src in ds.value for path in get_all_source_files(src)]
+    elif isinstance(ds, out.AuxillarySBOM):
+        return [Path(ds.value[0].path.value)] + get_all_source_files(ds.value[1])
+    else:
+        raise TypeError(f"Unexpected dependency_source variant: {type(ds)}")
 
 
-@dataclass(frozen=True)
-class ManifestOnlyDependencySource(DependencySource):
-    manifest: out.Manifest
-
-    def get_display_paths(self) -> List[Path]:
-        return [Path(self.manifest.path.value)]
-
-    def to_semgrep_output(self) -> out.DependencySource:
-        return out.DependencySource(out.ManifestOnlyDependencySource(self.manifest))
-
-    def to_stats_output(self) -> List[out.DependencySourceFile]:
+def to_stats_output(dep: out.DependencySource) -> List[out.DependencySourceFile]:
+    ds = dep.value
+    if isinstance(ds, out.ManifestOnly):
+        manifest = ds.value
         return [
             out.DependencySourceFile(
-                kind=out.DependencySourceFileKind(
-                    value=out.Manifest_(value=self.manifest.kind)
-                ),
-                path=self.manifest.path,
+                kind=out.DependencySourceFileKind(out.Manifest_(manifest.kind)),
+                path=manifest.path,
             )
         ]
-
-    def get_all_source_files(self) -> List[Path]:
-        return [Path(self.manifest.path.value)]
-
-
-@dataclass(frozen=True)
-class LockfileOnlyDependencySource(DependencySource):
-    lockfile: out.Lockfile
-
-    def get_display_paths(self) -> List[Path]:
-        return [Path(self.lockfile.path.value)]
-
-    def to_semgrep_output(self) -> out.DependencySource:
-        return out.DependencySource(out.LockfileOnlyDependencySource(self.lockfile))
-
-    def to_stats_output(self) -> List[out.DependencySourceFile]:
+    elif isinstance(ds, out.LockfileOnly):
+        lockfile = ds.value
         return [
             out.DependencySourceFile(
-                kind=out.DependencySourceFileKind(
-                    value=out.Lockfile_(value=self.lockfile.kind)
-                ),
-                path=self.lockfile.path,
+                kind=out.DependencySourceFileKind(out.Lockfile_(lockfile.kind)),
+                path=lockfile.path,
             )
         ]
-
-    def get_all_source_files(self) -> List[Path]:
-        return [Path(self.lockfile.path.value)]
-
-
-@dataclass(frozen=True)
-class ManifestLockfileDependencySource(DependencySource):
-    manifest: out.Manifest
-    lockfile: out.Lockfile
-
-    def get_display_paths(self) -> List[Path]:
-        return [Path(self.lockfile.path.value)]
-
-    def to_semgrep_output(self) -> out.DependencySource:
-        return out.DependencySource(
-            out.ManifestLockfileDependencySource((self.manifest, self.lockfile))
-        )
-
-    def to_stats_output(self) -> List[out.DependencySourceFile]:
+    elif isinstance(ds, out.ManifestLockfile):
         lockfile_entry = out.DependencySourceFile(
             kind=out.DependencySourceFileKind(
-                value=out.Lockfile_(value=self.lockfile.kind)
+                value=out.Lockfile_(value=ds.value[1].kind)
             ),
-            path=self.lockfile.path,
+            path=ds.value[1].path,
         )
-
         manifest_entry = out.DependencySourceFile(
             kind=out.DependencySourceFileKind(
-                value=out.Manifest_(value=self.manifest.kind)
+                value=out.Manifest_(value=ds.value[0].kind)
             ),
-            path=self.manifest.path,
+            path=ds.value[0].path,
         )
-
         return [lockfile_entry, manifest_entry]
+    elif isinstance(ds, out.AuxillarySBOM):
+        # we just refer to the underlying subproject for this
+        # ensure no more recursion
+        assert not isinstance(ds.value[1].value, out.AuxillarySBOM)
+        return to_stats_output(ds.value[1])
+    elif isinstance(ds, out.MultiLockfile):
+        return [item for src in ds.value for item in to_stats_output(src)]
+    else:
+        raise TypeError(f"Unexpected dependency_source variant: {type(ds)}")
 
-    def get_all_source_files(self) -> List[Path]:
-        return [Path(self.manifest.path.value), Path(self.lockfile.path.value)]
+
+def generate_dependency_source_id(ds: out.DependencySource) -> str:
+    """
+    Generate an opaque string ID for the given dependency source.
+
+    Ephemeral files are not considered when computing the ID. That is,
+    the ID for a dependency source with or without an ephemeral SBOM
+    will be the same.
+    """
+    # get_display_paths skips ephemeral sboms, so we don't need special handling here
+    normalized_paths = sorted(str(path).strip() for path in get_display_paths(ds))
+    return hashlib.sha256("".join(normalized_paths).encode("utf-8")).hexdigest()
 
 
-@dataclass(frozen=True)
-class MultiLockfileDependencySource(DependencySource):
-    # note: we use a tuple instead of a list here to allow hashing the whole type
-    sources: Tuple[
-        Union[LockfileOnlyDependencySource, ManifestLockfileDependencySource], ...
+def _unresolved_subproject_to_stats(
+    sub: out.UnresolvedSubproject,
+) -> out.SubprojectStats:
+    """Convert an unresolved subproject to subproject stats."""
+    return out.SubprojectStats(
+        subproject_id=generate_dependency_source_id(sub.info.dependency_source),
+        dependency_sources=to_stats_output(sub.info.dependency_source),
+        resolved_stats=None,
+        unresolved_reason=sub.reason,
+        errors=sub.errors,
+    )
+
+
+def _resolved_subproject_to_stats(sub: out.ResolvedSubproject) -> out.SubprojectStats:
+    """Convert a resolved subproject to subproject stats."""
+    return out.SubprojectStats(
+        subproject_id=generate_dependency_source_id(sub.info.dependency_source),
+        dependency_sources=to_stats_output(sub.info.dependency_source),
+        resolved_stats=out.DependencyResolutionStats(
+            ecosystem=sub.ecosystem,
+            resolution_method=sub.resolution_method,
+            dependency_count=count_resolved_dependencies(sub.resolved_dependencies),
+        ),
+        unresolved_reason=None,
+        errors=sub.errors,
+    )
+
+
+def subproject_to_stats(
+    sub: Union[out.ResolvedSubproject, out.UnresolvedSubproject],
+) -> out.SubprojectStats:
+    """Convert a subproject to subproject stats."""
+    if isinstance(sub, out.UnresolvedSubproject):
+        return _unresolved_subproject_to_stats(sub)
+    elif isinstance(sub, out.ResolvedSubproject):
+        return _resolved_subproject_to_stats(sub)
+    else:
+        raise ValueError(f"Unexpected subproject type: {type(sub)}")
+
+
+def collect_skipped_subprojects(
+    subprojects: Iterable[Union[out.ResolvedSubproject, out.UnresolvedSubproject]],
+) -> List[out.SkippedSubproject]:
+    """
+    Select the subprojects that were deliberately left unresolved and describe
+    them for the app.
+
+    Only subprojects with the `skipped` unresolved reason are included: the app
+    uses this list to know which dependencies are missing from the reported set
+    by design (so it must not treat them as removed), which does not apply to
+    subprojects whose resolution was attempted and failed, or whose ecosystem we
+    do not support at all.
+    """
+    return [
+        out.SkippedSubproject(
+            root_dir=sub.info.root_dir,
+            dependency_sources=to_stats_output(sub.info.dependency_source),
+        )
+        for sub in subprojects
+        if isinstance(sub, out.UnresolvedSubproject)
+        and isinstance(sub.reason.value, out.UnresolvedSkipped)
     ]
 
-    def get_display_paths(self) -> List[Path]:
-        # aggregate all display paths for each of the child sources
-        return [path for source in self.sources for path in source.get_display_paths()]
 
-    def to_stats_output(self) -> List[out.DependencySourceFile]:
-        return [item for source in self.sources for item in source.to_stats_output()]
+# Resolution errors produced by the resolvers that run a package manager (or
+# that cannot run one, e.g. `MissingRequirement`). A subproject that was
+# resolved but carries one of these is known to have an incomplete dependency
+# list (e.g. a registry refused a request, or the package manager itself
+# reported unresolved dependencies). `ParseDependenciesFailed` is not included
+# because lockfile parsers report it too.
+_BUILD_SIDE_RESOLUTION_ERRORS = (
+    out.ResolutionCmdFailed_,
+    out.MissingRequirement,
+    out.ResourceInaccessible_,
+    out.IncompleteDependencyResolution_,
+)
 
-    def get_all_source_files(self) -> List[Path]:
-        return [
-            source_file
-            for source in self.sources
-            for source_file in source.get_all_source_files()
-        ]
-
-
-@dataclass(frozen=True)
-class ResolvedDependencies:
-    # we use this mapping to efficiently find child dependencies from a FoundDependency
-    # We need to store multiple FoundDependencies per package/version pair because a package
-    # might come from multiple places in a lockfile
-    _dependencies_by_package_version_pair: Dict[
-        out.DependencyChild, List[FoundDependency]
-    ]
-
-    @classmethod
-    def from_resolved_interfaces(
-        cls, resolved: out.ResolutionOk
-    ) -> "ResolvedDependencies":
-        return cls.from_found_dependencies(resolved.value[0])
-
-    @classmethod
-    def from_found_dependencies(
-        cls, found_deps: List[FoundDependency]
-    ) -> "ResolvedDependencies":
-        mapping: Dict[out.DependencyChild, List[FoundDependency]] = {}
-        for dep in found_deps:
-            k = out.DependencyChild(dep.package, dep.version)
-            if k not in mapping:
-                mapping[k] = []
-            mapping[k].append(dep)
-        return cls(mapping)
-
-    def iter_found_dependencies(self) -> Generator[FoundDependency, None, None]:
-        for dep_group in self._dependencies_by_package_version_pair.values():
-            for dep in dep_group:
-                yield dep
-
-    def make_dependencies_by_source_path(
-        self,
-    ) -> Tuple[Dict[str, List[FoundDependency]], List[FoundDependency]]:
-        """
-        Returns a mapping of lockfile paths to dependencies found in that lockfile.
-
-        Also returns a list of FoundDependencies that did not have a lockfile available.
-        """
-        lockfile_to_deps: Dict[str, List[FoundDependency]] = defaultdict(list)
-        unknown_lockfile: List[FoundDependency] = []
-
-        for dep in self.iter_found_dependencies():
-            if dep.lockfile_path is not None:
-                lockfile_to_deps[str(dep.lockfile_path.value)].append(dep)
-            else:
-                unknown_lockfile.append(dep)
-
-        return dict(lockfile_to_deps), unknown_lockfile
-
-    def pretty_print(self) -> None:
-        """
-        Print the dependency graph with nice indentation. This is
-        only for debugging purposes.
-        """
-
-        def pretty_print_dependency(
-            dep: FoundDependency,
-            indent: int = 0,
-            already_printed: Optional[Set[out.DependencyChild]] = None,
-        ) -> Set[out.DependencyChild]:
-            """
-            Returns package, version pairs of the dependencies that were printed
-            """
-            if already_printed is None:
-                already_printed = set()
-
-            print(f"{' '*indent*2}- {dep.package}@{dep.version}")
-
-            # if we already printed this dependency once, don't print its children again.
-            # depends on mutation of already_printed in child calls to avoid re-printing
-            if out.DependencyChild(dep.package, dep.version) in already_printed:
-                print(f"{' '*2*(indent + 1)} (already printed)")
-                return already_printed
-            already_printed.add(out.DependencyChild(dep.package, dep.version))
-
-            if dep.children is not None:
-                for child in dep.children:
-                    # always take the first child dependencies - we don't care to disambiguate
-                    # between deps that have the same package and version
-                    child_dep = self._dependencies_by_package_version_pair[child][0]
-                    already_printed |= pretty_print_dependency(
-                        child_dep, indent + 2, already_printed
-                    )
-
-            return already_printed
-
-        print("Direct dependencies (plus children if available)")
-        directs = [
-            dep
-            for dep in self.iter_found_dependencies()
-            if dep.transitivity == out.Transitivity(out.Direct())
-        ]
-        printed_in_graph: set[out.DependencyChild] = set()
-        for direct in directs:
-            printed_in_graph |= pretty_print_dependency(direct)
-
-        # print any remaining transitives/unknowns that were not already printed
-        transitives = [
-            dep
-            for package_version_pair, dep_group in self._dependencies_by_package_version_pair.items()
-            for dep in dep_group
-            if dep.transitivity == out.Transitivity(out.Transitive())
-            and package_version_pair not in printed_in_graph
-        ]
-        unknown = [
-            dep
-            for package_version_pair, dep_group in self._dependencies_by_package_version_pair.items()
-            for dep in dep_group
-            if dep.transitivity == out.Transitivity(out.Unknown())
-            and package_version_pair not in printed_in_graph
-        ]
-        print("other transitives:")
-        for dependency in transitives:
-            print(f"- {dependency.package}@{dependency.version}")
-        print("other unknown transitivity:")
-        for dependency in unknown:
-            print(f"- {dependency.package}@{dependency.version}")
-
-    def count(self) -> int:
-        """
-        Count the number of dependencies
-        """
-        return sum(1 for _ in self.iter_found_dependencies())
+_RESOLUTION_ERROR_LABELS = {
+    out.UnsupportedManifest: "Unsupported Manifest",
+    out.MissingRequirement: "Missing Requirement",
+    out.ResolutionCmdFailed_: "Resolution Command Failed",
+    out.ParseDependenciesFailed: "Parsing Dependencies Failed",
+    out.ScaParseError: "Lockfile Parse Error",
+    out.IncompleteDependencyResolution_: "Incomplete Dependency Resolution",
+    out.ResourceInaccessible_: "Resource Inaccessible",
+}
 
 
 @dataclass(frozen=True)
-class Subproject:
+class ResolutionFailure:
+    """A subproject whose dependency resolution failed, or came back known to
+    be incomplete. See `find_resolution_failures`."""
+
+    dependency_sources: Tuple[Path, ...]
+    # Human-readable error kinds, in the order reported. Empty if resolution
+    # failed without reporting any error.
+    reasons: Tuple[str, ...]
+
+    def describe(self) -> str:
+        sources = ", ".join(str(p) for p in self.dependency_sources)
+        reasons = ", ".join(self.reasons) or "no error details were reported"
+        return f"{sources or '(unknown dependency source)'}: {reasons}"
+
+
+def _resolution_error_kind(error: out.ScaError) -> Optional[object]:
+    """The resolution error variant, or None for lockfile parser errors."""
+    if isinstance(error.value, out.SCAResol):
+        return error.value.value.type_.value
+    return None
+
+
+def _resolution_error_label(error: out.ScaError) -> str:
+    kind = _resolution_error_kind(error)
+    if kind is None:
+        return "Lockfile Parse Error"
+    return _RESOLUTION_ERROR_LABELS.get(type(kind), type(kind).__name__.rstrip("_"))
+
+
+def find_resolution_failures(
+    subprojects: Iterable[Union[out.ResolvedSubproject, out.UnresolvedSubproject]],
+) -> List[ResolutionFailure]:
     """
-    A subproject, defined by some kind of manifest file (e.g. pyproject.toml, package.json, ...).
-    This may be at the root of the repo being scanned or may be some other folder.
+    Select the subprojects whose dependency resolution was attempted and
+    either failed or is known to be incomplete.
 
-    Used as the unit of analysis for supply chain.
+    - An unresolved subproject counts if its reason is `failed`, even if no
+      error was reported (e.g. the RPC to the resolver crashed), unless every
+      reported error is `UnsupportedManifest`: that is a limitation of Semgrep,
+      not something the user can fix.
+    - A resolved subproject counts if it carries a build-side error (see
+      `_BUILD_SIDE_RESOLUTION_ERRORS`). Lockfile parse errors on a resolved
+      subproject (some dependencies were found) do not count.
+    - Subprojects that were never attempted (`skipped`, `unsupported`,
+      `disabled`) never count.
     """
-
-    # the root of the subproject
-    root_dir: Path
-
-    # the dependency source is how we resolved the dependencies. This might be a lockfile/manifest pair (the only current one),
-    # but in the future it might also be dynamic resolution based on a manifest, an SBOM, or something else
-    dependency_source: DependencySource
-
-    # the ecosystem that the subproject belongs to. This is used to match code files with subprojects. It is necessary to have it
-    # here, even before a subproject's dependencies are resolved, in order to decide whether
-    # a certain subproject must be resolved given the changes included in a certain diff scan.
-    # ecosystem can be None if this subproject is for a package manager whose ecosystem is not yet supported (i.e. one that is identified
-    # only for tracking purposes)
-    ecosystem: Optional[Ecosystem]
-
-    def to_stats_output(self) -> out.SubprojectStats:
-        # subproject id is a hash based on the dependency field paths
-        normalized_paths = sorted(
-            str(path).strip() for path in self.dependency_source.get_display_paths()
+    failures: List[ResolutionFailure] = []
+    for sub in subprojects:
+        if isinstance(sub, out.UnresolvedSubproject):
+            if not isinstance(sub.reason.value, out.UnresolvedFailed):
+                continue
+            kinds = [_resolution_error_kind(e) for e in sub.errors]
+            if kinds and all(isinstance(k, out.UnsupportedManifest) for k in kinds):
+                continue
+            reported = sub.errors
+        else:
+            reported = [
+                e
+                for e in sub.errors
+                if isinstance(_resolution_error_kind(e), _BUILD_SIDE_RESOLUTION_ERRORS)
+            ]
+            if not reported:
+                continue
+        failures.append(
+            ResolutionFailure(
+                dependency_sources=tuple(get_display_paths(sub.info.dependency_source)),
+                reasons=tuple(
+                    dict.fromkeys(_resolution_error_label(e) for e in reported)
+                ),
+            )
         )
-        subproject_id = hashlib.sha256(
-            "".join(normalized_paths).encode("utf-8")
-        ).hexdigest()
-
-        return out.SubprojectStats(
-            subproject_id=subproject_id,
-            dependency_sources=self.dependency_source.to_stats_output(),
-            resolved_stats=None,
-        )
+    return failures
 
 
-class UnresolvedReason(Enum):
-    FAILED = "failed"
-    SKIPPED = "skipped"
-    UNSUPPORTED = "unsupported"
-
-
-@dataclass(frozen=True)
-class UnresolvedSubproject(Subproject):
-    """
-    A subproject for which resolution was attempted but did not succeed.
-    """
-
-    unresolved_reason: UnresolvedReason
-    resolution_errors: List[Union[DependencyResolutionError, DependencyParserError]]
-
-    @classmethod
-    def from_subproject(
-        cls,
-        base: Subproject,
-        unresolved_reason: UnresolvedReason,
-        resolution_errors: Sequence[
-            Union[DependencyParserError, DependencyResolutionError]
+def subproject_to_cli_output_info(
+    sub: Union[out.ResolvedSubproject, out.UnresolvedSubproject],
+) -> out.CliOutputSubprojectInfo:
+    """Convert a subproject to cli output subproject info."""
+    stats = subproject_to_stats(sub)
+    return out.CliOutputSubprojectInfo(
+        dependency_sources=[
+            out.Fpath(str(path))
+            for path in get_display_paths(sub.info.dependency_source)
         ],
-    ) -> "UnresolvedSubproject":
-        return cls(
-            root_dir=base.root_dir,
-            dependency_source=base.dependency_source,
-            ecosystem=base.ecosystem,
-            resolution_errors=list(resolution_errors),
-            unresolved_reason=unresolved_reason,
-        )
+        resolved=isinstance(sub, out.ResolvedSubproject),
+        resolved_stats=stats.resolved_stats,
+        unresolved_reason=stats.unresolved_reason,
+    )
 
 
-@dataclass(frozen=True)
-class ResolvedSubproject(Subproject):
-    """
-    A subproject plus its resolved set of dependencies.
-    """
+def subproject_to_plan_output(
+    sub: out.Subproject, resolution_planned: bool
+) -> out.SingleSubprojectPlan:
+    return out.SingleSubprojectPlan(
+        root_dir=sub.root_dir,
+        subproject_id=generate_dependency_source_id(sub.dependency_source),
+        resolution_planned=resolution_planned,
+    )
 
-    ecosystem: Ecosystem
 
-    resolution_errors: List[Union[DependencyParserError, DependencyResolutionError]]
-
-    # the resolution method is how we determined the dependencies from the dependency source. This might be
-    # lockfile parsing, dependency resolution, SBOM ingest, or something else.
-    resolution_method: ResolutionMethod
-
-    # the dependencies that were found
-    found_dependencies: ResolvedDependencies
-
-    @classmethod
-    def from_unresolved(
-        cls,
-        unresolved: Subproject,
-        resolution_method: ResolutionMethod,
-        resolution_errors: Sequence[
-            Union[DependencyParserError, DependencyResolutionError]
-        ],
-        found_dependencies: List[FoundDependency],
-        ecosystem: Ecosystem,
-    ) -> "ResolvedSubproject":
+class ClosestSubprojectFinder:
+    def __init__(self, subprojects: List[out.Subproject]):
         """
-        Note that the ecosystem of the resolved subproject is passed separately. We could read it from the
-        unresolved subproject, but by having it separately we can expose the fact that ecosystem must not
-        be None in the type signature rather than relying on a runtime check.
+        Build an instance of ClosestSubprojectFinder, which includes some precomputation
+        to allow calling find_closest_subproject many times without excessive work.
         """
-        return cls(
-            root_dir=unresolved.root_dir,
-            dependency_source=unresolved.dependency_source,
-            ecosystem=ecosystem,
-            resolution_errors=list(resolution_errors),
-            found_dependencies=ResolvedDependencies.from_found_dependencies(
-                found_dependencies
-            ),
-            resolution_method=resolution_method,
-        )
+        # holds (subproject, root_dir Path) pairs to avoid unnecessary work
+        # in find_closest_subproject
+        self.subproject_index: dict[
+            out.Ecosystem | None, list[tuple[out.Subproject, Path]]
+        ] = defaultdict(list)
+        for subproject in subprojects:
+            self.subproject_index[subproject.ecosystem].append(
+                (subproject, Path(subproject.root_dir.value))
+            )
+        for ecosystem in self.subproject_index:
+            # sort each ecosystem's subprojects in order of decreasing root_dir length
+            self.subproject_index[ecosystem].sort(
+                key=lambda x: len(x[1].parts), reverse=True
+            )
 
-    def to_stats_output(self) -> out.SubprojectStats:
-        base_stats = super().to_stats_output()
+    @simple_profiling
+    def find_closest_subproject(
+        self, path: Target, ecosystem: out.Ecosystem
+    ) -> Optional[out.Subproject]:
+        """
+        Attempt to find the best SCA project for the given match by looking at the
+        parent path of the match and comparing it to the root directories of the
+        provided candidates. The best subproject is the one that matches the given
+        `ecosystem` and whose root directory is the longest prefix of the given
+        `path`.
 
-        return out.SubprojectStats(
-            subproject_id=base_stats.subproject_id,
-            dependency_sources=base_stats.dependency_sources,
-            resolved_stats=out.DependencyResolutionStats(
-                ecosystem=self.ecosystem,
-                resolution_method=self.resolution_method.to_stats_output(),
-                dependency_count=self.found_dependencies.count(),
-            ),
-        )
+        Note that this function finds the closest subproject, which is likely to be
+        but not necessarily the relevant subproject. Many package managers will
+        allow a subproject to be associated with a code file in an arbitrary
+        location; potentially entirely outside the subproject's root directory.
+        We cannot handle that case without extensive per-package-manager logic, so
+        we assume that each code file is associated with the closest subproject up
+        the directory tree
+
+        Args:
+            path (Target): The path to search for the closest subproject.
+            ecosystem (Ecosystem): The ecosystem to consider subprojects for
+        """
+        sorted_candidates = self.subproject_index[ecosystem]
+
+        path_parents = set([path, *path.fpath.parents])
+        for candidate, candidate_root_path in sorted_candidates:
+            # we iterate in order of decreasing specificity, so the first match is the closest
+            if candidate_root_path in path_parents:
+                return candidate
+
+        return None
 
 
-S = TypeVar("S", bound=Subproject)
-
-
-def find_closest_subproject(
-    path: Path, ecosystem: Ecosystem, candidates: List[S]
-) -> Optional[S]:
-    """
-    Attempt to find the best SCA project for the given match by looking at the parent path of the match
-    and comparing it to the root directories of the provided candidates. The best subproject is
-    the one that matches the given `ecosystem` and whose root directory is the longest prefix of
-    the given `path`.
-
-    Note that this function finds the closest subproject, which is likely to be but not necessarily the
-    relevant subproject. Many package managers will allow a subproject to be associated with
-    a code file in an arbitrary location; potentially entirely outside the subproject's root directory.
-    We cannot handle that case without extensive per-package-manager logic, so we assume that each code file
-    is associated with the closest subproject up the directory tree
-
-    Args:
-        path (Path): The path to search for the closest subproject.
-        ecosystem (Ecosystem): The ecosystem to consider subprojects for
-        candidates (List[Subproject]): List of candidate subprojects.
-    """
-    # We order the candidates by root directory length so that we prefer
-    # more specific subprojects over more general ones.
+def find_closest_resolved_subproject(
+    path: Path, ecosystem: out.Ecosystem, candidates: List[out.ResolvedSubproject]
+) -> Optional[out.ResolvedSubproject]:
+    """ """
     sorted_candidates = sorted(
-        candidates, key=lambda x: len(x.root_dir.parts), reverse=True
+        candidates, key=lambda x: len(Path(x.info.root_dir.value).parts), reverse=True
     )
 
     for candidate in sorted_candidates:
         for parent in [path, *path.parents]:
-            if candidate.root_dir == parent and candidate.ecosystem == ecosystem:
+            if (
+                Path(candidate.info.root_dir.value) == parent
+                and candidate.ecosystem == ecosystem
+            ):
                 return candidate
 
     return None
+
+
+def subproject_sort_key(
+    subproject: Union[out.ResolvedSubproject, out.UnresolvedSubproject],
+) -> Tuple[Tuple[int, int], str]:
+    """
+    Used to sort subprojects in the table.
+    """
+
+    # We want descending order for dependency counts.
+    # ResolvedSubprojects should come before UnresolvedSubprojects.
+    # So, (0, -count) for resolved, (1, 0) for unresolved.
+    if isinstance(subproject, out.ResolvedSubproject):
+        dep_count = count_resolved_dependencies(subproject.resolved_dependencies)
+        # primary_dep_key: 0 to sort these before unresolved
+        # secondary_dep_key: -dep_count for descending numeric sort
+        dependency_sort_tuple = (0, -dep_count)
+    else:
+        # primary_dep_key: 1 to sort these after resolved
+        # secondary_dep_key: 0 (doesn't matter as much)
+        dependency_sort_tuple = (1, 0)
+
+    # Ascending order for display paths.
+    paths = get_display_paths(subproject.info.dependency_source)
+    path_key_str = ", ".join(sorted(str(p).lower() for p in paths))
+
+    return (dependency_sort_tuple, path_key_str)
+
+
+def dep_source_to_subproject_kind(dep_source: out.DependencySource) -> SubprojectKind:
+    """
+    Determine the "kind" of subproject based on the dependency source.
+    """
+    ds = dep_source.value
+    if isinstance(ds, out.ManifestOnly):
+        return (ds.value.kind, None)
+    elif isinstance(ds, out.LockfileOnly):
+        return (None, ds.value.kind)
+    elif isinstance(ds, out.ManifestLockfile):
+        return (ds.value[0].kind, ds.value[1].kind)
+    elif isinstance(ds, out.AuxillarySBOM):
+        # we just refer to the underlying subproject for this
+        # ensure no more recursion
+        assert not isinstance(ds.value[1].value, out.AuxillarySBOM)
+        return dep_source_to_subproject_kind(ds.value[1])
+    elif isinstance(ds, out.MultiLockfile):
+        # the SubprojectKind type doesn't really capture all the details
+        # of multi-lockfile sources. We just take the first source in the list,
+        # which should capture the kind of all of them.
+        if len(ds.value) == 0:
+            raise ValueError("MultiLockfile with no sources not allowed")
+        first_dep_source = ds.value[0]
+        if isinstance(first_dep_source, out.MultiLockfile):
+            raise ValueError("MultiLockfile inside MultiLockfile not allowed")
+        return dep_source_to_subproject_kind(first_dep_source)
+    raise ValueError(f"Unexpected dependency_source variant: {type(ds)}")

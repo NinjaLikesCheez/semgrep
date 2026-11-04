@@ -1,3 +1,15 @@
+#
+# Copyright (c) 2021-2025 Semgrep Inc.
+#
+# This library is free software; you can redistribute it and/or
+# modify it under the terms of the GNU Lesser General Public License
+# version 2.1 as published by the Free Software Foundation.
+#
+# This library is distributed in the hope that it will be useful, but
+# WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the file
+# LICENSE for more details.
+#
 """
 Tests for semgrep.metrics and associated command-line arguments.
 """
@@ -17,6 +29,7 @@ import pytest
 from pytest import mark
 from pytest import MonkeyPatch
 from tests.conftest import RULES_PATH
+from tests.conftest import skip_on_windows
 from tests.conftest import TARGETS_PATH
 from tests.fixtures import RunSemgrep
 from tests.semgrep_runner import SemgrepRunner
@@ -129,6 +142,7 @@ def mock_config_request(monkeypatch: MonkeyPatch) -> Iterator[None]:
     ],
 )
 @pytest.mark.osemfail
+@skip_on_windows  # freeze
 def test_flags(
     run_semgrep_in_tmp: RunSemgrep,
     mock_config_request,
@@ -147,6 +161,8 @@ def test_flags(
         options=[*options, "--debug"],
         force_metrics_off=False,
         env=env,
+        # Need to use the click runner. Forking will cause the mocks to go away.
+        use_click_runner=True,
     )
     if should_send:
         assert "Sending pseudonymous metrics" in stderr
@@ -158,6 +174,7 @@ def test_flags(
 
 @pytest.mark.kinda_slow
 @pytest.mark.osemfail
+@skip_on_windows  # freeze
 def test_flags_actual_send(run_semgrep_in_tmp: RunSemgrep):
     """
     Test that the server for metrics sends back success
@@ -167,6 +184,7 @@ def test_flags_actual_send(run_semgrep_in_tmp: RunSemgrep):
         options=["--debug"],
         env={"SEMGREP_SEND_METRICS": "on"},
         force_metrics_off=False,
+        use_click_runner=True,
     )
     assert "Sending pseudonymous metrics" in stderr
     assert "Failed to send pseudonymous metrics" not in stderr
@@ -188,6 +206,7 @@ def _mask_digits(value: str) -> str:
 )
 @mark.parametrize("pro_flag", [[]])  # TODO add back test for pro, ["--pro"]])
 @pytest.mark.osemfail
+@skip_on_windows  # tzset is Unix only
 def test_metrics_payload(tmp_path, snapshot, mocker, monkeypatch, pro_flag):
     # make the formatted timestamp strings deterministic
     mocker.patch.object(
@@ -233,6 +252,10 @@ def test_metrics_payload(tmp_path, snapshot, mocker, monkeypatch, pro_flag):
     payload = json.loads(mock_post.call_args.kwargs["data"])
     payload["environment"]["version"] = _mask_digits(payload["environment"]["version"])
     payload["environment"]["isAuthenticated"] = False
+    payload["environment"]["os"] = "<MASKED>"
+    # depends on how the machine running the tests installed semgrep
+    payload["environment"]["installMethod"] = "<MASKED>"
+
     payload["performance"]["maxMemoryBytes"] = _mask_digits(
         str(payload["performance"]["maxMemoryBytes"])
     )

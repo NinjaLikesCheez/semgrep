@@ -1,4 +1,13 @@
-# ## Overview
+# ## Quick start
+#
+# Use https://github.com/DeterminateSystems/nix-installer to get Nix easily
+# then run `nix develop` to get a shell with all the dependencies
+# Run:
+#  curl --proto '=https' --tlsv1.2 -sSf -L https://install.determinate.systems/nix | sh -s -- install
+#  make shell # for a shell with all tools OR
+#  make nix-semgrep # to build semgrep
+#
+#  ## Overview
 #
 # This is a Nix file for Semgrep developers.
 #
@@ -12,35 +21,6 @@
 # https://github.com/NixOS/nixpkgs/tree/master/pkgs/tools/security/semgrep
 # so people can install Semgrep on NixOS.
 # However the current file is directed at Semgrep developers, not Semgrep users.
-#
-# ## Quick install of Nix
-#
-# Use https://github.com/DeterminateSystems/nix-installer to get Nix easily
-# then run `nix develop` to get a shell with all the dependencies
-#
-# Quick start:
-# To use your shell when developing:
-# nix develop -c $SHELL
-#
-# To disallow all deps outside of Nix:
-# nix develop -i
-#
-# Then setup caching (optional, but recommended):
-#
-# Easy way:
-#   nix profile install --accept-flake-config nixpkgs#cachix
-#   cachix use semgrep
-#   cachix use nix-community
-#
-# Harder way:
-#   echo "trusted-users = <USERNAME>" | sudo tee -a /etc/nix/nix.conf && sudo pkill nix-daemon
-#   vim ~/.config/nix/nix.conf
-#   # then add the following lines to nix.conf:
-#   substituters = https://cache.nixos.org https://semgrep.cachix.org https://nix-community.cachix.org
-#   trusted-public-keys = cache.nixos.org-1:6NCHdD59X431o0gWypbMrAURkbJ16ZPMQFGspcDShjY= semgrep.cachix.org-1:waxSNb3ism0Vkmfa31//YYrOC2eMghZmTwy9bvMAGBI= nix-community.cachix.org-1:mB9FSh9qf2dCimDSUo8Zy7bkq5CX+/rkCWyvRCYg3Fs=
-#
-# To contribute to the cache, go to 1password "Semgrep Cachix Auth Token" and run
-#   cachix authtoken <TOKEN>
 #
 
 # What is Nix?
@@ -222,12 +202,10 @@
 #   creator's PhD thesis on Nix. ~275 pages but really approachable
 
 {
-  description =
-    "Semgrep OSS is a fast, open-source, static analysis tool for searching code, finding bugs, and enforcing code standards at editor, commit, and CI time.";
+  description = "Semgrep OSS is a fast, open-source, static analysis tool for searching code, finding bugs, and enforcing code standards at editor, commit, and CI time.";
   nixConfig = {
     extra-substituters = "https://semgrep.cachix.org";
-    extra-trusted-public-keys =
-      "semgrep.cachix.org-1:waxSNb3ism0Vkmfa31//YYrOC2eMghZmTwy9bvMAGBI=";
+    extra-trusted-public-keys = "semgrep.cachix.org-1:waxSNb3ism0Vkmfa31//YYrOC2eMghZmTwy9bvMAGBI=";
     extra-experimental-features = "nix-command flakes";
   };
   inputs = {
@@ -246,18 +224,48 @@
       url = "github:ocaml/opam-repository";
       flake = false;
     };
+    pyproject-nix = {
+      url = "github:pyproject-nix/pyproject.nix";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
+    uv2nix = {
+      url = "github:pyproject-nix/uv2nix";
+      inputs.pyproject-nix.follows = "pyproject-nix";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
+    pyproject-build-systems = {
+      url = "github:pyproject-nix/build-system-pkgs";
+      inputs.pyproject-nix.follows = "pyproject-nix";
+      inputs.uv2nix.follows = "uv2nix";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
   };
-  outputs = inputs@{ self, nixpkgs, flake-parts, opam-nix, opam-repository }:
+  outputs =
+    inputs@{
+      self,
+      nixpkgs,
+      flake-parts,
+      opam-nix,
+      opam-repository,
+      pyproject-nix,
+      uv2nix,
+      pyproject-build-systems,
+    }:
     let
       hasSubmodules = !builtins.hasAttr "submodules" self || self.submodules;
       mkSemgrep = import ./semgrep.nix {
         inherit opam-nix opam-repository hasSubmodules;
       };
       mkPysemgrep = import ./pysemgrep.nix { };
-    in flake-parts.lib.mkFlake { inherit inputs; } {
-      systems =
-        [ "x86_64-linux" "aarch64-linux" "x86_64-darwin" "aarch64-darwin" ];
-      perSystem = { pkgs, system, ... }:
+    in
+    flake-parts.lib.mkFlake { inherit inputs; } {
+      systems = [
+        "x86_64-linux"
+        "aarch64-linux"
+        "aarch64-darwin"
+      ];
+      perSystem =
+        { pkgs, system, ... }:
         # TODO semgrep-js
         # needs new emscripten: https://github.com/NixOS/nixpkgs/issues/306649
         # for the special wasm pass
@@ -265,17 +273,27 @@
           semgrepAttrs = mkSemgrep { inherit pkgs system; };
           semgrep = semgrepAttrs.pkg;
 
-          pysemgrepAttrs = mkPysemgrep { inherit pkgs semgrep; };
+          pysemgrepAttrs = mkPysemgrep {
+            inherit
+              pkgs
+              semgrep
+              uv2nix
+              pyproject-nix
+              pyproject-build-systems
+              ;
+          };
           pysemgrep = pysemgrepAttrs.pkg;
 
-          devShell = pkgs.callPackage ./devShell.nix {
+          devShells = import ./devShells.nix {
             inherit pkgs;
-            extraInputs = (with pkgs; [ pre-commit yq-go ]);
-            # TODO add pysmgrepAttrs when I fix it
-            devAttrs = [ semgrepAttrs ];
+            devAttrs = [
+              semgrepAttrs
+              pysemgrepAttrs
+            ];
           };
 
-        in {
+        in
+        {
           # For a lot of nix commands, nix uses the cwd's flake. So
           #   nix develop
           # will run the current flake. But because semgrep has submodules we have
@@ -304,8 +322,8 @@
           # output will be linked into the cwd in a folder called "result". Also
           # exports packages for other nix packages to use
           packages = {
-            semgrep = semgrep;
-            pysemgrep = pysemgrep;
+            semgrep-core = semgrep;
+            semgrep = pysemgrep;
             default = pysemgrep;
           };
 
@@ -314,10 +332,6 @@
           # result into the cwd. You can try other nixpkgs similarly by running
           # `nix run nixpkgs#<PKG_NAME>` like `nix run nixpkgs#hello_world`.
           apps = {
-            osemgrep = {
-              type = "app";
-              program = "${semgrep}/bin/osemgrep";
-            };
             semgrep-core = {
               type = "app";
               program = "${semgrep}/bin/semgrep-core";
@@ -325,10 +339,6 @@
             semgrep = {
               type = "app";
               program = "${pysemgrep}/bin/semgrep";
-            };
-            pysemgrep = {
-              type = "app";
-              program = "${pysemgrep}/bin/pysemgrep";
             };
             default = {
               type = "app";
@@ -339,9 +349,9 @@
           # makes sure the flake is a valid structure, all the derivations are
           # valid, and runs anyting put in checks
           checks = {
-            # We don't want to force people to run the test suite everytime they
-            # build semgrep, but we do want to run it here, so check doCheck
-            semgrep = semgrep.overrideAttrs (_: { doCheck = true; });
+            semgrep = semgrep.overrideAttrs (_: {
+              doCheck = true;
+            });
           };
 
           #   nix fmt
@@ -350,7 +360,7 @@
           formatter = pkgs.nixpkgs-fmt;
           #   nix develop -c $SHELL
           # runs this shell which has all dependencies needed to make semgrep
-          devShells.default = devShell;
+          devShells = devShells;
         };
     };
 }

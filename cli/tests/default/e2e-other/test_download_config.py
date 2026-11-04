@@ -1,4 +1,17 @@
+#
+# Copyright (c) 2022-2024 Semgrep Inc.
+#
+# This library is free software; you can redistribute it and/or
+# modify it under the terms of the GNU Lesser General Public License
+# version 2.1 as published by the Free Software Foundation.
+#
+# This library is distributed in the hope that it will be useful, but
+# WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the file
+# LICENSE for more details.
+#
 import json
+import re
 from textwrap import dedent
 
 import pytest
@@ -28,7 +41,7 @@ def test_new_feature_registry_config(monkeypatch, snapshot, mocker, tmp_path):
               severity: ERROR
             """
         ).lstrip(),
-        "https://semgrep.dev/p/ci",
+        "https://semgrep.dev/c/p/ci",
     )
     mocker.patch.object(
         ConfigLoader, "_download_config_from_url", return_value=config_file
@@ -55,20 +68,13 @@ def json_callback(request, context):
         deployment_id=1,
         deployment_name="r2c",
     )
-    scan_config = out.ScanConfiguration(rules=out.RawJson(value={"rules": []}))
-    engine_config = out.EngineConfiguration()
-
-    return out.ScanResponse(
-        info=scan_info,
-        config=scan_config,
-        engine_params=engine_config,
-    ).to_json()
+    return out.CreateScanResponseV2(info=scan_info).to_json()
 
 
 @pytest.mark.quick
 @pytest.mark.osemfail
 def test_fallback_config_works(requests_mock, mocker, tmp_path):
-    requests_mock.post("https://semgrep.dev/api/cli/scans", status_code=401)
+    requests_mock.post("https://semgrep.dev/api/cli/v2/scans", status_code=401)
 
     patched_fallback_download = mocker.patch.object(
         ConfigLoader,
@@ -76,7 +82,7 @@ def test_fallback_config_works(requests_mock, mocker, tmp_path):
         return_value=ConfigFile(
             None,
             "rules: []",
-            "https://semgrep.dev/p/ci",
+            "https://semgrep.dev/c/p/ci",
         ),
     )
 
@@ -110,7 +116,15 @@ def test_fallback_config_works(requests_mock, mocker, tmp_path):
 @pytest.mark.quick
 @pytest.mark.osemfail
 def test_cloud_platform_scan_config(requests_mock, cli_option, tmp_path):
-    requests_mock.post("https://semgrep.dev/api/cli/scans", json=json_callback)
+    requests_mock.post("https://semgrep.dev/api/cli/v2/scans", json=json_callback)
+    requests_mock.get(
+        re.compile(r"/api/cli/v2/scans/[^/]+/config"),
+        json={
+            "status": "success",
+            "config": {"rules": {"rules": []}},
+            "engine_params": {},
+        },
+    )
 
     runner = SemgrepRunner(
         env={
@@ -125,3 +139,5 @@ def test_cloud_platform_scan_config(requests_mock, cli_option, tmp_path):
     )
 
     assert "loaded 1 configs" in result.stdout
+    assert requests_mock.request_history[0].json()["scan_metadata"]["dry_run"] is True
+    assert requests_mock.request_history[1].method == "GET"
